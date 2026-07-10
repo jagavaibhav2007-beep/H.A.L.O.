@@ -1,49 +1,75 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useRef, useState } from "react";
 import "./App.css";
+import { useHaloConnection } from "./ipc/useHaloConnection";
+import type { IpcMessage } from "./ipc/contract";
+
+interface ChatLine {
+  id: string;
+  who: "you" | "brain" | "system";
+  text: string;
+}
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [lines, setLines] = useState<ChatLine[]>([]);
+  const [input, setInput] = useState("");
+  const streamingRef = useRef<Map<string, string>>(new Map()); // conversation_id -> in-progress text
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  const onMessage = useCallback((msg: IpcMessage) => {
+    if (msg.type === "token") {
+      const prev = streamingRef.current.get(msg.conversation_id) ?? "";
+      streamingRef.current.set(msg.conversation_id, prev + msg.text);
+    } else if (msg.type === "done") {
+      const text = streamingRef.current.get(msg.conversation_id) ?? "";
+      streamingRef.current.delete(msg.conversation_id);
+      setLines((ls) => [...ls, { id: msg.id, who: "brain", text }]);
+    } else if (msg.type === "error") {
+      setLines((ls) => [...ls, { id: msg.id, who: "system", text: `error: ${msg.message}` }]);
+    }
+    // Other inbound types are out of scope for Phase 0 Step 7.
+  }, []);
+
+  const { connState, sidecarError, sendUserMsg } = useHaloConnection(onMessage);
+
+  function submit() {
+    const text = input.trim();
+    if (!text) return;
+    setLines((ls) => [...ls, { id: crypto.randomUUID(), who: "you", text }]);
+    sendUserMsg(text);
+    setInput("");
   }
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+      <div className="conn-indicator" data-state={connState}>
+        {connState === "connected" && "connected"}
+        {connState === "connecting" && "connecting…"}
+        {connState === "reconnecting" && "reconnecting…"}
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+      {sidecarError && <div className="conn-indicator" data-state="error">Brain failed to start</div>}
+
+      <div className="chat-log">
+        {lines.map((l) => (
+          <div key={l.id} className={`chat-line chat-${l.who}`}>
+            {l.text}
+          </div>
+        ))}
+      </div>
 
       <form
         className="row"
         onSubmit={(e) => {
           e.preventDefault();
-          greet();
+          submit();
         }}
       >
         <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
+          id="chat-input"
+          value={input}
+          onChange={(e) => setInput(e.currentTarget.value)}
+          placeholder="Type a message…"
         />
-        <button type="submit">Greet</button>
+        <button type="submit">Send</button>
       </form>
-      <p>{greetMsg}</p>
     </main>
   );
 }

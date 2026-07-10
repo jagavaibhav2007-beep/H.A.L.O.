@@ -95,6 +95,55 @@ button {
   margin-right: 5px;
 }
 
+.conn-indicator {
+  font-size: 0.8em;
+  padding: 0.2em 0.6em;
+  margin: 0 auto 1em;
+  border-radius: 6px;
+  width: fit-content;
+}
+.conn-indicator[data-state="connected"] {
+  color: #1a7f37;
+}
+.conn-indicator[data-state="reconnecting"],
+.conn-indicator[data-state="connecting"] {
+  color: #b98900;
+}
+.conn-indicator[data-state="error"] {
+  color: #d1242f;
+}
+
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  max-width: 480px;
+  margin: 0 auto 1em;
+  text-align: left;
+}
+.chat-line {
+  padding: 0.4em 0.8em;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.chat-you {
+  align-self: flex-end;
+  background: #dbeafe;
+}
+.chat-system {
+  color: #d1242f;
+  background: transparent;
+}
+
+@media (prefers-color-scheme: dark) {
+  .chat-line {
+    background: #0f0f0f98;
+  }
+  .chat-you {
+    background: #24438a98;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;
