@@ -24,7 +24,6 @@ build/
 
 # Rust / Tauri
 target/
-src-tauri/target/
 
 # Python (Brain / Voice)
 __pycache__/

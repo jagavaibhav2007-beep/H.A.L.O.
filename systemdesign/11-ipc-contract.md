@@ -9,7 +9,7 @@ The canonical WebSocket message schema between the three processes, plus who lau
 - **Supervision:** Tauri watches sidecar exit; restarts with backoff (1s/5s/30s, then surface error state in UI). Brain death → UI "reconnecting", inputs queued locally; Voice buffers the last utterance.
 
 ## Message envelope
-All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid); replies reference `reply_to`.
+All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and is the **message** id; replies reference `reply_to`. Payload fields never reuse the key `id` (a payload `id` would clobber the envelope `id` once flattened) — domain identities get their own name, e.g. `approval_request.approval_id`.
 
 ## Inbound to Brain (from UI or Voice)
 | type | payload | notes |
@@ -17,7 +17,7 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid); rep
 | `hello` | `token` | first frame, both clients |
 | `user_msg` | `text, conversation_id, source:"ui"\|"voice"` | **one shape for both clients** — voice includes conversation_id too |
 | `interrupt` | `conversation_id` | typed **or** spoken "stop" — both clients can send it |
-| `approval_response` | `reply_to (approval_request id), decision:"approve"\|"deny"\|"edit", edited_args?` | closes the Tier-3 round-trip |
+| `approval_response` | `reply_to (approval_request approval_id), decision:"approve"\|"deny"\|"edit", edited_args?` | closes the Tier-3 round-trip |
 | `memory_edit` | `belief_id, op:"edit"\|"delete"\|"restore", text?` | memory panel |
 | `skill_op` | `skill_name, op:"trial"\|"disable"\|"restore"\|"delete"` | skills panel |
 | `lane_pin` | `task_id, lane:1\|2\|3` | user pins a lane |
@@ -30,7 +30,7 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid); rep
 |---|---|---|
 | `token` | `text, conversation_id` | streamed reply tokens |
 | `activity` | `text, narrate:bool, task_id, undoable:bool, undo_token?` | feed events; `narrate:true` → Voice speaks it; **`undoable:false` shown explicitly** (sent email ≠ reversible) |
-| `approval_request` | `id, tool, args_redacted, tier, task_id` | suspends via `interrupt()`; resumed by `approval_response` |
+| `approval_request` | `approval_id, tool, args_redacted, tier, task_id` | suspends via `interrupt()`; resumed by `approval_response` whose `reply_to` = this `approval_id` |
 | `done` | `conversation_id, task_id?` | turn/task complete |
 | `error` | `code, message, recoverable:bool, conversation_id?` | never silently drop a turn |
 | `task_state` | `task_id, state:"running"\|"paused"\|"waiting_approval"\|"done"\|"failed", lane` | tasks panel + lane indicator |

@@ -1,0 +1,27 @@
+{
+  "$comment": "Single source of truth for the Halo IPC message set (systemdesign/11-ipc-contract.md). ui/src/ipc/contract.ts and brain/brain/ipc/contract.py are hand-mirrored from this file. Run `python shared/check_contract_sync.py` after editing either side or this file — it fails the build if the message names / required fields diverge.",
+  "envelope_fields": ["type", "id", "ts"],
+  "messages": {
+    "hello": { "direction": "inbound", "required": ["token"] },
+    "user_msg": { "direction": "inbound", "required": ["text", "conversation_id", "source"] },
+    "interrupt": { "direction": "inbound", "required": ["conversation_id"] },
+    "approval_response": { "direction": "inbound", "required": ["reply_to", "decision"] },
+    "memory_edit": { "direction": "inbound", "required": ["belief_id", "op"] },
+    "skill_op": { "direction": "inbound", "required": ["skill_name", "op"] },
+    "lane_pin": { "direction": "inbound", "required": ["task_id", "lane"] },
+    "task_op": { "direction": "inbound", "required": ["op"] },
+    "mic": { "direction": "inbound", "required": ["op"] },
+    "settings_update": { "direction": "inbound", "required": ["key", "value"] },
+
+    "token": { "direction": "outbound", "required": ["text", "conversation_id"] },
+    "activity": { "direction": "outbound", "required": ["text", "narrate", "task_id", "undoable"] },
+    "approval_request": { "direction": "outbound", "required": ["approval_id", "tool", "args_redacted", "tier", "task_id"] },
+    "done": { "direction": "outbound", "required": ["conversation_id"] },
+    "error": { "direction": "outbound", "required": ["code", "message", "recoverable"] },
+    "task_state": { "direction": "outbound", "required": ["task_id", "state", "lane"] },
+    "stream_frame": { "direction": "outbound", "required": ["task_id", "jpeg_b64", "seq"] },
+    "voice_state": { "direction": "outbound", "required": ["state"] },
+    "transcript": { "direction": "outbound", "required": ["text", "final", "conversation_id"] },
+    "spend_update": { "direction": "outbound", "required": ["session_usd", "month_usd"] }
+  }
+}

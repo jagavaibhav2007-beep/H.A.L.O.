@@ -1,0 +1,13 @@
+[project]
+name = "halo-brain"
+version = "0.1.0"
+description = "H.A.L.O. Brain process — Python/LangGraph agent loop, WS server."
+requires-python = ">=3.11"
+dependencies = ["websockets>=14"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["brain*"]
