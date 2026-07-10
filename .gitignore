@@ -1,0 +1,38 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+*secret*
+*.key
+*.pem
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Node / React (UI)
+node_modules/
+dist/
+build/
+
+# Rust / Tauri
+target/
+src-tauri/target/
+
+# Python (Brain / Voice)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local data (memory, logs, keys) — never leaves the machine per PRD
+*.sqlite
+*.sqlite3
+activity-log/
