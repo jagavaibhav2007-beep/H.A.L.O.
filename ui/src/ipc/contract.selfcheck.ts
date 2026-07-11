@@ -31,5 +31,13 @@ expectRejected(
   { type: "user_msg", id: "x", ts: "x", text: "hi" },
   "missing required fields",
 );
+expectRejected(
+  { ...sample, conversation_id: [] },
+  "invalid Phase 0 field type",
+);
+expectRejected(
+  { ...sample, source: "other" },
+  "invalid user_msg source",
+);
 
 console.log("[contract.selfcheck.ts] self-check OK");

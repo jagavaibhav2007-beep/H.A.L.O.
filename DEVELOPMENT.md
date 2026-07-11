@@ -11,7 +11,9 @@ voice/   Python package (voice/__main__.py) — Pipecat audio sidecar
 shared/  IPC contract source of truth (JSON descriptor) + the TS/Python drift check
 ```
 
-Phase 0 only has empty-shell processes and the shared contract types — no real WS server, auth, or UI wiring yet (that's Steps 3+ in [phase-0-plan.md](phase-0-plan.md)).
+Phase 0 is complete: Tauri supervises the two Python workers, clients authenticate over loopback WebSockets, and the minimal UI completes a stub chat round trip.
+
+Brain uses an OS-level lock to prevent multiple instances from competing for `session.json`. After sending `hello`, UI and Voice wait for `hello_ack` before sending application messages.
 
 ## Prerequisites
 
@@ -27,18 +29,18 @@ cd ui; npm install; npm run tauri dev
 # or, without Rust, just the web layer in a browser tab:
 cd ui; npm run dev
 
-# Brain (Phase 0: starts, prints a line, exits)
+# Brain (starts the authenticated WebSocket server)
 cd brain; python -m brain
 
-# Voice (Phase 0: starts, prints a line, exits)
+# Voice (connects, authenticates, and idles)
 cd voice; python -m voice
 ```
 
 ## Running all three together
 
 ```powershell
-./dev.ps1          # launches brain, voice, ui each in their own window
-./dev.ps1 -Only ui # launch just one
+./dev.ps1             # launches Tauri; Tauri starts and supervises Brain + Voice
+./dev.ps1 -Only brain # standalone worker debugging (brain | voice | ui)
 ```
 
 ## Shared IPC contract
@@ -51,13 +53,14 @@ python shared/check_contract_sync.py
 
 This fails if the TS and Python type sets (message names + required fields) don't match the schema. Run it whenever either side's contract file changes.
 
-`voice/` will import the same contract module from `brain` (`brain.ipc.contract`) once it needs it — in dev that means `pip install -e ../brain` from `voice/`'s environment. Not wired up in Phase 0 since voice has no runtime logic yet.
+`voice/` imports the same contract module from `brain` (`brain.ipc.contract`), so install Brain into Voice's environment with `pip install -e ../brain`.
 
 Self-checks (round-trip a `user_msg`, confirm unknown/malformed frames are rejected):
 
 ```powershell
 python -m brain.ipc.contract          # from brain/
 node ui/src/ipc/contract.selfcheck.ts # from repo root
+node ui/src/ipc/queue.selfcheck.ts    # from repo root
 ```
 
 ## Phase 0 smoke test
@@ -78,4 +81,4 @@ Prints a `PASS`/`FAIL` line per criterion plus a summary, and exits non-zero if 
 
 The smoke test's criterion 2 (kill Brain → respawn on a new port → reconnect) proves the *protocol* contract that makes that manual recovery correct — a client that re-reads `session.json` fresh, never caching a port, exactly like `ui/src/ipc/useHaloConnection.ts`'s `connect()`.
 
-Note: the test calls the real `write_session_file()`, so it overwrites your actual `%LOCALAPPDATA%\Halo\session.json` while it runs — don't run it at the same time as a real Brain you care about the session state of.
+The smoke test writes its reconnect fixture to a temporary session file and does not overwrite the live `%LOCALAPPDATA%\Halo\session.json`.

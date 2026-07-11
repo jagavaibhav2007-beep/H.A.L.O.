@@ -1,12 +1,13 @@
 // Phase 0 Step 7 — WS client hook: transport only, no business logic.
 // Re-reads session.json on every (re)connect (Brain can respawn on a new
-// port), sends `hello` first with no ack expected, queues outbound messages
-// while disconnected, and reconnects on close. Spec: phase-0-plan.md Step 7.
+// port), waits for `hello_ack`, queues outbound messages until authenticated,
+// and reconnects on close. Spec: phase-0-plan.md Step 7.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { parseIpcMessage, type IpcMessage, type UserMsg } from "./contract";
+import { flushQueuedMessages, sendOrQueue } from "./queue";
 
 interface Session {
   port: number;
@@ -19,6 +20,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const [connState, setConnState] = useState<ConnState>("connecting");
   const [sidecarError, setSidecarError] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const authenticatedRef = useRef(false);
   const queueRef = useRef<UserMsg[]>([]);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
@@ -37,6 +39,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
         .then((session) => {
           if (torndown) return;
           const ws = new WebSocket(`ws://127.0.0.1:${session.port}`);
+          authenticatedRef.current = false;
           wsRef.current = ws;
 
           ws.onopen = () => {
@@ -47,26 +50,40 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
               ts: new Date().toISOString(),
               token: session.token,
             };
-            parseIpcMessage(hello);
-            ws.send(JSON.stringify(hello));
-            // ponytail: no auth ack exists (server.py _auth is silent on
-            // success) — proceed optimistically and flush the queue.
-            setConnState("connected");
-            const queued = queueRef.current;
-            queueRef.current = [];
-            for (const msg of queued) ws.send(JSON.stringify(msg));
+            try {
+              parseIpcMessage(hello);
+              ws.send(JSON.stringify(hello));
+            } catch (error) {
+              console.error("halo: send failed while connecting", error);
+              ws.close();
+            }
           };
 
           ws.onmessage = (ev) => {
             try {
-              onMessageRef.current(parseIpcMessage(JSON.parse(ev.data)));
+              const message = parseIpcMessage(JSON.parse(ev.data));
+              if (message.type === "hello_ack") {
+                if (authenticatedRef.current) return;
+                flushQueuedMessages(ws, queueRef.current);
+                authenticatedRef.current = true;
+                setConnState("connected");
+                return;
+              }
+              if (!authenticatedRef.current) {
+                throw new Error(`received ${message.type} before hello_ack`);
+              }
+              onMessageRef.current(message);
             } catch (e) {
               console.error("halo: dropping bad inbound frame", e);
+              ws.close();
             }
           };
 
           ws.onclose = () => {
-            if (wsRef.current === ws) wsRef.current = null;
+            if (wsRef.current === ws) {
+              wsRef.current = null;
+              authenticatedRef.current = false;
+            }
             if (torndown) return;
             setConnState("reconnecting");
             // ponytail: fixed ~1s retry; the real backoff ladder (1s/5s/30s)
@@ -102,6 +119,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
         ws.onopen = null;
         ws.close(); // safe to call while CONNECTING too
         wsRef.current = null;
+        authenticatedRef.current = false;
       }
     };
   }, []);
@@ -117,10 +135,13 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     };
     parseIpcMessage(msg);
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
-    } else {
-      queueRef.current.push(msg); // flushed on next successful hello
+    const openSocket = ws?.readyState === WebSocket.OPEN ? ws : null;
+    try {
+      if (sendOrQueue(openSocket, authenticatedRef.current, msg, queueRef.current)) return;
+    } catch (error) {
+      console.error("halo: send failed, queueing for reconnect", error);
+      ws?.close();
+      queueRef.current.push(msg);
     }
   }, []);
 

@@ -32,6 +32,7 @@ SESSION_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Halo"
 SESSION_FILE = SESSION_DIR / "session.json"
 
 HEARTBEAT_SECS = 30
+AUTH_TIMEOUT_SECS = 5
 
 
 def _hello_frame(token: str) -> dict:
@@ -45,11 +46,24 @@ def _hello_frame(token: str) -> dict:
     return frame
 
 
+def _parse_hello_ack(raw: str | bytes) -> dict:
+    frame = parse_ipc_message(json.loads(raw))
+    if frame["type"] != "hello_ack":
+        raise ValueError(f"expected hello_ack, got {frame['type']}")
+    return frame
+
+
 async def run(uri: str, token: str) -> None:
     """Connect, authenticate, then idle-heartbeat until the Brain disconnects."""
     async with connect(uri) as ws:
         await ws.send(json.dumps(_hello_frame(token)))
         logger.info("connected to brain at %s, hello sent", uri)
+        try:
+            _parse_hello_ack(await asyncio.wait_for(ws.recv(), timeout=AUTH_TIMEOUT_SECS))
+        except (TimeoutError, ValueError, websockets.exceptions.ConnectionClosed):
+            logger.info("brain authentication failed, exiting cleanly")
+            return
+        logger.info("brain authentication acknowledged")
 
         while True:
             try:
@@ -65,16 +79,21 @@ async def run(uri: str, token: str) -> None:
                 return
 
 
-def _read_session() -> tuple[int, str]:
-    data = json.loads(SESSION_FILE.read_text())
-    return data["port"], data["token"]
+def _read_session(session_file: Path = SESSION_FILE) -> tuple[int, str]:
+    data = json.loads(session_file.read_text(encoding="utf-8"))
+    port, token = data["port"], data["token"]
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 < port <= 65535:
+        raise ValueError("session port must be an integer from 1 to 65535")
+    if not isinstance(token, str) or not token:
+        raise ValueError("session token must be a non-empty string")
+    return port, token
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[voice] %(message)s")
     try:
         port, token = _read_session()
-    except (FileNotFoundError, KeyError, json.JSONDecodeError):
+    except (OSError, KeyError, TypeError, ValueError):
         logger.error("could not read session.json at %s -- is brain running?", SESSION_FILE)
         return
 

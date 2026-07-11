@@ -5,7 +5,7 @@ The walking-skeleton plumbing from [phases.md](phases.md#phase-0--skeleton--cont
 **Phase exit criteria (the whole phase is done when):**
 1. UI sends a `user_msg` over an authenticated WS; a stub Brain streams back `token`(s) + `done`.
 2. Killing the Brain process → UI shows "reconnecting", queues input; Tauri restarts Brain (1s/5s/30s backoff) and it reconnects.
-3. A wrong/missing `hello` token is dropped by the Brain.
+3. A wrong/missing `hello` token is dropped by the Brain; valid authentication returns `hello_ack` before clients flush application messages.
 4. Voice sidecar connects and idles (no audio yet).
 
 **Stack (from [techstack/](techstack/00-stack-summary.md)):** Tauri (Rust) + React/TypeScript UI · Python Brain + Voice sidecars · local-loopback WebSocket. Packaging sidecars (PyInstaller) is deferred — Phase 0 runs them from source in dev.
@@ -28,7 +28,7 @@ The walking-skeleton plumbing from [phases.md](phases.md#phase-0--skeleton--cont
 
 **Intent:** Encode the message envelope (`{type,id,ts,...}`), the inbound-to-Brain table, and the outbound-from-Brain table from [11-ipc-contract](systemdesign/11-ipc-contract.md) as typed definitions the UI and Brain both import. One authoritative source, mirrored to both languages (TS types + Python dataclasses/TypedDicts), so message shapes can't drift between processes.
 
-**Deliverables:** TS types for every `type` in the inbound/outbound tables; matching Python types; a tiny validator on each side that rejects unknown/malformed frames. Only the Phase-0 subset needs runtime use (`hello`, `user_msg`, `token`, `done`, `error`), but the full envelope is typed.
+**Deliverables:** TS types for every `type` in the inbound/outbound tables; matching Python types; a tiny validator on each side that rejects unknown/malformed frames. Only the Phase-0 subset needs runtime use (`hello`, `hello_ack`, `user_msg`, `token`, `done`, `error`), but the full envelope is typed.
 
 **Acceptance:** a `user_msg` built in TS deserializes to the Python type and back with identical fields; unknown `type` is rejected by both validators; the two definitions are provably in sync (shared schema or a check that fails on drift).
 
@@ -36,11 +36,11 @@ The walking-skeleton plumbing from [phases.md](phases.md#phase-0--skeleton--cont
 
 ## Step 3 — Brain: WS server, session handshake & auth
 
-**Intent:** Stand up the Brain's WebSocket server on a random free loopback port, write `{port, token}` to `%LOCALAPPDATA%\Halo\session.json` (user-only perms), and enforce the auth handshake: every connection's first frame must be `{type:"hello", token}` matching the session token — wrong or missing token drops the connection. This is the security choke point that makes the later permission gate meaningful.
+**Intent:** Stand up one Brain WebSocket server on a random free loopback port, write `{port, token}` to `%LOCALAPPDATA%\Halo\session.json` (user-only perms), and enforce the auth handshake: every connection's first frame must be `{type:"hello", token}` matching the session token — wrong or missing token drops the connection, while success returns `hello_ack`. This is the security choke point that makes the later permission gate meaningful.
 
-**Deliverables:** loopback-only WS server, no hard-coded port; `session.json` written atomically with user-only file permissions; `hello`-token gate on connect; clean logging of dropped connections.
+**Deliverables:** loopback-only WS server, no hard-coded port; crash-safe single-instance lock; `session.json` written atomically with user-only file permissions; `hello`/`hello_ack` token gate; clean logging of dropped connections.
 
-**Acceptance:** server binds a random port each run; a client with the correct token from `session.json` connects; a client with a wrong/absent token is dropped before any other frame is processed; `session.json` is not world-readable.
+**Acceptance:** server binds a random port each run; a client with the correct token receives `hello_ack`; application frames remain queued until that acknowledgement; a client with a wrong/absent token is dropped before any other frame is processed; a second Brain cannot compete for `session.json`; `session.json` is not world-readable.
 **Out of scope:** token rotation, TLS (loopback only), multi-user.
 
 ---

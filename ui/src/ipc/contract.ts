@@ -74,6 +74,10 @@ export interface SettingsUpdateMsg extends IpcEnvelope {
 
 // ---- Outbound from Brain (to UI; Voice receives the subset it speaks) ----
 
+export interface HelloAckMsg extends IpcEnvelope {
+  type: "hello_ack";
+}
+
 export interface TokenMsg extends IpcEnvelope {
   type: "token";
   text: string;
@@ -157,6 +161,7 @@ export type IpcMessage =
   | TaskOpMsg
   | MicMsg
   | SettingsUpdateMsg
+  | HelloAckMsg
   | TokenMsg
   | ActivityMsg
   | ApprovalRequestMsg
@@ -183,6 +188,7 @@ export const REQUIRED_FIELDS: Record<MsgType, readonly string[]> = {
   task_op: ["op"],
   mic: ["op"],
   settings_update: ["key", "value"],
+  hello_ack: [],
   token: ["text", "conversation_id"],
   activity: ["text", "narrate", "task_id", "undoable"],
   approval_request: ["approval_id", "tool", "args_redacted", "tier", "task_id"],
@@ -196,6 +202,13 @@ export const REQUIRED_FIELDS: Record<MsgType, readonly string[]> = {
 };
 
 const KNOWN_TYPES = new Set(Object.keys(REQUIRED_FIELDS));
+const PHASE0_STRING_FIELDS: Partial<Record<MsgType, readonly string[]>> = {
+  hello: ["token"],
+  user_msg: ["text", "conversation_id", "source"],
+  token: ["text", "conversation_id"],
+  done: ["conversation_id"],
+  error: ["code", "message"],
+};
 
 /** Validate an arbitrary decoded-JSON frame against the contract. Throws on
  * an unknown `type` or a missing required field — never returns a partial
@@ -216,6 +229,20 @@ export function parseIpcMessage(raw: unknown): IpcMessage {
     if (!(field in obj)) {
       throw new Error(`ipc: "${type}" missing required field "${field}"`);
     }
+  }
+  for (const field of PHASE0_STRING_FIELDS[type as MsgType] ?? []) {
+    if (typeof obj[field] !== "string") {
+      throw new Error(`ipc: "${type}" field "${field}" must be a string`);
+    }
+  }
+  if (type === "user_msg" && obj.source !== "ui" && obj.source !== "voice") {
+    throw new Error('ipc: "user_msg" field "source" must be "ui" or "voice"');
+  }
+  if (type === "error" && typeof obj.recoverable !== "boolean") {
+    throw new Error('ipc: "error" field "recoverable" must be a boolean');
+  }
+  if (type === "error" && "conversation_id" in obj && typeof obj.conversation_id !== "string") {
+    throw new Error('ipc: "error" field "conversation_id" must be a string');
   }
   return obj as unknown as IpcMessage;
 }

@@ -65,6 +65,18 @@ fn voice_cmd() -> Command {
     cmd
 }
 
+fn publish_child(shared: &Shared, shutdown: &AtomicBool, mut child: Child) -> bool {
+    let mut guard = shared.lock().unwrap();
+    if shutdown.load(Ordering::SeqCst) {
+        drop(guard);
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    }
+    *guard = Some(child);
+    true
+}
+
 /// Runs the spawn/watch/backoff loop for one sidecar on a background thread.
 /// Exits the loop (no more restarts) once the flag is set or the backoff
 /// ladder is exhausted (the latter emits a persistent `"error"` state first).
@@ -100,7 +112,9 @@ fn supervise(
                     }
                 }
             };
-            *shared.lock().unwrap() = Some(child);
+            if !publish_child(&shared, &shutdown, child) {
+                return;
+            }
             emit_state(&app, name, "running");
             let start = Instant::now();
 
@@ -194,5 +208,18 @@ mod tests {
         assert_eq!(backoff_delay(2), Some(Duration::from_secs(30)));
         assert_eq!(backoff_delay(3), None);
         assert_eq!(backoff_delay(100), None);
+    }
+
+    #[test]
+    fn child_spawned_during_shutdown_is_reaped_not_published() {
+        let shared: Shared = Arc::new(Mutex::new(None));
+        let shutdown = AtomicBool::new(true);
+        let child = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .spawn()
+            .unwrap();
+
+        assert!(!publish_child(&shared, &shutdown, child));
+        assert!(shared.lock().unwrap().is_none());
     }
 }

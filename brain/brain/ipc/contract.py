@@ -11,7 +11,7 @@ Importable by both `brain` and `voice` (voice installs brain in dev via
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict, Union
+from typing import Literal, NotRequired, TypedDict, Union
 
 
 class IpcEnvelope(TypedDict):
@@ -37,16 +37,16 @@ class InterruptMsg(IpcEnvelope):
     conversation_id: str
 
 
-class ApprovalResponseMsg(IpcEnvelope, total=False):
+class ApprovalResponseMsg(IpcEnvelope):
     reply_to: str
     decision: Literal["approve", "deny", "edit"]
-    edited_args: object
+    edited_args: NotRequired[object]
 
 
-class MemoryEditMsg(IpcEnvelope, total=False):
+class MemoryEditMsg(IpcEnvelope):
     belief_id: str
     op: Literal["edit", "delete", "restore"]
-    text: str
+    text: NotRequired[str]
 
 
 class SkillOpMsg(IpcEnvelope):
@@ -59,8 +59,8 @@ class LanePinMsg(IpcEnvelope):
     lane: Literal[1, 2, 3]
 
 
-class TaskOpMsg(IpcEnvelope, total=False):
-    task_id: str
+class TaskOpMsg(IpcEnvelope):
+    task_id: NotRequired[str]
     op: Literal["pause", "resume", "stop"]
 
 
@@ -76,17 +76,21 @@ class SettingsUpdateMsg(IpcEnvelope):
 # ---- Outbound from Brain (to UI; Voice receives the subset it speaks) ----
 
 
+class HelloAckMsg(IpcEnvelope):
+    pass
+
+
 class TokenMsg(IpcEnvelope):
     text: str
     conversation_id: str
 
 
-class ActivityMsg(IpcEnvelope, total=False):
+class ActivityMsg(IpcEnvelope):
     text: str
     narrate: bool
     task_id: str
     undoable: bool
-    undo_token: str
+    undo_token: NotRequired[str]
 
 
 class ApprovalRequestMsg(IpcEnvelope):
@@ -99,16 +103,16 @@ class ApprovalRequestMsg(IpcEnvelope):
     task_id: str
 
 
-class DoneMsg(IpcEnvelope, total=False):
+class DoneMsg(IpcEnvelope):
     conversation_id: str
-    task_id: str
+    task_id: NotRequired[str]
 
 
-class ErrorMsg(IpcEnvelope, total=False):
+class ErrorMsg(IpcEnvelope):
     code: str
     message: str
     recoverable: bool
-    conversation_id: str
+    conversation_id: NotRequired[str]
 
 
 class TaskStateMsg(IpcEnvelope):
@@ -149,6 +153,7 @@ IpcMessage = Union[
     TaskOpMsg,
     MicMsg,
     SettingsUpdateMsg,
+    HelloAckMsg,
     TokenMsg,
     ActivityMsg,
     ApprovalRequestMsg,
@@ -174,6 +179,7 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "task_op": ("op",),
     "mic": ("op",),
     "settings_update": ("key", "value"),
+    "hello_ack": (),
     "token": ("text", "conversation_id"),
     "activity": ("text", "narrate", "task_id", "undoable"),
     "approval_request": ("approval_id", "tool", "args_redacted", "tier", "task_id"),
@@ -184,6 +190,14 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "voice_state": ("state",),
     "transcript": ("text", "final", "conversation_id"),
     "spend_update": ("session_usd", "month_usd"),
+}
+
+_PHASE0_STRING_FIELDS = {
+    "hello": ("token",),
+    "user_msg": ("text", "conversation_id", "source"),
+    "token": ("text", "conversation_id"),
+    "done": ("conversation_id",),
+    "error": ("code", "message"),
 }
 
 
@@ -212,6 +226,19 @@ def parse_ipc_message(raw: object) -> IpcMessage:
             raise IpcValidationError(
                 f'ipc: "{msg_type}" missing required field "{field}"'
             )
+
+    for field in _PHASE0_STRING_FIELDS.get(msg_type, ()):
+        if not isinstance(raw[field], str):
+            raise IpcValidationError(
+                f'ipc: "{msg_type}" field "{field}" must be a string'
+            )
+
+    if msg_type == "user_msg" and raw["source"] not in {"ui", "voice"}:
+        raise IpcValidationError('ipc: "user_msg" field "source" must be "ui" or "voice"')
+    if msg_type == "error" and not isinstance(raw["recoverable"], bool):
+        raise IpcValidationError('ipc: "error" field "recoverable" must be a boolean')
+    if msg_type == "error" and "conversation_id" in raw and not isinstance(raw["conversation_id"], str):
+        raise IpcValidationError('ipc: "error" field "conversation_id" must be a string')
 
     return raw  # type: ignore[return-value]
 

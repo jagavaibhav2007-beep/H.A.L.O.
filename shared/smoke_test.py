@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,29 +70,27 @@ async def check_criterion_2_reconnect_new_port() -> None:
     re-reads session.json fresh (never the cached port_a/token_a) must reach
     B and complete a turn.
     """
-    server_a, token_a = await start(port=0)
-    port_a = server_a.sockets[0].getsockname()[1]
-    write_session_file(port_a, token_a)
-    await test_server.check_good_token_echo(port_a, token_a)  # server A works
+    with tempfile.TemporaryDirectory() as tmp:
+        session_file = Path(tmp) / "session.json"
+        server_a, token_a = await start(port=0)
+        port_a = server_a.sockets[0].getsockname()[1]
+        write_session_file(port_a, token_a, session_file)
+        await test_server.check_good_token_echo(port_a, token_a)
 
-    server_a.close()
-    await server_a.wait_closed()  # simulates Brain process death
+        server_a.close()
+        await server_a.wait_closed()
 
-    server_b, token_b = await start(port=0)  # respawned Brain, new port
-    try:
-        port_b = server_b.sockets[0].getsockname()[1]
-        assert port_b != port_a, "test invalid: new server bound the same port"
-        write_session_file(port_b, token_b)
-
-        # Fresh client: re-reads session.json off disk, exactly like
-        # useHaloConnection.ts's connect() -- never reuses port_a/token_a.
-        read_port, read_token = _read_session()
-        assert (read_port, read_token) == (port_b, token_b), "session.json not rewritten to new port/token"
-
-        await test_server.check_good_token_echo(read_port, read_token)
-    finally:
-        server_b.close()
-        await server_b.wait_closed()
+        server_b, token_b = await start(port=0)
+        try:
+            port_b = server_b.sockets[0].getsockname()[1]
+            assert port_b != port_a, "test invalid: new server bound the same port"
+            write_session_file(port_b, token_b, session_file)
+            read_port, read_token = _read_session(session_file)
+            assert (read_port, read_token) == (port_b, token_b), "session.json not rewritten to new port/token"
+            await test_server.check_good_token_echo(read_port, read_token)
+        finally:
+            server_b.close()
+            await server_b.wait_closed()
     print(
         "[check 2] Brain killed -> respawned on new port -> fresh session.json "
         "read -> reconnect+turn succeeds: OK"

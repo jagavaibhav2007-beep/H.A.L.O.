@@ -3,12 +3,6 @@ mod supervisor;
 use serde::{Deserialize, Serialize};
 use supervisor::Sidecars;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 #[derive(Serialize, Deserialize)]
 struct Session {
     port: u16,
@@ -31,8 +25,7 @@ pub fn run() {
     let sidecars = std::sync::Arc::new(Sidecars::new());
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, read_session])
+        .invoke_handler(tauri::generate_handler![read_session])
         .setup({
             let sidecars = sidecars.clone();
             move |app| {

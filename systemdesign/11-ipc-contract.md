@@ -5,7 +5,7 @@ The canonical WebSocket message schema between the three processes, plus who lau
 ## Process lifecycle
 - **Tauri (UI process) is the parent.** On app start it spawns Brain and Voice as **sidecar processes** (packaged Python — PyInstaller or equivalent; a build-time concern, noted in [techstack/00](../techstack/00-stack-summary.md)).
 - **Port:** Brain binds a random free loopback port and writes `{port, token}` to a user-only file (`%LOCALAPPDATA%\Halo\session.json`). UI and Voice read it to connect. No hard-coded ports.
-- **Auth:** every WS connection's first frame is `{type:"hello", token}` — the per-session random token from that file. Wrong/missing token → connection dropped. This closes the "any local process can drive the Brain or approve its own Tier-3 gates" hole; the permission gate is only a real choke point if the transport is authenticated.
+- **Auth:** every WS connection's first frame is `{type:"hello", token}` — the per-session random token from that file. Wrong/missing token → connection dropped; success → Brain sends `hello_ack`. Clients must not send or flush application messages until that acknowledgement arrives. This closes the "any local process can drive the Brain or approve its own Tier-3 gates" hole; the permission gate is only a real choke point if the transport is authenticated.
 - **Supervision:** Tauri watches sidecar exit; restarts with backoff (1s/5s/30s, then surface error state in UI). Brain death → UI "reconnecting", inputs queued locally; Voice buffers the last utterance.
 
 ## Message envelope
@@ -28,6 +28,7 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and 
 ## Outbound from Brain (to UI; Voice receives the subset it speaks)
 | type | payload | notes |
 |---|---|---|
+| `hello_ack` | none | confirms the connection is authenticated; clients may now flush queued application messages |
 | `token` | `text, conversation_id` | streamed reply tokens |
 | `activity` | `text, narrate:bool, task_id, undoable:bool, undo_token?` | feed events; `narrate:true` → Voice speaks it; **`undoable:false` shown explicitly** (sent email ≠ reversible) |
 | `approval_request` | `approval_id, tool, args_redacted, tier, task_id` | suspends via `interrupt()`; resumed by `approval_response` whose `reply_to` = this `approval_id` |
@@ -43,7 +44,7 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and 
 - **One LangGraph thread per `conversation_id`; turns are serialized per thread** (a queue). Voice and chat share the conversation they address — a voice utterance and a typed message to the same conversation queue in arrival order; different conversations run concurrently.
 - `interrupt` targets its conversation's running turn only.
 - **Interrupt vs pending approval:** if the conversation is in `waiting_approval` when `interrupt` arrives, the pending `approval_request` is **cancelled (implicit deny)** first, then the turn suspends. A stale approval card can never resume a task the user already stopped; the UI removes the card on the resulting `task_state: paused`.
-- **Routing:** the Brain routes per client — Voice is sent only `token`, `activity(narrate:true)`, and `approval_request`; the UI gets everything. Clients never filter a firehose.
+- **Routing:** every client receives transport-level `hello_ack`; after that, Voice is sent only `token`, `activity(narrate:true)`, and `approval_request`, while the UI gets everything. Clients never filter a firehose.
 
 ## Cancellation ("stop" semantics)
 - Between graph nodes: LangGraph `interrupt()` — clean suspend at last checkpoint.

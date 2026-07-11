@@ -13,6 +13,7 @@
     "mic": { "direction": "inbound", "required": ["op"] },
     "settings_update": { "direction": "inbound", "required": ["key", "value"] },
 
+    "hello_ack": { "direction": "outbound", "required": [] },
     "token": { "direction": "outbound", "required": ["text", "conversation_id"] },
     "activity": { "direction": "outbound", "required": ["text", "narrate", "task_id", "undoable"] },
     "approval_request": { "direction": "outbound", "required": ["approval_id", "tool", "args_redacted", "tier", "task_id"] },

@@ -1,5 +1,5 @@
-# Launches all three Halo Phase-0 processes for local dev.
-# Each runs in its own PowerShell window so logs stay readable.
+# Launches Halo Phase 0 for local development. Tauri owns and supervises
+# Brain and Voice; the standalone options are for worker-only debugging.
 # Usage: ./dev.ps1  (or ./dev.ps1 -Only brain|voice|ui to launch just one)
 #        ./dev.ps1 -Smoke  runs the Phase 0 exit-criteria smoke test in-place
 #        (no windows spawned) instead of launching the dev processes.
@@ -34,5 +34,5 @@ switch ($Only) {
     "ui"    { Start-Ui }
     "brain" { Start-Brain }
     "voice" { Start-Voice }
-    "all"   { Start-Brain; Start-Voice; Start-Ui }
+    "all"   { Start-Ui }
 }
