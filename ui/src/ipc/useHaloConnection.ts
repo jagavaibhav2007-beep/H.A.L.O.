@@ -49,6 +49,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
               id: crypto.randomUUID(),
               ts: new Date().toISOString(),
               token: session.token,
+              role: "ui" as const, // gets the full stream (11-ipc-contract.md routing)
             };
             try {
               parseIpcMessage(hello);

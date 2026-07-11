@@ -28,3 +28,8 @@ _Architectural, structural, and system design choices._
 **What:** Brain holds an OS file lock on `%LOCALAPPDATA%\Halo\brain.lock` for its process lifetime.
 **Why:** prevents manually launched or duplicated Brain processes from racing to own `session.json`; OS locks release automatically after crashes so Tauri can restart Brain.
 **Trade-off:** a second Brain exits immediately instead of running independently under the same OS account.
+
+## Panel data as snapshot-on-connect + delta-on-change — 2026-07-11
+**What:** Memory and Skills panels are fed by outbound `belief_state`/`skill_state` frames (Phase 1 Step 1), pushed as a full snapshot after `hello_ack` and again as single deltas when one item changes — the same pattern `task_state` already uses. The UI stores them as idempotent upserts keyed by `belief_id`/`skill_name`.
+**Why:** a reconnecting or second client (orb + workspace both connect) must be able to rebuild full panel state from the event stream alone, with no separate query API; id-keyed upserts make snapshot re-pushes converge instead of duplicating.
+**Trade-off:** the Brain re-sends all beliefs/skills on every connect (fine at Halo's single-user scale; a paged fetch is the upgrade path if the belief count ever gets large).

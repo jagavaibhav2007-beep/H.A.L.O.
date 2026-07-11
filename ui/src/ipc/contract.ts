@@ -15,6 +15,7 @@ export interface IpcEnvelope {
 export interface HelloMsg extends IpcEnvelope {
   type: "hello";
   token: string;
+  role?: "ui" | "voice"; // absent -> "ui" (full stream); Voice opts into its subset
 }
 
 export interface UserMsg extends IpcEnvelope {
@@ -72,6 +73,11 @@ export interface SettingsUpdateMsg extends IpcEnvelope {
   value: unknown;
 }
 
+export interface UndoMsg extends IpcEnvelope {
+  type: "undo";
+  undo_token: string;
+}
+
 // ---- Outbound from Brain (to UI; Voice receives the subset it speaks) ----
 
 export interface HelloAckMsg extends IpcEnvelope {
@@ -91,6 +97,8 @@ export interface ActivityMsg extends IpcEnvelope {
   task_id: string;
   undoable: boolean;
   undo_token?: string;
+  tier?: 1 | 2 | 3;
+  lane?: 1 | 2 | 3;
 }
 
 export interface ApprovalRequestMsg extends IpcEnvelope {
@@ -102,6 +110,8 @@ export interface ApprovalRequestMsg extends IpcEnvelope {
   args_redacted: unknown;
   tier: 1 | 2 | 3;
   task_id: string;
+  summary?: string;
+  destructive?: boolean;
 }
 
 export interface DoneMsg extends IpcEnvelope {
@@ -123,6 +133,11 @@ export interface TaskStateMsg extends IpcEnvelope {
   task_id: string;
   state: "running" | "paused" | "waiting_approval" | "done" | "failed";
   lane: 1 | 2 | 3;
+  title?: string;
+  step?: number;
+  steps_total?: number;
+  step_label?: string;
+  reason?: string;
 }
 
 export interface StreamFrameMsg extends IpcEnvelope {
@@ -150,6 +165,30 @@ export interface SpendUpdateMsg extends IpcEnvelope {
   month_usd: number;
 }
 
+export interface BeliefStateMsg extends IpcEnvelope {
+  type: "belief_state";
+  belief_id: string;
+  text: string;
+  kind: "preference" | "project" | "workflow" | "decision" | "lesson";
+  provenance: "user" | "inferred";
+  salience: number;
+  status: "active" | "archived" | "superseded";
+  superseded_by?: string;
+  used_at?: string;
+}
+
+export interface SkillStateMsg extends IpcEnvelope {
+  type: "skill_state";
+  skill_name: string;
+  origin: "auto" | "user";
+  kind: "skill" | "playbook";
+  uses: number;
+  success_rate: number;
+  status: "active" | "paused" | "retired";
+  born_at: string;
+  reason?: string;
+}
+
 export type IpcMessage =
   | HelloMsg
   | UserMsg
@@ -161,6 +200,7 @@ export type IpcMessage =
   | TaskOpMsg
   | MicMsg
   | SettingsUpdateMsg
+  | UndoMsg
   | HelloAckMsg
   | TokenMsg
   | ActivityMsg
@@ -171,7 +211,9 @@ export type IpcMessage =
   | StreamFrameMsg
   | VoiceStateMsg
   | TranscriptMsg
-  | SpendUpdateMsg;
+  | SpendUpdateMsg
+  | BeliefStateMsg
+  | SkillStateMsg;
 
 type MsgType = IpcMessage["type"];
 
@@ -188,6 +230,7 @@ export const REQUIRED_FIELDS: Record<MsgType, readonly string[]> = {
   task_op: ["op"],
   mic: ["op"],
   settings_update: ["key", "value"],
+  undo: ["undo_token"],
   hello_ack: [],
   token: ["text", "conversation_id"],
   activity: ["text", "narrate", "task_id", "undoable"],
@@ -199,6 +242,8 @@ export const REQUIRED_FIELDS: Record<MsgType, readonly string[]> = {
   voice_state: ["state"],
   transcript: ["text", "final", "conversation_id"],
   spend_update: ["session_usd", "month_usd"],
+  belief_state: ["belief_id", "text", "kind", "provenance", "salience", "status"],
+  skill_state: ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"],
 };
 
 const KNOWN_TYPES = new Set(Object.keys(REQUIRED_FIELDS));

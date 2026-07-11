@@ -14,7 +14,7 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and 
 ## Inbound to Brain (from UI or Voice)
 | type | payload | notes |
 |---|---|---|
-| `hello` | `token` | first frame, both clients |
+| `hello` | `token, role?:"ui"\|"voice"` | first frame, both clients; `role` (default `"ui"`) selects the outbound routing subset — see Routing below |
 | `user_msg` | `text, conversation_id, source:"ui"\|"voice"` | **one shape for both clients** — voice includes conversation_id too |
 | `interrupt` | `conversation_id` | typed **or** spoken "stop" — both clients can send it |
 | `approval_response` | `reply_to (approval_request approval_id), decision:"approve"\|"deny"\|"edit", edited_args?` | closes the Tier-3 round-trip |
@@ -24,27 +24,30 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and 
 | `task_op` | `task_id?, op:"pause"\|"resume"\|"stop"` | per-task controls (tasks view, orb menu); omitted `task_id` = all tasks. `stop` ≠ `interrupt`: stop kills a task, interrupt redirects a conversation |
 | `mic` | `op:"mute"\|"unmute"` | UI → Brain → Voice (Brain is the hub; UI and Voice never talk directly) |
 | `settings_update` | `key, value` | narration on/off, wake word on/off, model IDs, thresholds |
+| `undo` | `undo_token` | the feed's Undo button, replying to an `activity`'s `undo_token` |
 
 ## Outbound from Brain (to UI; Voice receives the subset it speaks)
 | type | payload | notes |
 |---|---|---|
 | `hello_ack` | none | confirms the connection is authenticated; clients may now flush queued application messages |
 | `token` | `text, conversation_id` | streamed reply tokens |
-| `activity` | `text, narrate:bool, task_id, undoable:bool, undo_token?` | feed events; `narrate:true` → Voice speaks it; **`undoable:false` shown explicitly** (sent email ≠ reversible) |
-| `approval_request` | `approval_id, tool, args_redacted, tier, task_id` | suspends via `interrupt()`; resumed by `approval_response` whose `reply_to` = this `approval_id` |
+| `activity` | `text, narrate:bool, task_id, undoable:bool, undo_token?, tier?:1\|2\|3, lane?:1\|2\|3` | feed events; `narrate:true` → Voice speaks it; **`undoable:false` shown explicitly** (sent email ≠ reversible); `tier`/`lane` drive the feed's chips and filters |
+| `approval_request` | `approval_id, tool, args_redacted, tier, task_id, summary?, destructive?:bool` | suspends via `interrupt()`; resumed by `approval_response` whose `reply_to` = this `approval_id`; `summary` is the one plain sentence the card leads with; `destructive` drives the red-border / hold-to-approve / no-voice-approval variant |
 | `done` | `conversation_id, task_id?` | turn/task complete |
 | `error` | `code, message, recoverable:bool, conversation_id?` | never silently drop a turn |
-| `task_state` | `task_id, state:"running"\|"paused"\|"waiting_approval"\|"done"\|"failed", lane` | tasks panel + lane indicator |
+| `task_state` | `task_id, state:"running"\|"paused"\|"waiting_approval"\|"done"\|"failed", lane, title?, step?, steps_total?, step_label?, reason?` | tasks panel + lane indicator; `step`/`steps_total`/`step_label` drive progress text, `reason` explains a paused task |
 | `stream_frame` | `task_id, jpeg_b64, seq` | live desktop view, Lanes 2/3 only, throttled (~2 fps) |
 | `voice_state` | `state:"idle"\|"wake"\|"listening"\|"thinking"\|"speaking"\|"muted"` | originates in the Voice worker, relayed by Brain → UI; drives the orb's state language |
 | `transcript` | `text, final:bool, conversation_id` | STT partials for live ghost-text; `final:true` coincides with the `user_msg` the Voice worker submits |
 | `spend_update` | `session_usd, month_usd` | Brain accumulates per-call cost (OpenRouter usage fields) into SQLite; feeds the Settings spend view |
+| `belief_state` | `belief_id, text, kind:"preference"\|"project"\|"workflow"\|"decision"\|"lesson", provenance:"user"\|"inferred", salience, status:"active"\|"archived"\|"superseded", superseded_by?, used_at?` | memory panel cards; pushed as snapshot-on-connect + delta-on-change (same pattern as `task_state`) |
+| `skill_state` | `skill_name, origin:"auto"\|"user", kind:"skill"\|"playbook", uses, success_rate, status:"active"\|"paused"\|"retired", born_at, reason?` | skills panel cards; same snapshot+delta pattern |
 
 ## Concurrency model
 - **One LangGraph thread per `conversation_id`; turns are serialized per thread** (a queue). Voice and chat share the conversation they address — a voice utterance and a typed message to the same conversation queue in arrival order; different conversations run concurrently.
 - `interrupt` targets its conversation's running turn only.
 - **Interrupt vs pending approval:** if the conversation is in `waiting_approval` when `interrupt` arrives, the pending `approval_request` is **cancelled (implicit deny)** first, then the turn suspends. A stale approval card can never resume a task the user already stopped; the UI removes the card on the resulting `task_state: paused`.
-- **Routing:** every client receives transport-level `hello_ack`; after that, Voice is sent only `token`, `activity(narrate:true)`, and `approval_request`, while the UI gets everything. Clients never filter a firehose.
+- **Routing:** every client receives transport-level `hello_ack`; after that, Voice is sent only `token`, `activity(narrate:true)`, and `approval_request`, while the UI gets everything. Clients never filter a firehose — the Brain routes by the connection's `role` (from its `hello.role`, default `"ui"`), so a Voice connection never even receives the snapshot or non-narrated frames. Enforced in `server.py`'s `_frame_visible_to`.
 
 ## Cancellation ("stop" semantics)
 - Between graph nodes: LangGraph `interrupt()` — clean suspend at last checkpoint.

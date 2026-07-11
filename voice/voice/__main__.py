@@ -41,6 +41,7 @@ def _hello_frame(token: str) -> dict:
         "id": str(uuid.uuid4()),
         "ts": datetime.now(timezone.utc).isoformat(),
         "token": token,
+        "role": "voice",  # opt into the restricted routing subset (11-ipc-contract.md)
     }
     parse_ipc_message(frame)  # never send a frame that drifted from the contract
     return frame

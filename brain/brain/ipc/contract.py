@@ -25,6 +25,7 @@ class IpcEnvelope(TypedDict):
 
 class HelloMsg(IpcEnvelope):
     token: str
+    role: NotRequired[Literal["ui", "voice"]]  # absent -> "ui" (full stream); Voice opts into its subset
 
 
 class UserMsg(IpcEnvelope):
@@ -73,6 +74,10 @@ class SettingsUpdateMsg(IpcEnvelope):
     value: object
 
 
+class UndoMsg(IpcEnvelope):
+    undo_token: str
+
+
 # ---- Outbound from Brain (to UI; Voice receives the subset it speaks) ----
 
 
@@ -91,6 +96,8 @@ class ActivityMsg(IpcEnvelope):
     task_id: str
     undoable: bool
     undo_token: NotRequired[str]
+    tier: NotRequired[Literal[1, 2, 3]]
+    lane: NotRequired[Literal[1, 2, 3]]
 
 
 class ApprovalRequestMsg(IpcEnvelope):
@@ -101,6 +108,8 @@ class ApprovalRequestMsg(IpcEnvelope):
     args_redacted: object
     tier: Literal[1, 2, 3]
     task_id: str
+    summary: NotRequired[str]
+    destructive: NotRequired[bool]
 
 
 class DoneMsg(IpcEnvelope):
@@ -119,6 +128,11 @@ class TaskStateMsg(IpcEnvelope):
     task_id: str
     state: Literal["running", "paused", "waiting_approval", "done", "failed"]
     lane: Literal[1, 2, 3]
+    title: NotRequired[str]
+    step: NotRequired[int]
+    steps_total: NotRequired[int]
+    step_label: NotRequired[str]
+    reason: NotRequired[str]
 
 
 class StreamFrameMsg(IpcEnvelope):
@@ -142,6 +156,28 @@ class SpendUpdateMsg(IpcEnvelope):
     month_usd: float
 
 
+class BeliefStateMsg(IpcEnvelope):
+    belief_id: str
+    text: str
+    kind: Literal["preference", "project", "workflow", "decision", "lesson"]
+    provenance: Literal["user", "inferred"]
+    salience: float
+    status: Literal["active", "archived", "superseded"]
+    superseded_by: NotRequired[str]
+    used_at: NotRequired[str]
+
+
+class SkillStateMsg(IpcEnvelope):
+    skill_name: str
+    origin: Literal["auto", "user"]
+    kind: Literal["skill", "playbook"]
+    uses: int
+    success_rate: float
+    status: Literal["active", "paused", "retired"]
+    born_at: str
+    reason: NotRequired[str]
+
+
 IpcMessage = Union[
     HelloMsg,
     UserMsg,
@@ -153,6 +189,7 @@ IpcMessage = Union[
     TaskOpMsg,
     MicMsg,
     SettingsUpdateMsg,
+    UndoMsg,
     HelloAckMsg,
     TokenMsg,
     ActivityMsg,
@@ -164,6 +201,8 @@ IpcMessage = Union[
     VoiceStateMsg,
     TranscriptMsg,
     SpendUpdateMsg,
+    BeliefStateMsg,
+    SkillStateMsg,
 ]
 
 # Required payload fields per type (envelope's type/id/ts are checked separately).
@@ -179,6 +218,7 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "task_op": ("op",),
     "mic": ("op",),
     "settings_update": ("key", "value"),
+    "undo": ("undo_token",),
     "hello_ack": (),
     "token": ("text", "conversation_id"),
     "activity": ("text", "narrate", "task_id", "undoable"),
@@ -190,6 +230,8 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "voice_state": ("state",),
     "transcript": ("text", "final", "conversation_id"),
     "spend_update": ("session_usd", "month_usd"),
+    "belief_state": ("belief_id", "text", "kind", "provenance", "salience", "status"),
+    "skill_state": ("skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"),
 }
 
 _PHASE0_STRING_FIELDS = {

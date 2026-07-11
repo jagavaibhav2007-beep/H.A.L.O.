@@ -55,6 +55,12 @@ fn brain_cmd() -> Command {
     let mut cmd = Command::new("python");
     cmd.args(["-m", "brain"])
         .current_dir(repo_root().join("brain"));
+    // ponytail: HALO_MOCK=1 (set by dev.ps1 -Mock) runs the supervised Brain
+    // as the scripted mock scenario player. An env var, not a Cargo feature,
+    // because it's a dev-time toggle, not a compile-time one.
+    if matches!(std::env::var("HALO_MOCK").as_deref(), Ok("1")) {
+        cmd.arg("--mock");
+    }
     cmd
 }
 
