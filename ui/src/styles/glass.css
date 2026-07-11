@@ -1,0 +1,39 @@
+/*
+ * The one glass recipe. Only .glass may apply blur — no stacked blurs.
+ */
+.glass {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+
+/* Reduced-transparency fallback: OS preference OR manual setting.
+   Nothing may be readable only through blur, so this swaps to a
+   solid --bg-tinted surface with no blur at all. */
+@media (prefers-reduced-transparency: reduce) {
+  .glass {
+    background: var(--bg);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+[data-transparency="off"] .glass {
+  background: var(--bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Reduced motion: non-essential motion off, states change by
+   color/opacity only. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: var(--motion-off) !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: var(--motion-off) !important;
+    scroll-behavior: auto !important;
+  }
+}

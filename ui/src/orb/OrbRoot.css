@@ -1,0 +1,25 @@
+/* Orb window content — fills the 64x64 transparent window exactly. */
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+.orb {
+  box-sizing: border-box;
+  width: 56px; /* ui_ux/01-companion-orb.md: "~56px glass sphere" */
+  height: 56px;
+  margin: 4px; /* centers the 56px sphere in the 64px window */
+  border-radius: 50%;
+  cursor: grab;
+  touch-action: none; /* manual pointer drag owns movement, not the browser */
+}
+
+.orb:active {
+  cursor: grabbing;
+}

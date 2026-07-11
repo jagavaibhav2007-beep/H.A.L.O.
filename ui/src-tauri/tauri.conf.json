@@ -12,9 +12,31 @@
   "app": {
     "windows": [
       {
-        "title": "ui",
-        "width": 800,
-        "height": 600
+        "label": "orb",
+        "title": "Halo",
+        "url": "index.html",
+        "width": 64,
+        "height": 64,
+        "resizable": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "shadow": false,
+        "visible": true
+      },
+      {
+        "label": "main",
+        "title": "Halo",
+        "url": "index.html",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 720,
+        "minHeight": 480,
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {

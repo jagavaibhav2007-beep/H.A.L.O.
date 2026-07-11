@@ -1,0 +1,255 @@
+// Phase 1 Step 4 — UI event store: pure projection of IPC frames into
+// renderable state (D5, D6, D7; phase-1-plan.md "Step 4 — UI event store").
+// No React, no WebSocket, no browser globals — importable and testable
+// standalone (see reducer.selfcheck.ts). All impurity (zustand, subscriptions)
+// lives in store.ts.
+
+import type {
+  ActivityMsg,
+  ApprovalRequestMsg,
+  BeliefStateMsg,
+  IpcMessage,
+  SkillStateMsg,
+  TaskStateMsg,
+  VoiceStateMsg,
+} from "../ipc/contract";
+
+// ---- Slice types ----
+
+export type WsStatus = "connecting" | "connected" | "reconnecting";
+export type SidecarStatus = "unknown" | "starting" | "running" | "restarting" | "error";
+
+// Two distinct signals that must never be conflated (Phase-0 rule, D5):
+// WS-connected+authenticated (drives chat input / reconnect indicator) vs
+// sidecar process health (drives the separate "Brain failed to start" banner).
+export interface ConnectionState {
+  wsStatus: WsStatus;
+  brainStatus: SidecarStatus;
+  voiceStatus: SidecarStatus;
+}
+
+export interface AssistantTurn {
+  id: string; // envelope id of the first `token` frame that opened this turn
+  status: "streaming" | "done" | "error" | "interrupted";
+  text: string;
+  taskId?: string;
+  error?: { code: string; message: string; recoverable: boolean };
+  note?: string; // e.g. "interrupted — connection lost"
+}
+
+export interface ConversationState {
+  conversationId: string;
+  turns: AssistantTurn[]; // full history, arrival order (D7) — never sorted by ts
+  needsInputRestore: boolean; // rule 8: error/disconnect restores the user's text
+}
+
+export interface VoiceState {
+  state: VoiceStateMsg["state"];
+  transcript: { text: string; final: boolean; conversationId: string } | null;
+}
+
+export interface SpendState {
+  sessionUsd: number;
+  monthUsd: number;
+}
+
+export interface HaloState {
+  connection: ConnectionState;
+  conversations: Record<string, ConversationState>;
+  activities: ActivityMsg[]; // ring buffer capped at ACTIVITY_CAP, arrival order (D7)
+  tasks: Record<string, TaskStateMsg>; // keyed by task_id (idempotent upsert, D6)
+  approvals: Record<string, ApprovalRequestMsg>; // keyed by approval_id; presence = pending
+  beliefs: Record<string, BeliefStateMsg>; // keyed by belief_id
+  skills: Record<string, SkillStateMsg>; // keyed by skill_name
+  voice: VoiceState;
+  spend: SpendState;
+}
+
+export const ACTIVITY_CAP = 10_000;
+
+export const initialState: HaloState = {
+  connection: { wsStatus: "connecting", brainStatus: "unknown", voiceStatus: "unknown" },
+  conversations: {},
+  activities: [],
+  tasks: {},
+  approvals: {},
+  beliefs: {},
+  skills: {},
+  voice: { state: "idle", transcript: null },
+  spend: { sessionUsd: 0, monthUsd: 0 },
+};
+
+// ---- Helpers ----
+
+function getConversation(state: HaloState, conversationId: string): ConversationState {
+  return (
+    state.conversations[conversationId] ?? {
+      conversationId,
+      turns: [],
+      needsInputRestore: false,
+    }
+  );
+}
+
+/** The last turn, if it's still open (streaming) — undefined otherwise. */
+function openTurn(conv: ConversationState): AssistantTurn | undefined {
+  const last = conv.turns[conv.turns.length - 1];
+  return last?.status === "streaming" ? last : undefined;
+}
+
+function replaceConversation(state: HaloState, conv: ConversationState): HaloState {
+  return { ...state, conversations: { ...state.conversations, [conv.conversationId]: conv } };
+}
+
+function pushActivity(state: HaloState, activity: ActivityMsg): HaloState {
+  const next = [...state.activities, activity];
+  if (next.length > ACTIVITY_CAP) next.splice(0, next.length - ACTIVITY_CAP); // drop oldest
+  return { ...state, activities: next };
+}
+
+function upsert<T>(record: Record<string, T>, key: string, value: T): Record<string, T> {
+  return { ...record, [key]: value };
+}
+
+/** An approval resolves on a confirming `task_state`/`activity` for its task
+ * — never optimistically on a button press (rule 3). The task is paused
+ * waiting on the user while `waiting_approval`, so any other task_state or
+ * activity for the same task_id is by construction the resolving signal. */
+function resolveApprovalsForTask(state: HaloState, taskId: string): HaloState {
+  const pending = Object.keys(state.approvals).filter((id) => state.approvals[id].task_id === taskId);
+  if (pending.length === 0) return state;
+  const approvals = { ...state.approvals };
+  for (const id of pending) delete approvals[id];
+  return { ...state, approvals };
+}
+
+// ---- Frame projection ----
+
+export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
+  switch (frame.type) {
+    case "token": {
+      // Unknown conversation_id -> open a turn anyway; arrival order is
+      // truth (the user_msg echo may be local-only).
+      const conv = getConversation(state, frame.conversation_id);
+      const open = openTurn(conv);
+      const turns = open
+        ? conv.turns.map((t) => (t === open ? { ...t, text: t.text + frame.text } : t))
+        : [...conv.turns, { id: frame.id, status: "streaming" as const, text: frame.text }];
+      return replaceConversation(state, { ...conv, turns });
+    }
+
+    case "done": {
+      const conv = getConversation(state, frame.conversation_id);
+      const open = openTurn(conv);
+      if (!open) return state; // nothing streaming to close
+      const turns = conv.turns.map((t) =>
+        t === open ? { ...t, status: "done" as const, taskId: frame.task_id } : t,
+      );
+      return replaceConversation(state, { ...conv, turns });
+    }
+
+    case "error": {
+      if (!frame.conversation_id) return state;
+      const conv = getConversation(state, frame.conversation_id);
+      const open = openTurn(conv);
+      const error = { code: frame.code, message: frame.message, recoverable: frame.recoverable };
+      const turns = open
+        ? conv.turns.map((t) => (t === open ? { ...t, status: "error" as const, error } : t))
+        : conv.turns;
+      // rule 8: a turn is never lost — flag the input for restore regardless
+      // of whether a turn had started streaming yet.
+      return replaceConversation(state, { ...conv, turns, needsInputRestore: true });
+    }
+
+    case "activity": {
+      const withActivity = pushActivity(state, frame);
+      return resolveApprovalsForTask(withActivity, frame.task_id);
+    }
+
+    case "approval_request":
+      return { ...state, approvals: upsert(state.approvals, frame.approval_id, frame) };
+
+    case "task_state": {
+      // Unknown task_id -> create it; the reconnect snapshot may race deltas.
+      const next = { ...state, tasks: upsert(state.tasks, frame.task_id, frame) };
+      return frame.state === "waiting_approval" ? next : resolveApprovalsForTask(next, frame.task_id);
+    }
+
+    case "belief_state":
+      return { ...state, beliefs: upsert(state.beliefs, frame.belief_id, frame) };
+
+    case "skill_state":
+      return { ...state, skills: upsert(state.skills, frame.skill_name, frame) };
+
+    case "spend_update":
+      return { ...state, spend: { sessionUsd: frame.session_usd, monthUsd: frame.month_usd } };
+
+    case "voice_state":
+      return { ...state, voice: { ...state.voice, state: frame.state } };
+
+    case "transcript":
+      return {
+        ...state,
+        voice: {
+          ...state.voice,
+          transcript: { text: frame.text, final: frame.final, conversationId: frame.conversation_id },
+        },
+      };
+
+    default:
+      // Frames the UI only ever sends (hello, user_msg, interrupt,
+      // approval_response, ...) and hello_ack (consumed by useHaloConnection
+      // before reaching the store) never arrive here in practice — no-op
+      // keeps this projection total instead of throwing on the union.
+      return state;
+  }
+}
+
+// ---- Connection / non-frame events ----
+// Not IPC frames — the WS-lifecycle and sidecar-process signals
+// useHaloConnection and the Tauri "sidecar-state" event surface.
+
+export type ConnectionEvent =
+  | { type: "ws_open" }
+  | { type: "authenticated" }
+  | { type: "ws_closed" }
+  | { type: "sidecar_state"; process: "brain" | "voice"; state: Exclude<SidecarStatus, "unknown"> };
+
+export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): HaloState {
+  switch (event.type) {
+    case "ws_open":
+      return { ...state, connection: { ...state.connection, wsStatus: "connecting" } };
+
+    case "authenticated":
+      return { ...state, connection: { ...state.connection, wsStatus: "connected" } };
+
+    case "ws_closed": {
+      // Close open streaming turns with an interrupted marker (a turn is
+      // never visually stuck streaming); approvals are kept — they wait
+      // forever until the reconnect snapshot reconciles them (D6).
+      const conversations: Record<string, ConversationState> = {};
+      for (const [id, conv] of Object.entries(state.conversations)) {
+        const open = openTurn(conv);
+        conversations[id] = open
+          ? {
+              ...conv,
+              turns: conv.turns.map((t) =>
+                t === open
+                  ? { ...t, status: "interrupted" as const, note: "interrupted — connection lost" }
+                  : t,
+              ),
+            }
+          : conv;
+      }
+      return { ...state, conversations, connection: { ...state.connection, wsStatus: "reconnecting" } };
+    }
+
+    case "sidecar_state": {
+      const key = event.process === "brain" ? "brainStatus" : "voiceStatus";
+      return { ...state, connection: { ...state.connection, [key]: event.state } };
+    }
+
+    default:
+      return state;
+  }
+}

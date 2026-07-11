@@ -1,4 +1,5 @@
 mod supervisor;
+mod windows;
 
 use serde::{Deserialize, Serialize};
 use supervisor::Sidecars;
@@ -25,19 +26,38 @@ pub fn run() {
     let sidecars = std::sync::Arc::new(Sidecars::new());
 
     let app = tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_session])
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                // ponytail: POSITION+SIZE only — VISIBLE would fight the
+                // orb-visible/workspace-hidden startup state set in
+                // tauri.conf.json (see windows.rs's clamp_offscreen for why
+                // this plugin alone isn't enough: it skips restore rather
+                // than clamping when the saved monitor is gone).
+                .with_state_flags(tauri_plugin_window_state::StateFlags::POSITION | tauri_plugin_window_state::StateFlags::SIZE)
+                .build(),
+        )
+        .invoke_handler(tauri::generate_handler![
+            read_session,
+            windows::toggle_workspace,
+            windows::active_hotkey,
+            windows::show_orb_menu
+        ])
         .setup({
             let sidecars = sidecars.clone();
             move |app| {
                 sidecars.start(app.handle().clone());
+                windows::setup(app.handle())?;
                 Ok(())
             }
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(move |_app_handle, event| {
+    app.run(move |app_handle, event| {
         if let tauri::RunEvent::ExitRequested { .. } = event {
+            windows::teardown(app_handle);
             sidecars.kill_all();
         }
     });

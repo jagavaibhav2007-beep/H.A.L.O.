@@ -1,0 +1,105 @@
+/*
+ * Design tokens — encodes ui_ux/00-design-language.md exactly.
+ * Every color/motion/type/elevation value used anywhere in the app
+ * must come from a var(--…) defined here. No raw hex or ms literals
+ * outside this file (greppable rule, enforced by convention).
+ */
+
+:root {
+  /* ---- Color (light) — ui_ux/00-design-language.md color table ---- */
+  --primary: #2563eb;
+  --accent-soft: #93c5fd;
+  --bg: #f8fafc;
+  --surface: rgba(255, 255, 255, 0.65);
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --border: rgba(255, 255, 255, 0.5);
+  --tier-3: #d97706;
+  --destructive: #dc2626;
+  --success: #059669;
+  --on-primary: #ffffff; /* text on solid --primary fills; same in both modes */
+
+  /* ---- Motion — "nothing over 400ms" ---- */
+  --motion-fast: 150ms; /* hover/press */
+  --motion-base: 200ms; /* state changes */
+  --motion-slow: 300ms; /* panel transitions */
+  --motion-expand: 250ms; /* orb -> workspace */
+  --motion-collapse: 175ms; /* workspace -> orb: ~70% of --motion-expand, ease-in */
+  --motion-off: 0.001ms; /* prefers-reduced-motion: near-zero, not 0, so transitionend still fires */
+  --ease-out: cubic-bezier(0, 0, 0.2, 1); /* enter */
+  --ease-in: cubic-bezier(0.4, 0, 1, 1); /* exit, ~70% of enter duration */
+
+  /* ---- Typography ---- */
+  /* ponytail: system-stack fallbacks only — Inter/JetBrains Mono font
+     files land later (local-first + CSP forbids CDN @import). Both
+     stacks already resolve to a readable sans/mono today. */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+  --text-xs: 12px; /* labels */
+  --text-sm: 13px; /* feed */
+  --text-base: 14px; /* body */
+  --text-chat: 16px; /* chat */
+  --text-title: 20px; /* panel titles */
+  --text-empty: 28px; /* empty states */
+  --line-height: 1.55;
+
+  /* ---- Elevation (companion < panel < card < modal) ---- */
+  --z-companion: 10;
+  --z-panel: 20;
+  --z-card: 30;
+  --z-modal: 40;
+
+  /* ---- Interaction constants ---- */
+  --hit-min: 32px; /* minimum click target */
+  --press-scale: 0.97;
+}
+
+/* Auto theme: follow OS preference unless a manual override is set. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --primary: #3b82f6;
+    --accent-soft: #60a5fa;
+    --bg: #0b1220;
+    --surface: rgba(15, 23, 42, 0.55);
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --border: rgba(148, 163, 184, 0.15);
+    --tier-3: #f59e0b;
+    --destructive: #ef4444;
+    --success: #10b981;
+  }
+}
+
+/* Manual override: explicit dark, regardless of OS preference. */
+[data-theme="dark"] {
+  --primary: #3b82f6;
+  --accent-soft: #60a5fa;
+  --bg: #0b1220;
+  --surface: rgba(15, 23, 42, 0.55);
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --border: rgba(148, 163, 184, 0.15);
+  --tier-3: #f59e0b;
+  --destructive: #ef4444;
+  --success: #10b981;
+}
+
+/* Manual override: explicit light, regardless of OS preference. */
+[data-theme="light"] {
+  --primary: #2563eb;
+  --accent-soft: #93c5fd;
+  --bg: #f8fafc;
+  --surface: rgba(255, 255, 255, 0.65);
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --border: rgba(255, 255, 255, 0.5);
+  --tier-3: #d97706;
+  --destructive: #dc2626;
+  --success: #059669;
+}
+
+/* Focus ring — 2px --primary, 2px offset, visible on glass, never removed. */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
