@@ -89,6 +89,6 @@ Source of truth for *what* each thing does stays in [Halo-PRD.md](Halo-PRD.md), 
 
 ## How to use this file
 
-- We're currently **pre-Phase-0** (design docs only, no code).
+- **Phase 0 is done** (skeleton + IPC contract, hardened with hello_ack/queueing) — see [phase-0-plan.md](phase-0-plan.md). Next up: Phase 1.
 - To start a phase: "let's start Phase N" → a `phase-N-plan.md` gets written with concrete tasks, file layout, and interfaces, grounded in the then-current docs.
 - If a phase reveals a design gap, fix the relevant `systemdesign/`/`techstack/`/`ui_ux/` doc first, then continue — this roadmap follows the docs, not the other way around.
