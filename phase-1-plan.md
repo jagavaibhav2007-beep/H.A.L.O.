@@ -143,13 +143,13 @@ On (re)connect after `hello_ack`, the mock pushes a snapshot: all `belief_state`
 **Design:**
 - `tauri.conf.json`: `orb` window (64×64, transparent, no decorations, always-on-top, skip-taskbar, `focusable:false`) + `main` workspace (hidden at start, resizable, min 720×480).
 - Global hotkey (`Alt+Space` default) via the global-shortcut plugin → Rust command `toggle_workspace(orb_x, orb_y)`; workspace opens with the CSS scale+fade transform-origin set to the orb's position; `Esc` in the workspace runs the reverse and hides (never quits — the exit animation is ~70% of 250ms per motion rules).
-- Orb dragging: manual (pointer events) with a **4px movement threshold** discriminating click (→ expand) from drag; on release, snap to the nearest screen edge; position persisted by window-state plugin.
+- Orb dragging: manual (pointer events) with a **4px movement threshold** discriminating click (→ expand) from drag; on release, the orb stays exactly where dropped (free placement, no edge-snap — reversed after user testing found the magnet behavior unwanted); position persisted by window-state plugin.
 - Tray icon (quit/status secondary affordance) + right-click orb menu: Mute mic · Pause all tasks · Open workspace · Quit. Quit is explicit — closing the workspace never kills the app.
 - Shutdown ordering (Phase-0 gotcha): quit sets the supervisor shutdown flag before killing sidecars.
 
 **Edge cases:** hotkey already registered by another app → fall back to secondary (`Ctrl+Alt+Space`) and surface a status-strip note (cause + way forward); remembered position off-screen → clamp (rule 9); orb must never steal focus even when clicked (no-activate — expansion focuses the *workspace*, not the orb); always-on-top vs fullscreen games is accepted as a platform limitation, noted in `mem/Gotchas.md`; both windows in `npm run dev` browser mode via `?window=` (D9).
 **Deliverables:** window config, Rust toggle/position commands, orb drag+snap, tray + context menu, hotkey with fallback.
-**Acceptance:** hotkey summons from anywhere; click expands with spatial continuity; `Esc` collapses; orb drags, snaps, remembers position across restarts, never takes focus; quit tears down all three processes cleanly.
+**Acceptance:** hotkey summons from anywhere; click expands with spatial continuity; `Esc` collapses; orb drags to any position with no edge-snap, remembers position across restarts, never takes focus; quit tears down all three processes cleanly.
 
 ---
 

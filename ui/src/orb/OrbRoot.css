@@ -1,4 +1,9 @@
-/* Orb window content — fills the 64x64 transparent window exactly. */
+/* Orb window content. The window is now user-resizable, so the hit-area
+   fills it exactly (drag/resize handles must be reachable on every edge,
+   including any transparent letterbox on a non-square window) while the
+   visible glass sphere is a centered child sized in JS to min(width,height)
+   -- ui_ux/01-companion-orb.md's "glass sphere" stays a circle, never an
+   ellipse, no matter how the window is resized. */
 html,
 body,
 #root {
@@ -10,16 +15,21 @@ body,
   overflow: hidden;
 }
 
-.orb {
-  box-sizing: border-box;
-  width: 56px; /* ui_ux/01-companion-orb.md: "~56px glass sphere" */
-  height: 56px;
-  margin: 4px; /* centers the 56px sphere in the 64px window */
-  border-radius: 50%;
+.orb-hit-area {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: grab;
-  touch-action: none; /* manual pointer drag owns movement, not the browser */
+  touch-action: none; /* manual pointer drag/resize owns movement, not the browser */
 }
 
-.orb:active {
+.orb-hit-area:active {
   cursor: grabbing;
+}
+
+.orb {
+  box-sizing: border-box;
+  border-radius: 50%;
 }

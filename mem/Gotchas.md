@@ -21,3 +21,12 @@ A clean `cargo tauri dev` compiles ~359 crates and can take 2-3 minutes (MSVC's 
 
 ## Native Rust/cargo binaries misbehave under Git Bash on Windows — 2026-07-10
 `rustc.exe`/`cargo.exe` can throw "error while loading shared libraries" when invoked through Git Bash due to path mangling. Use the PowerShell tool for Rust toolchain operations on this machine.
+
+## `tauri-plugin-window-state`'s `StateFlags` are global, not per-window — 2026-07-12
+`tauri_plugin_window_state::Builder::new().with_state_flags(...)` is set once and applies to *every* window the plugin tracks — there is no way to say "POSITION only for window A, POSITION+SIZE for window B" via flags alone. Per-window control only exists as all-or-nothing exclusion (`with_denylist`, `skip_initial_state`). If different windows genuinely need different persisted fields (e.g. a fixed-size orb wants position-only, a resizable workspace wants position+size), either give every window the same policy, or don't rely on the plugin's automatic per-window hooks for the one that's different — enforce that window's constraint manually after `setup()` runs (the plugin's restore fires in `on_window_ready`, which completes before the app's own `.setup()` closure).
+
+## Borderless Tauri windows (`decorations:false`) have no automatic resize border — 2026-07-12
+With no OS title bar/chrome, `resizable:true` alone does not give the user anything to grab — there's no native hit-testable border. You must implement resize handles yourself: detect pointer-down proximity to an edge (a `RESIZE_HANDLE_PX` threshold against `window.innerWidth`/`innerHeight`, viewport-relative coordinates) and call `getCurrentWindow().startResizeDragging(direction)`, where `direction` is one of `"East"|"North"|"NorthEast"|"NorthWest"|"South"|"SouthEast"|"SouthWest"|"West"`. Note: `@tauri-apps/api/window`'s `ResizeDirection` type is used internally by `.d.ts` but **not exported** — mirror the literal union locally rather than importing it.
+
+## Windows `LNK1104` after a Rust rebuild is usually transient, not a real error — 2026-07-12
+`cargo build`/`cargo test` can fail with `LINK : fatal error LNK1104: cannot open file '...exe'` right after a successful compile, even with no process visibly holding the file (checked via `tasklist`) — most likely Windows Defender briefly scanning the freshly-written binary. A bare retry of the same command has cleared this every time it's been hit in this project. Don't chase it as a code bug before retrying once.

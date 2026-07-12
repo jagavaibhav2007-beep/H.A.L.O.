@@ -41,6 +41,20 @@
 **Fix:** `flushQueuedMessages` removes each message only after that send succeeds; direct send failures are re-queued and force reconnect.
 **Never do:** never remove queued work before the operation that commits it succeeds.
 
+## Voice received the full mock snapshot and every broadcast frame — 2026-07-11
+**Severity:** High. Found only by running the real stack (all automated tests were green).
+**Symptom:** the Voice sidecar logged 17 "received frame" lines immediately after `hello_ack` — the entire mock snapshot (`belief_state`/`skill_state`/`task_state`/`spend_update`), which the contract says Voice must never receive.
+**Root cause:** `hello` carried only `token`, so the Brain tracked authenticated clients as a role-less `set` and pushed the snapshot (and broadcast every outbound frame) to *any* authenticated connection — the "Voice gets only its subset" routing rule was unimplementable without a role signal at connect time.
+**Fix:** `hello` gained an optional `role:"ui"|"voice"` (default `"ui"`); `server.py` tracks role per connection (`dict[ServerConnection, str]`) and `_frame_visible_to(role, msg_type, payload)` gates both the snapshot push and `_broadcast`.
+**Never do:** never assume a green test suite proves routing/visibility rules — write a regression test that actually asserts what a restricted-role client receives (see `test_mock.py`'s `check_voice_routing_subset`), and confirm it live at least once.
+
+## Stale window-state SIZE silently overrode the orb's fixed dimensions — 2026-07-12
+**Severity:** Medium.
+**Symptom:** the orb window rendered as a non-square rectangle with the 56px circle visually offset instead of centered, despite `tauri.conf.json` correctly specifying 64×64.
+**Root cause:** `tauri_plugin_window_state`'s `StateFlags` are global across every window registered on one `Builder` (see Gotchas.md) — enabling `SIZE` so the workspace's size/position persist also restores whatever size was last saved under the "orb" label, silently overriding the config on every launch once any stale entry existed.
+**Fix (superseded):** an `enforce_orb_size()` override was added, then removed once the orb became intentionally resizable (2026-07-12 same day) — see Decisions.md "Orb is user-resizable". The CSS fix (circle always sizes to `min(window width, height)` via `ResizeObserver`, centered by flexbox) makes the orb visually correct regardless of window aspect ratio going forward, so this class of bug can't recur even if window-state restores an odd size.
+**Never do:** don't assume a plugin's per-flag config (`StateFlags::SIZE`) applies per-window just because you pass a per-window label elsewhere in the same file — check whether the flags are global to the `Builder` before trusting size/position persistence on a fixed-size window.
+
 ## Spawn-to-publish shutdown race could orphan a sidecar — 2026-07-10
 **Severity:** High.
 **Symptom:** app shutdown could set the shutdown flag and find no shared child during the narrow interval after `spawn()` but before the supervisor stored the handle, leaving the new process unowned.
