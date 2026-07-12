@@ -43,8 +43,19 @@ export interface ConnectionState {
   voiceStatus: SidecarStatus;
 }
 
+// The user's own messages never come back as frames (the mock doesn't echo,
+// and Phase 2's real Brain won't either) — the reducer records them locally
+// via appendUserTurn at send time, so one ordered `turns` array holds the
+// whole conversation in arrival order (D7). `role` is the discriminant.
+export interface UserTurn {
+  id: string;
+  role: "user";
+  text: string;
+}
+
 export interface AssistantTurn {
   id: string; // envelope id of the first `token` frame that opened this turn
+  role: "assistant";
   status: "streaming" | "done" | "error" | "interrupted";
   text: string;
   taskId?: string;
@@ -52,9 +63,11 @@ export interface AssistantTurn {
   note?: string; // e.g. "interrupted — connection lost"
 }
 
+export type Turn = UserTurn | AssistantTurn;
+
 export interface ConversationState {
   conversationId: string;
-  turns: AssistantTurn[]; // full history, arrival order (D7) — never sorted by ts
+  turns: Turn[]; // full history, arrival order (D7) — never sorted by ts
   needsInputRestore: boolean; // rule 8: error/disconnect restores the user's text
 }
 
@@ -131,10 +144,29 @@ function getConversation(state: HaloState, conversationId: string): Conversation
   );
 }
 
-/** The last turn, if it's still open (streaming) — undefined otherwise. */
+/** The last turn, if it's an assistant turn still streaming — undefined otherwise. */
 function openTurn(conv: ConversationState): AssistantTurn | undefined {
   const last = conv.turns[conv.turns.length - 1];
-  return last?.status === "streaming" ? last : undefined;
+  return last?.role === "assistant" && last.status === "streaming" ? last : undefined;
+}
+
+/** Record the user's own outgoing message as a turn (see UserTurn comment).
+ * Called from the store at send time, not from a frame — user_msg is never
+ * echoed back. Clears needsInputRestore: a fresh send means the prior
+ * error/disconnect text has been dealt with. */
+export function appendUserTurn(
+  state: HaloState,
+  conversationId: string,
+  text: string,
+  id: string,
+): HaloState {
+  const conv = getConversation(state, conversationId);
+  const turn: UserTurn = { id, role: "user", text };
+  return replaceConversation(state, {
+    ...conv,
+    turns: [...conv.turns, turn],
+    needsInputRestore: false,
+  });
 }
 
 function replaceConversation(state: HaloState, conv: ConversationState): HaloState {
@@ -172,9 +204,9 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       // truth (the user_msg echo may be local-only).
       const conv = getConversation(state, frame.conversation_id);
       const open = openTurn(conv);
-      const turns = open
+      const turns: Turn[] = open
         ? conv.turns.map((t) => (t === open ? { ...t, text: t.text + frame.text } : t))
-        : [...conv.turns, { id: frame.id, status: "streaming" as const, text: frame.text }];
+        : [...conv.turns, { id: frame.id, role: "assistant", status: "streaming", text: frame.text }];
       return replaceConversation(state, { ...conv, turns });
     }
 
@@ -183,7 +215,7 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       const open = openTurn(conv);
       if (!open) return state; // nothing streaming to close
       const turns = conv.turns.map((t) =>
-        t === open ? { ...t, status: "done" as const, taskId: frame.task_id } : t,
+        t === open && t.role === "assistant" ? { ...t, status: "done" as const, taskId: frame.task_id } : t,
       );
       return replaceConversation(state, { ...conv, turns });
     }
@@ -194,7 +226,9 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       const open = openTurn(conv);
       const error = { code: frame.code, message: frame.message, recoverable: frame.recoverable };
       const turns = open
-        ? conv.turns.map((t) => (t === open ? { ...t, status: "error" as const, error } : t))
+        ? conv.turns.map((t) =>
+            t === open && t.role === "assistant" ? { ...t, status: "error" as const, error } : t,
+          )
         : conv.turns;
       // rule 8: a turn is never lost — flag the input for restore regardless
       // of whether a turn had started streaming yet.
@@ -274,7 +308,7 @@ export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): 
           ? {
               ...conv,
               turns: conv.turns.map((t) =>
-                t === open
+                t === open && t.role === "assistant"
                   ? { ...t, status: "interrupted" as const, note: "interrupted — connection lost" }
                   : t,
               ),

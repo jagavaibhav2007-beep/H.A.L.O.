@@ -1,6 +1,12 @@
 # Decisions
 _Architectural, structural, and system design choices._
 
+## User messages live in the store as turns, appended at send time — 2026-07-12
+**What:** Step 8's chat renders one ordered `turns` array per conversation, a `UserTurn | AssistantTurn` union discriminated by `role`. Assistant turns come from `token`/`done` frames (as before); user turns are appended by a pure `appendUserTurn(state, convId, text, id)` helper (wrapped in the store), called from `ChatView` right before `sendUserMsg`.
+**Why:** `user_msg` is never echoed back — not by the mock, and not by Phase 2's real Brain (the reducer already noted "the user_msg echo may be local-only"). Merging a local user-message list with store assistant turns in the component fails on the cases that actually occur (two sends before a reply, an error/interrupted turn with no paired assistant turn, tokens for an unknown conversation_id). One ordered list appended in arrival order is the honest D7 model.
+**Why not in `useHaloConnection`:** that hook is transport-only by design (no business logic in the UI WS client). The view owning "reflect my own send" keeps that boundary intact. The user turn's `id` is just a React key — it needn't match the sent frame's id, so there's no correlation risk.
+**Trade-off:** `turns` became a union, so every `.status/.taskId/.note` access needs `role === "assistant"` narrowing (reducer callbacks + a `assistantTurn()` assert-helper in the selfcheck). ~15 min of narrowing, not a rewrite. Selfcheck scenario 7 pins the one behavior the union could silently regress (user turn → next token opens a fresh assistant turn, not a fold-in).
+
 ## Three-process architecture — 2026-07-10
 **What:** Tauri (Rust) UI is the parent process; it spawns Brain (Python/LangGraph) and Voice (Python/Pipecat) as child processes, all talking over an authenticated local-loopback WebSocket.
 **Why:** matches Halo-PRD.md's process model; keeps the permission gate meaningful by putting a real auth choke point (hello-token handshake) on the only transport between processes.

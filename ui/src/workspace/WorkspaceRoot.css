@@ -166,18 +166,22 @@ body,
   min-height: 0;
 }
 
+/* Stretch the active view to fill; each view owns its own scrolling (the
+   chat view scrolls internally, placeholders center via margin:auto). */
 .workspace-view {
   position: absolute;
   inset: 0;
-  overflow: auto;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  min-height: 0;
+  overflow: hidden;
+}
+.workspace-view[hidden] {
+  display: none;
+}
+.view-placeholder {
+  margin: auto;
   padding: var(--text-title);
   color: var(--text-muted);
   font-size: var(--text-base);
   text-align: center;
-}
-.workspace-view[hidden] {
-  display: none;
 }

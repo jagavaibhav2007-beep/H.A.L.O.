@@ -1,0 +1,168 @@
+/* Phase 1 Step 9 — Activity feed. All values reference tokens.css. */
+
+.feed {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ---- Filter bar ---- */
+
+.feed-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.feed-select,
+.feed-search {
+  min-height: var(--hit-min);
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+}
+.feed-search {
+  flex: 1;
+  min-width: 140px;
+}
+
+.feed-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+/* ---- Virtualized list ---- */
+
+.feed-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.feed-list {
+  position: relative;
+  width: 100%;
+}
+/* Each row is absolutely positioned by the virtualizer's translateY; it still
+   measures its own natural height (variable-height rows). */
+.feed-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+.feed-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.feed-entry-icon {
+  color: var(--text-muted);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.feed-entry-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.feed-entry-text {
+  font-size: var(--text-base);
+  color: var(--text);
+  line-height: var(--line-height);
+  overflow-wrap: anywhere;
+}
+.feed-entry-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.feed-entry-ts {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.feed-entry-action {
+  flex-shrink: 0;
+}
+.feed-undo {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--hit-min);
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+.feed-undo:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+.feed-undo:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+.feed-not-reversible {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ---- Empty state ---- */
+
+.feed-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--text-title);
+  color: var(--text-muted);
+  font-size: var(--text-base);
+  text-align: center;
+}
+
+/* ---- "new activity" pill ---- */
+
+.feed-new-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--primary);
+  color: var(--on-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 30%, transparent);
+  z-index: var(--z-card);
+}

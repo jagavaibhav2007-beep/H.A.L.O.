@@ -5,7 +5,7 @@
 
 import { create } from "zustand";
 import type { IpcMessage } from "../ipc/contract";
-import { applyConnectionEvent, applyFrame, deriveOrbState, initialState } from "./reducer";
+import { appendUserTurn, applyConnectionEvent, applyFrame, deriveOrbState, initialState } from "./reducer";
 import type { ConnectionEvent, HaloState } from "./reducer";
 
 // UI navigation state (Step 6, ui_ux/02-workspace.md) — not IPC-derived, so
@@ -19,6 +19,10 @@ export interface FocusTarget {
 interface HaloStore extends HaloState {
   applyFrame: (frame: IpcMessage) => void;
   applyConnectionEvent: (event: ConnectionEvent) => void;
+  // Chat (Step 8): record the user's own outgoing message as a turn, and
+  // clear the input-restore flag once the view has consumed it (rule 8).
+  appendUserTurn: (conversationId: string, text: string, id: string) => void;
+  acknowledgeInputRestore: (conversationId: string) => void;
   activeView: ActiveView;
   focusTarget: FocusTarget | null;
   setActiveView: (view: ActiveView) => void;
@@ -32,6 +36,15 @@ export const useHaloStore = create<HaloStore>((set) => ({
   focusTarget: null,
   applyFrame: (frame) => set((state) => applyFrame(state, frame)),
   applyConnectionEvent: (event) => set((state) => applyConnectionEvent(state, event)),
+  appendUserTurn: (conversationId, text, id) => set((state) => appendUserTurn(state, conversationId, text, id)),
+  acknowledgeInputRestore: (conversationId) =>
+    set((state) => {
+      const conv = state.conversations[conversationId];
+      if (!conv?.needsInputRestore) return state;
+      return {
+        conversations: { ...state.conversations, [conversationId]: { ...conv, needsInputRestore: false } },
+      };
+    }),
   setActiveView: (view) => set({ activeView: view }),
   setFocusTarget: (target) => set({ focusTarget: target }),
   clearFocusTarget: () => set({ focusTarget: null }),

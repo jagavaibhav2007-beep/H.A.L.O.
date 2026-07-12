@@ -4,12 +4,15 @@
 // src/state/reducer.selfcheck.ts`).
 import {
   ACTIVITY_CAP,
+  appendUserTurn,
   applyConnectionEvent,
   applyFrame,
   deriveOrbState,
   initialState,
+  type AssistantTurn,
   type HaloState,
   type OrbState,
+  type Turn,
 } from "./reducer.ts";
 import type {
   ActivityMsg,
@@ -21,6 +24,12 @@ import type {
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`[reducer.selfcheck] FAILED: ${msg}`);
+}
+
+/** Narrow a Turn to AssistantTurn (turns are now a user|assistant union). */
+function assistantTurn(t: Turn | undefined, msg: string): AssistantTurn {
+  assert(t && t.role === "assistant", msg);
+  return t;
 }
 
 let idCounter = 0;
@@ -43,9 +52,10 @@ function token(text: string, conversation_id: string): TokenMsg {
 
   const conv = state.conversations["c1"];
   assert(conv.turns.length === 1, "happy path: exactly one assistant turn");
-  assert(conv.turns[0].text === "Hello, world", "happy path: tokens concatenated in arrival order");
-  assert(conv.turns[0].status === "done", "happy path: turn closed by done");
-  assert(conv.turns[0].taskId === "task-1", "happy path: done's task_id attached to the turn");
+  const t0 = assistantTurn(conv.turns[0], "happy path: turn is an assistant turn");
+  assert(t0.text === "Hello, world", "happy path: tokens concatenated in arrival order");
+  assert(t0.status === "done", "happy path: turn closed by done");
+  assert(t0.taskId === "task-1", "happy path: done's task_id attached to the turn");
 }
 
 // ---- Scenario 2: reconnect mid-stream (open turn -> ws_closed -> interrupted) ----
@@ -55,9 +65,10 @@ function token(text: string, conversation_id: string): TokenMsg {
   state = applyConnectionEvent(state, { type: "ws_closed" });
 
   const conv = state.conversations["c2"];
-  assert(conv.turns[0].status === "interrupted", "reconnect: open turn marked interrupted on ws_closed");
-  assert(conv.turns[0].note === "interrupted — connection lost", "reconnect: interrupted marker text set");
-  assert(conv.turns[0].text === "Wor", "reconnect: partial text preserved, not discarded");
+  const c2t0 = assistantTurn(conv.turns[0], "reconnect: turn is an assistant turn");
+  assert(c2t0.status === "interrupted", "reconnect: open turn marked interrupted on ws_closed");
+  assert(c2t0.note === "interrupted — connection lost", "reconnect: interrupted marker text set");
+  assert(c2t0.text === "Wor", "reconnect: partial text preserved, not discarded");
   assert(state.connection.wsStatus === "reconnecting", "reconnect: connection slice flips to reconnecting");
 
   // A token frame after reconnect opens a NEW turn rather than reopening the dead one.
@@ -265,6 +276,38 @@ function token(text: string, conversation_id: string): TokenMsg {
     deriveOrbState(approvalWhileMuted) === "approval",
     "orb: approval outranks muted (the slash overlay layers on top separately, priority is unchanged)",
   );
+}
+
+// ---- Scenario 7: user turn interleaves with a following assistant stream ----
+// appendUserTurn (Step 8) records the user's own message; the next `token`
+// for that conversation must open a FRESH assistant turn after it, not fold
+// into the user turn — the one behavior the user|assistant union could
+// silently regress.
+{
+  let state: HaloState = initialState;
+  state = appendUserTurn(state, "c7", "demo everything", "u-1");
+  state = applyFrame(state, token("On ", "c7"));
+  state = applyFrame(state, token("it.", "c7"));
+  state = applyFrame(state, { type: "done", ...envelope(), conversation_id: "c7" });
+
+  const conv = state.conversations["c7"];
+  assert(conv.turns.length === 2, "interleave: user turn + assistant turn, both present in order");
+  assert(conv.turns[0].role === "user" && conv.turns[0].text === "demo everything", "interleave: user turn first");
+  const reply = assistantTurn(conv.turns[1], "interleave: second turn is the assistant reply");
+  assert(reply.text === "On it." && reply.status === "done", "interleave: assistant stream is its own turn");
+
+  // An error after a user send flags input-restore; a subsequent send clears it.
+  state = applyFrame(state, {
+    type: "error",
+    ...envelope(),
+    code: "model_unreachable",
+    message: "Model unreachable",
+    recoverable: true,
+    conversation_id: "c7",
+  });
+  assert(state.conversations["c7"].needsInputRestore, "interleave: error flags input-restore (rule 8)");
+  state = appendUserTurn(state, "c7", "retry", "u-2");
+  assert(!state.conversations["c7"].needsInputRestore, "interleave: a fresh send clears input-restore");
 }
 
 console.log("[reducer.selfcheck] OK");

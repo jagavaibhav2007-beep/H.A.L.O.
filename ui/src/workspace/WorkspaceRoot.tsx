@@ -11,6 +11,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { GlassPanel } from "../components/GlassPanel";
 import { Sidebar } from "./Sidebar";
 import { StatusStrip } from "./StatusStrip";
+import { ChatView } from "../chat/ChatView";
+import { ActivityFeed } from "../activity/ActivityFeed";
 import { useHaloConnection } from "../ipc/useHaloConnection";
 import type { IpcMessage } from "../ipc/contract";
 import { useHaloStore, selectActiveView, selectFocusTarget } from "../state/store";
@@ -22,9 +24,9 @@ interface WorkspaceAnchor {
   y: number;
 }
 
-// ponytail: the real chat input arrives in Step 8; this id gives Ctrl+K
-// something concrete to focus until then.
-const CHAT_INPUT_PLACEHOLDER_ID = "halo-chat-input-placeholder";
+// The chat view's textarea carries this id so the workspace's Ctrl+K focus
+// (below) lands on the real input.
+const CHAT_INPUT_ID = "halo-chat-input";
 
 const VIEWS: { id: ActiveView; label: string }[] = [
   { id: "chat", label: "Chat" },
@@ -35,15 +37,11 @@ const VIEWS: { id: ActiveView; label: string }[] = [
   { id: "settings", label: "Settings" },
 ];
 
-// All six panels land in Steps 8-14; for now every view mounts this same
-// placeholder so switching views is already exercising the mounted-hidden
-// routing those later panels rely on for scroll/state preservation.
-function ViewPlaceholder({ name, focusId }: { name: string; focusId?: string }) {
-  return (
-    <div className="view-placeholder" id={focusId} tabIndex={focusId ? -1 : undefined}>
-      {name}
-    </div>
-  );
+// Chat is real as of Step 8; the other five panels land in Steps 9-14. Until
+// then they mount this placeholder so switching views already exercises the
+// mounted-hidden routing those panels rely on for scroll/state preservation.
+function ViewPlaceholder({ name }: { name: string }) {
+  return <div className="view-placeholder">{name}</div>;
 }
 
 export function WorkspaceRoot() {
@@ -61,7 +59,8 @@ export function WorkspaceRoot() {
   const onMessage = useCallback((frame: IpcMessage) => {
     useHaloStore.getState().applyFrame(frame);
   }, []);
-  const { connState, sidecarError, sendTaskOp } = useHaloConnection(onMessage);
+  const { connState, sidecarError, sendTaskOp, sendUserMsg, sendUndo, conversationId } =
+    useHaloConnection(onMessage);
 
   // Forward the two Phase-0 signals into the store's connection slice,
   // kept distinct per the "never conflate WS state and sidecar health" rule.
@@ -100,7 +99,7 @@ export function WorkspaceRoot() {
       // listener) — the chat view is still `hidden` until after this handler
       // returns, and .focus() on a display:none ancestor is a no-op. Defer
       // one frame past the commit.
-      requestAnimationFrame(() => document.getElementById(CHAT_INPUT_PLACEHOLDER_ID)?.focus());
+      requestAnimationFrame(() => document.getElementById(CHAT_INPUT_ID)?.focus());
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -167,10 +166,18 @@ export function WorkspaceRoot() {
             <div className="workspace-views">
               {VIEWS.map((v) => (
                 <div key={v.id} hidden={activeView !== v.id} className="workspace-view">
-                  <ViewPlaceholder
-                    name={v.label}
-                    focusId={v.id === "chat" ? CHAT_INPUT_PLACEHOLDER_ID : undefined}
-                  />
+                  {v.id === "chat" ? (
+                    <ChatView
+                      conversationId={conversationId}
+                      connState={connState}
+                      sendUserMsg={sendUserMsg}
+                      inputId={CHAT_INPUT_ID}
+                    />
+                  ) : v.id === "activity" ? (
+                    <ActivityFeed sendUndo={sendUndo} />
+                  ) : (
+                    <ViewPlaceholder name={v.label} />
+                  )}
                 </div>
               ))}
             </div>

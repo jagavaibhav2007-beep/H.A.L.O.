@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { parseIpcMessage, type IpcMessage, type TaskOpMsg, type UserMsg } from "./contract";
+import { parseIpcMessage, type IpcMessage, type TaskOpMsg, type UndoMsg, type UserMsg } from "./contract";
 import { flushQueuedMessages, sendOrQueue } from "./queue";
 
 interface Session {
@@ -21,7 +21,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const [sidecarError, setSidecarError] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const authenticatedRef = useRef(false);
-  const queueRef = useRef<(UserMsg | TaskOpMsg)[]>([]);
+  const queueRef = useRef<(UserMsg | TaskOpMsg | UndoMsg)[]>([]);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
@@ -125,15 +125,9 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     };
   }, []);
 
-  const sendUserMsg = useCallback((text: string) => {
-    const msg: UserMsg = {
-      type: "user_msg",
-      id: crypto.randomUUID(),
-      ts: new Date().toISOString(),
-      text,
-      conversation_id: conversationIdRef.current,
-      source: "ui",
-    };
+  // One send/queue path for every outbound type: validate, send if
+  // authenticated, else queue for the reconnect flush (Phase-0 rules).
+  const dispatch = useCallback((msg: UserMsg | TaskOpMsg | UndoMsg) => {
     parseIpcMessage(msg);
     const ws = wsRef.current;
     const openSocket = ws?.readyState === WebSocket.OPEN ? ws : null;
@@ -146,25 +140,28 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     }
   }, []);
 
-  const sendTaskOp = useCallback((op: TaskOpMsg["op"], task_id?: string) => {
-    const msg: TaskOpMsg = {
-      type: "task_op",
-      id: crypto.randomUUID(),
-      ts: new Date().toISOString(),
-      op,
-      task_id,
-    };
-    parseIpcMessage(msg);
-    const ws = wsRef.current;
-    const openSocket = ws?.readyState === WebSocket.OPEN ? ws : null;
-    try {
-      if (sendOrQueue(openSocket, authenticatedRef.current, msg, queueRef.current)) return;
-    } catch (error) {
-      console.error("halo: send failed, queueing for reconnect", error);
-      ws?.close();
-      queueRef.current.push(msg);
-    }
-  }, []);
+  const env = () => ({ id: crypto.randomUUID(), ts: new Date().toISOString() });
 
-  return { connState, sidecarError, sendUserMsg, sendTaskOp, conversationId: conversationIdRef.current };
+  const sendUserMsg = useCallback(
+    (text: string) =>
+      dispatch({ type: "user_msg", ...env(), text, conversation_id: conversationIdRef.current, source: "ui" }),
+    [dispatch],
+  );
+  const sendTaskOp = useCallback(
+    (op: TaskOpMsg["op"], task_id?: string) => dispatch({ type: "task_op", ...env(), op, task_id }),
+    [dispatch],
+  );
+  const sendUndo = useCallback(
+    (undo_token: string) => dispatch({ type: "undo", ...env(), undo_token }),
+    [dispatch],
+  );
+
+  return {
+    connState,
+    sidecarError,
+    sendUserMsg,
+    sendTaskOp,
+    sendUndo,
+    conversationId: conversationIdRef.current,
+  };
 }
