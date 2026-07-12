@@ -226,6 +226,28 @@ async def handle_undo(msg: dict, broadcast: BroadcastFn) -> None:
         return
 
 
+async def handle_task_op(msg: dict, broadcast: BroadcastFn) -> None:
+    """Status-strip / orb task controls (pause/resume/stop). The mock keeps no
+    task registry beyond the seeds, so it just broadcasts the resulting
+    task_state for the named id -- enough to satisfy the UI's rule-3
+    disable-until-confirmed contract (a real Brain owns the lifecycle).
+    ponytail: an omitted task_id ('Pause all') is treated as the running seed."""
+    try:
+        op = msg.get("op")
+        new_state = {"stop": "done", "pause": "paused", "resume": "running"}.get(op)
+        if new_state is None:
+            return
+        task_id = msg.get("task_id") or "task-seed-1"
+        payload = {"task_id": task_id, "state": new_state, "lane": 1, "title": "Syncing calendar"}
+        if op == "stop":
+            payload["reason"] = "you stopped it"
+        elif op == "pause":
+            payload["reason"] = "you paused it"
+        await broadcast("task_state", payload)
+    except ConnectionClosed:
+        return
+
+
 # ---- Scenarios ----
 
 

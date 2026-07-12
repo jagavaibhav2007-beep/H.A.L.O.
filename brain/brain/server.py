@@ -227,6 +227,8 @@ async def _connection_handler(
                 asyncio.create_task(mock_engine.handle_interrupt(msg, broadcast_fn))
             elif mock and msg["type"] == "undo":
                 asyncio.create_task(mock_engine.handle_undo(msg, broadcast_fn))
+            elif mock and msg["type"] == "task_op":
+                asyncio.create_task(mock_engine.handle_task_op(msg, broadcast_fn))
             # Other inbound types remain validated-but-unhandled outside mock
             # mode, per Phase 0 Step 4's original scope.
     finally:
