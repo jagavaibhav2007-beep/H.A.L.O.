@@ -55,6 +55,20 @@
 **Fix (superseded):** an `enforce_orb_size()` override was added, then removed once the orb became intentionally resizable (2026-07-12 same day) — see Decisions.md "Orb is user-resizable". The CSS fix (circle always sizes to `min(window width, height)` via `ResizeObserver`, centered by flexbox) makes the orb visually correct regardless of window aspect ratio going forward, so this class of bug can't recur even if window-state restores an odd size.
 **Never do:** don't assume a plugin's per-flag config (`StateFlags::SIZE`) applies per-window just because you pass a per-window label elsewhere in the same file — check whether the flags are global to the `Builder` before trusting size/position persistence on a fixed-size window.
 
+## Edge-based orb resize handle conflicted with drag-to-move — 2026-07-12
+**Severity:** High. Found only by live manual testing (tsc/cargo/selfchecks were all green).
+**Symptom:** dragging the orb to move it would intermittently balloon the window into a large non-square rectangle — the user reported "as soon as I moved it, it turned back into [a giant] screenshot."
+**Root cause:** `resizeDirectionAt` treated the outer 8px (`RESIZE_HANDLE_PX`) of *every* window edge as a native-resize zone. On a ~64px orb that 8px band covers nearly the entire clickable surface, so a normal grab-to-drag pointer-down frequently landed inside a resize zone instead and started `startResizeDragging` — combined with the pre-existing persisted large size (see the "Stale window-state SIZE" entry above, same day), this was very easy to trigger and hard to distinguish from a rendering bug at first glance.
+**Fix:** replaced all-edge resize detection with a single small bottom-right corner grip (`RESIZE_CORNER_PX`, hover-revealed), and made resizing square-locked + clamped 48–128px (`MIN_ORB_PX`/`MAX_ORB_PX`) via manual `setSize` rather than native `startResizeDragging`, so drag-to-move now owns the entire rest of the surface unambiguously.
+**Never do:** never size a resize-hit-zone as a fraction of the window when the window itself can be very small — a fixed-px band that's fine on a normal-sized window can swallow almost the whole surface on a ~64px one. Give resize and move mutually exclusive, clearly-bounded hit areas (a small corner grip, not "every edge"), especially on borderless windows with no OS-drawn resize affordance.
+
+## Mock Brain had no `task_op` handler — Stop button stuck forever — 2026-07-12
+**Severity:** Medium. Found only by live manual testing.
+**Symptom:** clicking Stop on the Step 6 status strip's running-task chip left the button reading "Stopping…" indefinitely.
+**Root cause:** the UI followed the disable-until-confirmed rule correctly (rule 3 — resolve only on a confirming `task_state`, never optimistically), but `server.py`'s mock-mode dispatch only routed `user_msg`/`approval_response`/`interrupt`/`undo` — `task_op` was validated by the contract but never handled, so the Brain silently dropped it and no confirming frame ever arrived.
+**Fix:** added `mock.handle_task_op` (stop/pause/resume → the matching `task_state`) and wired it into `server.py`'s dispatch table.
+**Never do:** when a UI affordance sends a new outbound message type, verify the *mock* handles it too, not just that the contract validates it — a correctly-implemented "wait for confirmation" UI pattern will hang forever, indistinguishable from a UI bug, if the other side of the wire never confirms.
+
 ## Spawn-to-publish shutdown race could orphan a sidecar — 2026-07-10
 **Severity:** High.
 **Symptom:** app shutdown could set the shutdown flag and find no shared child during the narrow interval after `spawn()` but before the supervisor stored the handle, leaving the new process unowned.
