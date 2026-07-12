@@ -27,6 +27,15 @@ struct WorkspaceAnchor {
     y: f64,
 }
 
+#[derive(Clone, Serialize)]
+struct PeekText {
+    text: String,
+}
+
+// Gap between the orb's edge and the peek window, in physical pixels --
+// matches the bubble's old inline `margin-left: 10px` closely enough.
+const PEEK_GAP: i32 = 10;
+
 #[tauri::command]
 pub fn active_hotkey(state: tauri::State<ActiveHotkey>) -> String {
     (*state.0.lock().unwrap()).to_string()
@@ -48,6 +57,47 @@ pub fn show_orb_menu(app: AppHandle) -> Result<(), String> {
     let orb = app.get_webview_window("orb").ok_or("no orb window")?;
     let menu = app.state::<Menu<Wry>>();
     menu.popup(orb.as_ref().window()).map_err(|e| e.to_string())
+}
+
+/// Show the dedicated peek window next to the orb (screen coords + size, all
+/// physical pixels -- matches how `toggle_workspace` handles orb coords) and
+/// feed it `text` via a `peek-text` emit. Positioned to the orb's right,
+/// vertically centered on it; clamped to the orb's current monitor, flipping
+/// to the orb's LEFT if the right side would overflow. Never focuses the
+/// window -- `peek`'s `focus`/`focusable` config flags mirror the orb's.
+#[tauri::command]
+pub fn show_peek(app: AppHandle, text: String, orb_x: i32, orb_y: i32, orb_w: i32, orb_h: i32) -> Result<(), String> {
+    let peek = app.get_webview_window("peek").ok_or("no peek window")?;
+    let orb = app.get_webview_window("orb").ok_or("no orb window")?;
+    let size = peek.outer_size().map_err(|e| e.to_string())?;
+    let (pw, ph) = (size.width as i32, size.height as i32);
+
+    let mut x = orb_x + orb_w + PEEK_GAP;
+    let mut y = orb_y + orb_h / 2 - ph / 2;
+
+    if let Ok(Some(monitor)) = orb.current_monitor() {
+        let mp = monitor.position();
+        let ms = monitor.size();
+        let max_x = (mp.x + ms.width as i32 - pw).max(mp.x);
+        let max_y = (mp.y + ms.height as i32 - ph).max(mp.y);
+        if x > max_x {
+            x = orb_x - pw - PEEK_GAP; // would overflow the right edge -- try the left side instead
+        }
+        x = x.clamp(mp.x, max_x);
+        y = y.clamp(mp.y, max_y);
+    }
+
+    let _ = peek.set_position(PhysicalPosition::new(x, y));
+    let _ = app.emit_to("peek", "peek-text", PeekText { text });
+    peek.show().map_err(|e| e.to_string())
+}
+
+/// Hides the peek window -- called on the 4s auto-dismiss timer and when the
+/// orb starts being dragged (a stale peek shouldn't follow the window).
+#[tauri::command]
+pub fn hide_peek(app: AppHandle) -> Result<(), String> {
+    let Some(peek) = app.get_webview_window("peek") else { return Ok(()) };
+    peek.hide().map_err(|e| e.to_string())
 }
 
 fn toggle_workspace_impl(app: &AppHandle, orb_x: f64, orb_y: f64) -> Result<(), String> {

@@ -1,13 +1,20 @@
-// Phase 1 Step 5 — the workspace window's content: plumbing only (show/hide
-// animation anchored to the orb, Esc-collapses). The real shell (sidebar,
-// panels) is Step 6 — this renders a placeholder.
-// Spec: phase-1-plan.md Step 5, ui_ux/02-workspace.md.
+// Phase 1 Step 5/6 — the workspace window's content: Step 5's show/hide
+// animation anchored to the orb (Esc-collapses) plus Step 6's shell —
+// sidebar, status strip, view routing, deep-jump and Ctrl+K plumbing. Real
+// panels land in Steps 8-14; every view mounts the same placeholder for now.
+// Spec: phase-1-plan.md Steps 5-6, ui_ux/02-workspace.md.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { GlassPanel } from "../components/GlassPanel";
+import { Sidebar } from "./Sidebar";
+import { StatusStrip } from "./StatusStrip";
+import { useHaloConnection } from "../ipc/useHaloConnection";
+import type { IpcMessage } from "../ipc/contract";
+import { useHaloStore, selectActiveView, selectFocusTarget } from "../state/store";
+import type { ActiveView } from "../state/store";
 import "./WorkspaceRoot.css";
 
 interface WorkspaceAnchor {
@@ -15,10 +22,89 @@ interface WorkspaceAnchor {
   y: number;
 }
 
+// ponytail: the real chat input arrives in Step 8; this id gives Ctrl+K
+// something concrete to focus until then.
+const CHAT_INPUT_PLACEHOLDER_ID = "halo-chat-input-placeholder";
+
+const VIEWS: { id: ActiveView; label: string }[] = [
+  { id: "chat", label: "Chat" },
+  { id: "tasks", label: "Tasks" },
+  { id: "activity", label: "Activity" },
+  { id: "memory", label: "Memory" },
+  { id: "skills", label: "Skills" },
+  { id: "settings", label: "Settings" },
+];
+
+// All six panels land in Steps 8-14; for now every view mounts this same
+// placeholder so switching views is already exercising the mounted-hidden
+// routing those later panels rely on for scroll/state preservation.
+function ViewPlaceholder({ name, focusId }: { name: string; focusId?: string }) {
+  return (
+    <div className="view-placeholder" id={focusId} tabIndex={focusId ? -1 : undefined}>
+      {name}
+    </div>
+  );
+}
+
 export function WorkspaceRoot() {
   const shellRef = useRef<HTMLDivElement>(null);
   const [anim, setAnim] = useState<"idle" | "enter" | "leave">("idle");
   const [origin, setOrigin] = useState("center");
+
+  const activeView = useHaloStore(selectActiveView);
+  const setActiveView = useHaloStore((s) => s.setActiveView);
+  const focusTarget = useHaloStore(selectFocusTarget);
+  const clearFocusTarget = useHaloStore((s) => s.clearFocusTarget);
+
+  // The workspace window owns the live connection; it feeds every inbound
+  // frame straight into the event store (Step 4).
+  const onMessage = useCallback((frame: IpcMessage) => {
+    useHaloStore.getState().applyFrame(frame);
+  }, []);
+  const { connState, sidecarError, sendTaskOp } = useHaloConnection(onMessage);
+
+  // Forward the two Phase-0 signals into the store's connection slice,
+  // kept distinct per the "never conflate WS state and sidecar health" rule.
+  useEffect(() => {
+    const event =
+      connState === "connected"
+        ? ({ type: "authenticated" } as const)
+        : connState === "reconnecting"
+          ? ({ type: "ws_closed" } as const)
+          : ({ type: "ws_open" } as const);
+    useHaloStore.getState().applyConnectionEvent(event);
+  }, [connState]);
+
+  useEffect(() => {
+    if (!sidecarError) return;
+    useHaloStore.getState().applyConnectionEvent({ type: "sidecar_state", process: "brain", state: "error" });
+  }, [sidecarError]);
+
+  // Deep-jump plumbing (Step 6): a focusTarget switches to the relevant view
+  // then clears itself. ponytail: scroll-into-view for the specific
+  // approval/task card lands once the real panels exist (Steps 9-10).
+  useEffect(() => {
+    if (!focusTarget) return;
+    setActiveView("tasks");
+    clearFocusTarget();
+  }, [focusTarget, setActiveView, clearFocusTarget]);
+
+  // Ctrl+K focuses the chat input from anywhere — not Tauri-specific, so it
+  // works in the D9 browser fallback too.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (!e.ctrlKey || e.key.toLowerCase() !== "k") return;
+      e.preventDefault();
+      setActiveView("chat");
+      // setActiveView is batched (React 18/19 auto-batching on a raw window
+      // listener) — the chat view is still `hidden` until after this handler
+      // returns, and .focus() on a display:none ancestor is a no-op. Defer
+      // one frame past the commit.
+      requestAnimationFrame(() => document.getElementById(CHAT_INPUT_PLACEHOLDER_ID)?.focus());
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [setActiveView]);
 
   // Rust emits `workspace-anchor` (the orb's screen position) right before
   // showing this window — anchor the scale+fade transform-origin there for
@@ -54,14 +140,17 @@ export function WorkspaceRoot() {
       // tokens.css keeps reduced-motion transitions at ~0ms (not exactly 0)
       // specifically so transitionend still fires — wait for it instead of
       // guessing a duration, so this respects reduced motion for free.
-      shell.addEventListener(
-        "transitionend",
-        () => {
-          void getCurrentWindow().hide();
-          setAnim("idle");
-        },
-        { once: true },
-      );
+      // Step 6 added transitioning descendants (sidebar items, chips, the
+      // stop button) — transitionend bubbles, so filter to the shell's own
+      // transition or an unrelated descendant transition ending during the
+      // leave animation would hide the window early.
+      function onTransitionEnd(e: TransitionEvent) {
+        if (e.target !== shell) return;
+        shell!.removeEventListener("transitionend", onTransitionEnd);
+        void getCurrentWindow().hide();
+        setAnim("idle");
+      }
+      shell.addEventListener("transitionend", onTransitionEnd);
       setAnim("leave");
     }
     window.addEventListener("keydown", onKeyDown);
@@ -71,8 +160,21 @@ export function WorkspaceRoot() {
   return (
     <div className="workspace-root">
       <div ref={shellRef} className="workspace-shell" data-anim={anim} style={{ transformOrigin: origin }}>
-        <GlassPanel elevation="panel" className="workspace-placeholder">
-          <p>Workspace — the sidebar, status strip, and panels land in Step 6.</p>
+        <GlassPanel elevation="panel" className="workspace-content">
+          <Sidebar />
+          <div className="workspace-main">
+            <StatusStrip sendTaskOp={sendTaskOp} />
+            <div className="workspace-views">
+              {VIEWS.map((v) => (
+                <div key={v.id} hidden={activeView !== v.id} className="workspace-view">
+                  <ViewPlaceholder
+                    name={v.label}
+                    focusId={v.id === "chat" ? CHAT_INPUT_PLACEHOLDER_ID : undefined}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
         </GlassPanel>
       </div>
     </div>

@@ -19,6 +19,21 @@ import type {
 export type WsStatus = "connecting" | "connected" | "reconnecting";
 export type SidecarStatus = "unknown" | "starting" | "running" | "restarting" | "error";
 
+// Step 7 -- the orb's nine visual states (ui_ux/01-companion-orb.md "State
+// language"). Priority high->low: approval > error > task > voice, where
+// voice itself is 5 sub-states + idle. One state at a time -- the selector
+// below decides, never CSS.
+export type OrbState =
+  | "idle"
+  | "wake"
+  | "listening"
+  | "thinking"
+  | "speaking"
+  | "task"
+  | "approval"
+  | "error"
+  | "muted";
+
 // Two distinct signals that must never be conflated (Phase-0 rule, D5):
 // WS-connected+authenticated (drives chat input / reconnect indicator) vs
 // sidecar process health (drives the separate "Brain failed to start" banner).
@@ -78,6 +93,31 @@ export const initialState: HaloState = {
   voice: { state: "idle", transcript: null },
   spend: { sessionUsd: 0, monthUsd: 0 },
 };
+
+/** Priority selector, the one piece of UI logic subtle enough to regress
+ * silently (phase-1-plan.md Step 7) -- unit-cased in reducer.selfcheck.ts. */
+export function deriveOrbState(state: HaloState): OrbState {
+  if (Object.keys(state.approvals).length > 0) return "approval";
+  // ponytail: brainStatus==="error" is the only orb error source this step
+  // (ruling 4). "Persist until seen" (clear only once the workspace is
+  // opened) needs a store field the workspace error-banner work will add
+  // later -- for now this clears the instant brainStatus leaves "error".
+  if (state.connection.brainStatus === "error") return "error";
+  if (Object.values(state.tasks).some((t) => t.state === "running")) return "task";
+  // voice.state is already a single value, not several simultaneous signals,
+  // so this is a direct passthrough rather than a priority scan: muted/wake/
+  // listening/thinking/speaking each map 1:1, "idle" is the fallthrough.
+  switch (state.voice.state) {
+    case "muted":
+    case "wake":
+    case "listening":
+    case "thinking":
+    case "speaking":
+      return state.voice.state;
+    default:
+      return "idle";
+  }
+}
 
 // ---- Helpers ----
 

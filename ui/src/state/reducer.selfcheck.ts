@@ -6,8 +6,10 @@ import {
   ACTIVITY_CAP,
   applyConnectionEvent,
   applyFrame,
+  deriveOrbState,
   initialState,
   type HaloState,
+  type OrbState,
 } from "./reducer.ts";
 import type {
   ActivityMsg,
@@ -185,6 +187,83 @@ function token(text: string, conversation_id: string): TokenMsg {
   assert(
     state.activities[state.activities.length - 1].id === `act-${ACTIVITY_CAP + 4}`,
     "ring buffer: newest entry retained",
+  );
+}
+
+// ---- Scenario 6: deriveOrbState priority (approval > error > task > voice) ----
+{
+  assert(deriveOrbState(initialState) === "idle", "orb: idle is the default with nothing else going on");
+
+  const voiceStates: Exclude<OrbState, "task" | "approval" | "error">[] = [
+    "wake",
+    "listening",
+    "thinking",
+    "speaking",
+    "muted",
+  ];
+  for (const vs of voiceStates) {
+    const state: HaloState = { ...initialState, voice: { state: vs, transcript: null } };
+    assert(deriveOrbState(state) === vs, `orb: voice state "${vs}" maps through unchanged`);
+  }
+
+  const runningTask: TaskStateMsg = {
+    type: "task_state",
+    ...envelope(),
+    task_id: "t1",
+    state: "running",
+    lane: 1,
+  };
+  const withTask: HaloState = { ...initialState, tasks: { t1: runningTask } };
+  assert(deriveOrbState(withTask) === "task", "orb: a running task -> task state");
+
+  const withBrainError: HaloState = {
+    ...initialState,
+    connection: { ...initialState.connection, brainStatus: "error" },
+  };
+  assert(deriveOrbState(withBrainError) === "error", "orb: brainStatus error -> error state");
+
+  const approval: ApprovalRequestMsg = {
+    type: "approval_request",
+    ...envelope(),
+    approval_id: "a1",
+    tool: "fs.delete",
+    args_redacted: {},
+    tier: 3,
+    task_id: "t1",
+  };
+  const withApproval: HaloState = { ...initialState, approvals: { a1: approval } };
+  assert(deriveOrbState(withApproval) === "approval", "orb: a pending approval -> approval state");
+
+  // Critical combos -- the selector, not CSS, decides when several are true.
+  const approvalBeatsSpeakingAndTask: HaloState = {
+    ...initialState,
+    approvals: { a1: approval },
+    tasks: { t1: runningTask },
+    voice: { state: "speaking", transcript: null },
+  };
+  assert(
+    deriveOrbState(approvalBeatsSpeakingAndTask) === "approval",
+    "orb: approval outranks speaking + a running task at once",
+  );
+
+  const errorBeatsTask: HaloState = {
+    ...initialState,
+    connection: { ...initialState.connection, brainStatus: "error" },
+    tasks: { t1: runningTask },
+  };
+  assert(deriveOrbState(errorBeatsTask) === "error", "orb: error outranks a running task");
+
+  const mutedAlone: HaloState = { ...initialState, voice: { state: "muted", transcript: null } };
+  assert(deriveOrbState(mutedAlone) === "muted", "orb: muted alone -> muted");
+
+  const approvalWhileMuted: HaloState = {
+    ...initialState,
+    approvals: { a1: approval },
+    voice: { state: "muted", transcript: null },
+  };
+  assert(
+    deriveOrbState(approvalWhileMuted) === "approval",
+    "orb: approval outranks muted (the slash overlay layers on top separately, priority is unchanged)",
   );
 }
 

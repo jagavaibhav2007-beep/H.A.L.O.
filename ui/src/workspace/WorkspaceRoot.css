@@ -37,10 +37,139 @@ body,
   transform: scale(0.92);
 }
 
-.workspace-placeholder {
+.workspace-content {
   flex: 1;
   margin: 0;
   border-radius: 0;
+  display: flex;
+  min-height: 0;
+}
+
+/* ---- Sidebar (Step 6) ---- */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 176px;
+  flex-shrink: 0;
+  padding: 12px 0;
+  border-right: 1px solid var(--border);
+}
+
+.sidebar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--hit-min);
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out);
+}
+.sidebar-item:hover {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+/* Active item: color PLUS a left indicator bar — never color alone. */
+.sidebar-item[data-active] {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+.sidebar-item[data-active]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--primary);
+}
+
+.sidebar-badge {
+  margin-left: auto;
+}
+
+.sidebar-separator {
+  height: 1px;
+  margin: 8px 16px;
+  background: var(--border);
+}
+
+/* ---- Status strip (Step 6) ---- */
+
+.status-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--hit-min);
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.status-mic {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.status-task-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.status-task-title {
+  font-size: var(--text-sm);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+/* ---- View routing (Step 6) ---- */
+/* Every view stays mounted; only the active one is shown (not unmounted),
+   so scroll position and internal state survive switching. */
+
+.workspace-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-views {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.workspace-view {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -48,4 +177,7 @@ body,
   color: var(--text-muted);
   font-size: var(--text-base);
   text-align: center;
+}
+.workspace-view[hidden] {
+  display: none;
 }

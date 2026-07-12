@@ -19,6 +19,8 @@
         "height": 64,
         "minWidth": 32,
         "minHeight": 32,
+        "maxWidth": 128,
+        "maxHeight": 128,
         "resizable": true,
         "transparent": true,
         "decorations": false,
@@ -38,6 +40,22 @@
         "minWidth": 720,
         "minHeight": 480,
         "resizable": true,
+        "visible": false
+      },
+      {
+        "label": "peek",
+        "title": "Halo",
+        "url": "index.html",
+        "width": 280,
+        "height": 96,
+        "resizable": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "shadow": false,
         "visible": false
       }
     ],

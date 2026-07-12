@@ -32,4 +32,309 @@ body,
 .orb {
   box-sizing: border-box;
   border-radius: 50%;
+  position: relative; /* anchors the ::before/::after state rings below */
+}
+
+/* ---------------------------------------------------------------------
+   Step 7 — state language (ui_ux/01-companion-orb.md "State language").
+   .orb-stack wraps the circle plus its badges/peek-bubble without
+   affecting the drag/resize hit-area above.
+
+   Every state's STATIC look is the plain (outside-@keyframes) declaration
+   on ::before/::after; the animation on top is a motion enhancement with no
+   fill-mode, so it settles back onto that plain look once it ends -- which
+   happens instantly under prefers-reduced-motion (glass.css forces ~0
+   duration globally), so each state reads correctly with motion off with
+   no extra media query needed here.
+   ------------------------------------------------------------------- */
+
+.orb-stack {
+  position: relative;
+  display: inline-flex;
+}
+
+.orb::before,
+.orb::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+  pointer-events: none;
+  border: 2px solid transparent;
+}
+
+/* Idle: faint breathing glow, 4s cycle. */
+.orb[data-orb-state="idle"]::after {
+  box-shadow: 0 0 10px 2px var(--accent-soft);
+  opacity: 0.5;
+  animation: orb-breathe 4s ease-in-out infinite;
+}
+
+/* Wake heard: one ripple ring outward, settling to a lit rim. */
+.orb[data-orb-state="wake"]::before {
+  border-color: var(--accent-soft);
+  opacity: 0.7;
+}
+.orb[data-orb-state="wake"]::after {
+  border-color: var(--accent-soft);
+  animation: orb-ripple 600ms var(--ease-out) 1;
+}
+
+/* Listening: rim lit --accent-soft. ponytail: "reacts subtly to your voice
+   level" is fine static per plan -- there's no live audio-amplitude frame
+   on the wire yet (Phase 3 voice worker), so the rim doesn't react. */
+.orb[data-orb-state="listening"]::before {
+  border-color: var(--accent-soft);
+  box-shadow: 0 0 8px 1px var(--accent-soft);
+}
+
+/* Thinking: slow inner gradient swirl. */
+.orb[data-orb-state="thinking"]::after {
+  background: conic-gradient(from 0deg, var(--primary), transparent 60%, var(--primary));
+  opacity: 0.45;
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 4px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 4px));
+  animation: orb-spin 3s linear infinite;
+}
+
+/* Speaking: glow pulses gently. */
+.orb[data-orb-state="speaking"]::after {
+  box-shadow: 0 0 14px 3px var(--primary);
+  opacity: 0.55;
+  animation: orb-pulse 900ms ease-in-out infinite alternate;
+}
+
+/* Task running: thin progress arc from --task-progress (0..1, set inline
+   from step/steps_total; a small fixed arc when absent -- see
+   [data-indeterminate] below for the motion-gated "still going" spin). */
+.orb[data-orb-state="task"]::after {
+  background: conic-gradient(var(--primary) calc(var(--task-progress, 0.15) * 360deg), transparent 0deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+}
+.orb[data-orb-state="task"][data-indeterminate="true"]::after {
+  animation: orb-spin 1.2s linear infinite;
+}
+
+/* Needs approval: ring turns --tier-3 amber, 2 gentle pulses then steady.
+   The steady amber border is the plain declaration; the pulse animation
+   plays twice on top and settles back onto it. */
+.orb[data-orb-state="approval"]::before {
+  border-color: var(--tier-3);
+  border-width: 3px;
+}
+.orb[data-orb-state="approval"]::after {
+  animation: orb-approval-pulse 500ms ease-out 2;
+}
+
+/* Error: one brief red ring flash, then nothing on the ring -- the
+   persistent indicator is .orb-badge-error below (always visible, not
+   motion-gated), matching "persistent small badge". */
+.orb[data-orb-state="error"]::after {
+  animation: orb-error-flash 700ms ease-out 1;
+}
+
+/* Mic muted (as the top-priority state -- nothing else outranks it):
+   glow off, gray. See .orb-mute-badge for the always-on slash overlay that
+   layers on top regardless of which state is on top (ruling: mute is never
+   hidden by a higher-priority state). */
+.orb[data-orb-state="muted"]::before,
+.orb[data-orb-state="muted"]::after {
+  border-color: var(--text-muted);
+  opacity: 0.35;
+}
+
+@keyframes orb-breathe {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.75;
+  }
+}
+
+@keyframes orb-ripple {
+  0% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+@keyframes orb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes orb-pulse {
+  from {
+    opacity: 0.4;
+  }
+  to {
+    opacity: 0.8;
+  }
+}
+
+@keyframes orb-approval-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    box-shadow: 0 0 10px 3px var(--tier-3);
+  }
+}
+
+@keyframes orb-error-flash {
+  0% {
+    border-color: var(--destructive);
+    box-shadow: 0 0 12px 3px var(--destructive);
+    opacity: 1;
+  }
+  100% {
+    border-color: transparent;
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 0;
+  }
+}
+
+/* Badges: count/error indicators pair color with text/icon, never color
+   alone. Always non-animated (a11y — no reason to gate these on motion). */
+/* Corner placement INSIDE the orb's square window (Step 5 sizes the window
+   to the circle, overflow:hidden), overlapping the circle's arc -- the
+   standard notification-badge spot. Negative offsets would fall outside the
+   window frame and clip. */
+.orb-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--on-primary);
+}
+.orb-badge-approval {
+  background: var(--tier-3);
+}
+.orb-badge-error {
+  background: var(--destructive);
+  color: var(--on-primary);
+}
+
+/* Mute overlay: always-on whenever voice.state is "muted", regardless of
+   which state deriveOrbState returns on top of it. */
+.orb-mute-badge {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+/* Bottom-right resize grip — the only place the orb resizes from (the rest
+   drags to move). Hidden until hover so it doesn't clutter the resting orb;
+   the pointer handlers do the actual corner hit-testing by coordinate. */
+.orb-resize-handle {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+  pointer-events: none;
+}
+.orb-hit-area:hover .orb-resize-handle {
+  opacity: 0.55;
+}
+
+/* ---------------------------------------------------------------------
+   Peek bubble (ui_ux/01-companion-orb.md "Peek bubble"). This rule is
+   shared by two different layouts:
+   - D9 browser fallback (PeekBubble.tsx): rendered inline inside
+     .orb-stack, absolutely positioned beside the circle (`left: 100%`
+     below) -- there's no window clipping in a plain browser tab, and
+     auto-dismiss/hover-pin logic lives there.
+   - The real Tauri app (PeekWindow.tsx): the orb window is 64x64 with
+     overflow:hidden, so `left: 100%` would place the bubble outside the
+     window rect -- invisible. Instead it renders in its own dedicated,
+     content-sized, always-on-top window (`show_peek`/`hide_peek` Rust
+     commands in windows.rs), positioned next to the orb at show-time.
+     The `.peek-window` rules below re-lay it out to fill that window
+     instead. ponytail: hover-pin is dropped for that path (would need
+     cross-window pointer-event plumbing) -- see OrbRoot.tsx's comment.
+   ------------------------------------------------------------------- */
+.peek-bubble {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 10px;
+  max-width: 220px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  line-height: var(--line-height);
+  color: var(--text);
+  white-space: normal;
+  animation: peek-slide-in var(--motion-base) var(--ease-out);
+}
+
+@keyframes peek-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+  }
+}
+
+/* The dedicated peek window (PeekWindow.tsx): centered/static instead of
+   the inline bubble's absolute placement beside the orb circle. */
+.peek-window {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.peek-window .peek-bubble {
+  position: static;
+  transform: none;
+  margin-left: 0;
+  animation: peek-fade-in var(--motion-base) var(--ease-out);
+}
+
+@keyframes peek-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }

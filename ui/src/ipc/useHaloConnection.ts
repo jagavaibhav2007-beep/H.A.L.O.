@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { parseIpcMessage, type IpcMessage, type UserMsg } from "./contract";
+import { parseIpcMessage, type IpcMessage, type TaskOpMsg, type UserMsg } from "./contract";
 import { flushQueuedMessages, sendOrQueue } from "./queue";
 
 interface Session {
@@ -21,7 +21,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const [sidecarError, setSidecarError] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const authenticatedRef = useRef(false);
-  const queueRef = useRef<UserMsg[]>([]);
+  const queueRef = useRef<(UserMsg | TaskOpMsg)[]>([]);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
@@ -146,5 +146,25 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     }
   }, []);
 
-  return { connState, sidecarError, sendUserMsg, conversationId: conversationIdRef.current };
+  const sendTaskOp = useCallback((op: TaskOpMsg["op"], task_id?: string) => {
+    const msg: TaskOpMsg = {
+      type: "task_op",
+      id: crypto.randomUUID(),
+      ts: new Date().toISOString(),
+      op,
+      task_id,
+    };
+    parseIpcMessage(msg);
+    const ws = wsRef.current;
+    const openSocket = ws?.readyState === WebSocket.OPEN ? ws : null;
+    try {
+      if (sendOrQueue(openSocket, authenticatedRef.current, msg, queueRef.current)) return;
+    } catch (error) {
+      console.error("halo: send failed, queueing for reconnect", error);
+      ws?.close();
+      queueRef.current.push(msg);
+    }
+  }, []);
+
+  return { connState, sidecarError, sendUserMsg, sendTaskOp, conversationId: conversationIdRef.current };
 }

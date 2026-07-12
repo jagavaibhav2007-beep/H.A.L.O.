@@ -42,7 +42,9 @@ pub fn run() {
             read_session,
             windows::toggle_workspace,
             windows::active_hotkey,
-            windows::show_orb_menu
+            windows::show_orb_menu,
+            windows::show_peek,
+            windows::hide_peek
         ])
         .setup({
             let sidecars = sidecars.clone();
