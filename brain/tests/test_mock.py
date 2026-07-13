@@ -179,7 +179,7 @@ async def check_linear_scenarios_all_validate(port: int, token: str) -> None:
     try:
         await _authenticate(ws, token)
         await _drain_snapshot(ws)
-        for i, text in enumerate(("demo memory", "demo skill", "demo voice", "demo flood", "demo stream", "just chatting")):
+        for i, text in enumerate(("demo memory", "demo skill", "demo voice", "demo flood", "demo stream", "demo tts-down", "demo stt-down", "just chatting")):
             await ws.send(json.dumps(_frame("user_msg", text=text, conversation_id=f"c-lin-{i}", source="ui")))
             count = 0
             while True:
@@ -247,6 +247,12 @@ async def check_same_conversation_is_serialized(port: int, token: str) -> None:
         await ws.send(json.dumps(_frame("user_msg", text="second turn", conversation_id=conversation_id, source="ui")))
         first_two = [(await _recv(ws))["type"], (await _recv(ws))["type"]]
         assert first_two == ["token", "error"], first_two
+        # Drain the second (generic) turn to its `done` before returning —
+        # otherwise its still-streaming tokens broadcast into the next check's
+        # freshly-connected client (the broadcast targets all authenticated
+        # clients, D4) and derail it.
+        while (await _recv(ws))["type"] != "done":
+            pass
     finally:
         await ws.close()
     print("[check 8] mock messages in one conversation are serialized: OK")
@@ -273,6 +279,23 @@ async def check_skill_op_round_trip(port: int, token: str) -> None:
     print("[check 9] skill_op disable->paused, restore->active (reason cleared): OK")
 
 
+async def check_mic_round_trip(port: int, token: str) -> None:
+    """Step 14: mute -> voice_state:muted, unmute -> voice_state:idle."""
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        await _drain_snapshot(ws)
+        await ws.send(json.dumps(_frame("mic", op="mute")))
+        muted = await _recv(ws)
+        assert muted["type"] == "voice_state" and muted["state"] == "muted", muted
+        await ws.send(json.dumps(_frame("mic", op="unmute")))
+        idle = await _recv(ws)
+        assert idle["type"] == "voice_state" and idle["state"] == "idle", idle
+    finally:
+        await ws.close()
+    print("[check 10] mic mute->muted, unmute->idle: OK")
+
+
 async def main() -> None:
     server, token = await start(mock=True)
     port = server.sockets[0].getsockname()[1]
@@ -286,6 +309,7 @@ async def main() -> None:
         await check_voice_routing_subset(port, token)
         await check_same_conversation_is_serialized(port, token)
         await check_skill_op_round_trip(port, token)
+        await check_mic_round_trip(port, token)
     finally:
         server.close()
         await server.wait_closed()

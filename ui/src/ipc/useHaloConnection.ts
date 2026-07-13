@@ -13,6 +13,7 @@ import {
   type IpcMessage,
   type LanePinMsg,
   type MemoryEditMsg,
+  type MicMsg,
   type SettingsUpdateMsg,
   type SkillOpMsg,
   type TaskOpMsg,
@@ -31,7 +32,8 @@ type Outbound =
   | LanePinMsg
   | MemoryEditMsg
   | SkillOpMsg
-  | SettingsUpdateMsg;
+  | SettingsUpdateMsg
+  | MicMsg;
 
 interface Session {
   port: number;
@@ -224,6 +226,12 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     (key: string, value: unknown) => dispatch({ type: "settings_update", ...env(), key, value }),
     [dispatch],
   );
+  // Voice mute (Step 14): the mock replies voice_state:muted/idle — mute is
+  // visually loud in orb + chat + status strip at once.
+  const sendMic = useCallback(
+    (op: MicMsg["op"]) => dispatch({ type: "mic", ...env(), op }),
+    [dispatch],
+  );
 
   return {
     connState,
@@ -237,6 +245,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     sendMemoryEdit,
     sendSkillOp,
     sendSettingsUpdate,
+    sendMic,
     conversationId: conversationIdRef.current,
   };
 }

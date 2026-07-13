@@ -239,6 +239,8 @@ async def _connection_handler(
                 asyncio.create_task(mock_engine.handle_memory_edit(msg, broadcast_fn))
             elif mock and msg["type"] == "skill_op":
                 asyncio.create_task(mock_engine.handle_skill_op(msg, broadcast_fn))
+            elif mock and msg["type"] == "mic":
+                asyncio.create_task(mock_engine.handle_mic(msg, broadcast_fn))
             # Other inbound types remain validated-but-unhandled outside mock
             # mode, per Phase 0 Step 4's original scope.
     finally:

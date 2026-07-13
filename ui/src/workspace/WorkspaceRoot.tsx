@@ -82,6 +82,7 @@ export function WorkspaceRoot() {
     sendMemoryEdit,
     sendSkillOp,
     sendSettingsUpdate,
+    sendMic,
     conversationId,
   } = useHaloConnection(onMessage);
 
@@ -228,6 +229,7 @@ export function WorkspaceRoot() {
                       conversationId={conversationId}
                       connState={connState}
                       sendUserMsg={sendUserMsg}
+                      sendMic={sendMic}
                       inputId={CHAT_INPUT_ID}
                     />
                   ) : v.id === "activity" ? (

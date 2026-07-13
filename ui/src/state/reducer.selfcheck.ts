@@ -325,4 +325,18 @@ function token(text: string, conversation_id: string): TokenMsg {
   assert(state.streams["task-sb"].seq === 2, "stream: latest seq retained");
 }
 
+// ---- Scenario 9: voice transcript — partials ghost, final becomes a turn ----
+{
+  let state: HaloState = initialState;
+  state = applyFrame(state, { type: "transcript", ...envelope(), text: "what's on", final: false, conversation_id: "cv" });
+  assert(state.voice.transcript?.text === "what's on", "voice: partial transcript held as ghost");
+  assert(state.conversations["cv"] === undefined, "voice: a partial does not create a turn yet");
+
+  state = applyFrame(state, { type: "transcript", ...envelope(), text: "what's on my calendar", final: true, conversation_id: "cv" });
+  assert(state.voice.transcript === null, "voice: ghost cleared on final (no lingering partial)");
+  const turn = state.conversations["cv"].turns[0];
+  assert(turn.role === "user" && turn.text === "what's on my calendar", "voice: final transcript solidifies into a user turn");
+  assert(turn.role === "user" && turn.viaVoice === true, "voice: the solidified turn is flagged as spoken");
+}
+
 console.log("[reducer.selfcheck] OK");

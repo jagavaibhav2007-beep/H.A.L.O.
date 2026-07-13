@@ -361,6 +361,15 @@ async def handle_skill_op(msg: dict, broadcast: BroadcastFn) -> None:
         return
 
 
+async def handle_mic(msg: dict, broadcast: BroadcastFn) -> None:
+    """Mute round-trip (Step 14). Mute -> muted (visually loud everywhere);
+    unmute -> idle. There is no ambiguous mic state by design."""
+    try:
+        await broadcast("voice_state", {"state": "muted" if msg.get("op") == "mute" else "idle"})
+    except ConnectionClosed:
+        return
+
+
 async def handle_lane_pin(msg: dict, broadcast: BroadcastFn) -> None:
     """Re-pin a task's lane. The mock keeps no task registry, so it just
     confirms with a task_state carrying the new lane (rule 3 disable-until-
@@ -516,11 +525,40 @@ async def _scenario_voice(conversation_id: str, task_id: str, broadcast: Broadca
     await broadcast("voice_state", {"state": "thinking"})
     await asyncio.sleep(0.2)
     await broadcast("voice_state", {"state": "speaking"})
-    for word in "You have two meetings today: standup at 10am and design review at 2pm.".split(" "):
+    for word in "You have two meetings today:".split(" "):
+        await broadcast("token", {"text": word + " ", "conversation_id": conversation_id})
+        await asyncio.sleep(0.03)
+    # barge-in beat: user cuts in mid-reply -> orb drops to listening instantly
+    # (the speaking pulse stops), then resumes.
+    await broadcast("voice_state", {"state": "listening"})
+    await asyncio.sleep(0.2)
+    await broadcast("voice_state", {"state": "speaking"})
+    for word in "standup at 10am and design review at 2pm.".split(" "):
         await broadcast("token", {"text": word + " ", "conversation_id": conversation_id})
         await asyncio.sleep(0.03)
     await broadcast("done", {"conversation_id": conversation_id})
     await broadcast("voice_state", {"state": "idle"})
+
+
+async def _scenario_tts_down(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
+    """Degraded: text-to-speech is out, so Halo replies as text and says so."""
+    await broadcast("activity", {
+        "text": "My voice output is down — I'll reply as text until it's back.",
+        "narrate": True, "task_id": task_id, "undoable": False, "tier": 1, "lane": 1,
+    })
+    for word in "Sure — you have three meetings tomorrow, first one at 9.".split(" "):
+        await broadcast("token", {"text": word + " ", "conversation_id": conversation_id})
+        await asyncio.sleep(0.03)
+    await broadcast("done", {"conversation_id": conversation_id})
+
+
+async def _scenario_stt_down(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
+    """Degraded: speech-to-text is out, so listening is off and typing works."""
+    await broadcast("activity", {
+        "text": "I can't hear right now — my mic input is unavailable. Type and I'll answer.",
+        "narrate": True, "task_id": task_id, "undoable": False, "tier": 1, "lane": 1,
+    })
+    await broadcast("done", {"conversation_id": conversation_id})
 
 
 async def _scenario_error(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
@@ -614,6 +652,8 @@ _TRIGGERS: dict[str, Callable[[str, str, BroadcastFn], Awaitable[None]]] = {
     "demo memory": _scenario_memory,
     "demo skill": _scenario_skill,
     "demo voice": _scenario_voice,
+    "demo tts-down": _scenario_tts_down,
+    "demo stt-down": _scenario_stt_down,
     "demo error": _scenario_error,
     "demo flood": _scenario_flood,
     "demo stream": _scenario_stream,

@@ -52,6 +52,7 @@ export interface UserTurn {
   id: string;
   role: "user";
   text: string;
+  viaVoice?: boolean; // spoken turn -> renders a small mic glyph
 }
 
 export interface AssistantTurn {
@@ -272,14 +273,23 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
     case "voice_state":
       return { ...state, voice: { ...state.voice, state: frame.state } };
 
-    case "transcript":
+    case "transcript": {
+      // final -> the spoken turn solidifies into a real user message and the
+      // ghost clears (glyph swap, no duplicate bubble); partials stay ghost.
+      if (frame.final) {
+        const conv = getConversation(state, frame.conversation_id);
+        const turn: UserTurn = { id: frame.id, role: "user", text: frame.text, viaVoice: true };
+        const withTurn = replaceConversation(state, { ...conv, turns: [...conv.turns, turn] });
+        return { ...withTurn, voice: { ...withTurn.voice, transcript: null } };
+      }
       return {
         ...state,
         voice: {
           ...state.voice,
-          transcript: { text: frame.text, final: frame.final, conversationId: frame.conversation_id },
+          transcript: { text: frame.text, final: false, conversationId: frame.conversation_id },
         },
       };
+    }
 
     default:
       // Frames the UI only ever sends (hello, user_msg, interrupt,

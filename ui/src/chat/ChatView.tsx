@@ -25,11 +25,12 @@ interface ChatViewProps {
   conversationId: string;
   connState: ConnState;
   sendUserMsg: (text: string) => void;
+  sendMic: (op: "mute" | "unmute") => void;
   /** Kept on the real textarea so the workspace's Ctrl+K focus still lands. */
   inputId: string;
 }
 
-export function ChatView({ conversationId, connState, sendUserMsg, inputId }: ChatViewProps) {
+export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inputId }: ChatViewProps) {
   const conv = useHaloStore(selectConversation(conversationId));
   const activities = useHaloStore(selectActivities);
   const voice = useHaloStore(selectVoice);
@@ -117,7 +118,16 @@ export function ChatView({ conversationId, connState, sendUserMsg, inputId }: Ch
       </div>
 
       <div className="chat-input-bar">
-        <Icon icon={voice.state === "muted" ? MicOff : Mic} size={20} className="chat-input-mic" />
+        <button
+          type="button"
+          className="chat-input-mic"
+          data-muted={voice.state === "muted" || undefined}
+          aria-label={voice.state === "muted" ? "Unmute mic" : "Mute mic"}
+          aria-pressed={voice.state === "muted"}
+          onClick={() => sendMic(voice.state === "muted" ? "unmute" : "mute")}
+        >
+          <Icon icon={voice.state === "muted" ? MicOff : Mic} size={20} />
+        </button>
         <textarea
           id={inputId}
           className="chat-input"
@@ -139,7 +149,10 @@ function TurnRow({ turn, activities }: { turn: Turn; activities: ActivityMsg[] }
   if (turn.role === "user") {
     return (
       <div className="chat-turn chat-turn-user">
-        <div className="chat-bubble chat-bubble-user">{turn.text}</div>
+        <div className="chat-bubble chat-bubble-user">
+          {turn.viaVoice && <Icon icon={Mic} size={16} className="chat-turn-mic" />}
+          {turn.text}
+        </div>
       </div>
     );
   }
