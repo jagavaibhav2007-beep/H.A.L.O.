@@ -252,6 +252,27 @@ async def check_same_conversation_is_serialized(port: int, token: str) -> None:
     print("[check 8] mock messages in one conversation are serialized: OK")
 
 
+async def check_skill_op_round_trip(port: int, token: str) -> None:
+    """Step 13: disable -> paused, restore -> active (reason cleared)."""
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        await _drain_snapshot(ws)
+        skill_name = "invoice-formatter"  # seeded active/user skill
+
+        await ws.send(json.dumps(_frame("skill_op", skill_name=skill_name, op="disable")))
+        disabled = await _recv(ws)
+        assert disabled["type"] == "skill_state" and disabled["status"] == "paused", disabled
+
+        await ws.send(json.dumps(_frame("skill_op", skill_name=skill_name, op="restore")))
+        restored = await _recv(ws)
+        assert restored["type"] == "skill_state" and restored["status"] == "active", restored
+        assert "reason" not in restored, restored
+    finally:
+        await ws.close()
+    print("[check 9] skill_op disable->paused, restore->active (reason cleared): OK")
+
+
 async def main() -> None:
     server, token = await start(mock=True)
     port = server.sockets[0].getsockname()[1]
@@ -264,6 +285,7 @@ async def main() -> None:
         await check_linear_scenarios_all_validate(port, token)
         await check_voice_routing_subset(port, token)
         await check_same_conversation_is_serialized(port, token)
+        await check_skill_op_round_trip(port, token)
     finally:
         server.close()
         await server.wait_closed()

@@ -45,20 +45,24 @@ export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
   // Rule 3: a task's pending op (pause/resume/stop/pin) locks its controls
   // until the Brain confirms via a fresh task_state. Every task_state upserts a
   // NEW object, so a changed reference == confirmation — clear pending then.
+  // `prev` is captured BEFORE mutating the ref so the updater is a pure
+  // function of its closure (StrictMode double-invokes function-form
+  // updaters in dev to catch side effects like mutating a ref inside one).
   const [pending, setPending] = useState<Record<string, string>>({});
   const prevRefs = useRef<Record<string, TaskStateMsg>>({});
   useEffect(() => {
-    setPending((prev) => {
+    const prev = prevRefs.current;
+    prevRefs.current = tasks;
+    setPending((p) => {
       let changed = false;
-      const next = { ...prev };
-      for (const id of Object.keys(prev)) {
-        if (tasks[id] !== prevRefs.current[id]) {
+      const next = { ...p };
+      for (const id of Object.keys(p)) {
+        if (tasks[id] !== prev[id]) {
           delete next[id];
           changed = true;
         }
       }
-      prevRefs.current = tasks;
-      return changed ? next : prev;
+      return changed ? next : p;
     });
   }, [tasks]);
 

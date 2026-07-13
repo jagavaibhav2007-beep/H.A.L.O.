@@ -22,3 +22,16 @@ export function setTheme(theme: Theme): void {
 export function initTheme(): void {
   setTheme(getTheme());
 }
+
+// Orb and workspace are separate windows sharing one origin, so they share
+// localStorage — but the `storage` event only fires in OTHER windows, never
+// the one that called setTheme(). Settings' theme control calls setTheme()
+// directly (instant in its own window) and this listener catches the other
+// window, so a theme switch is instant in BOTH (Step 13 acceptance).
+export function watchThemeAcrossWindows(): () => void {
+  function onStorage(e: StorageEvent) {
+    if (e.key === STORAGE_KEY) setTheme(getTheme());
+  }
+  window.addEventListener("storage", onStorage);
+  return () => window.removeEventListener("storage", onStorage);
+}

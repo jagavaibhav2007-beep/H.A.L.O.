@@ -21,6 +21,8 @@ import { ChatView } from "../chat/ChatView";
 import { ActivityFeed } from "../activity/ActivityFeed";
 import { TasksView } from "../tasks/TasksView";
 import { MemoryView } from "../memory/MemoryView";
+import { SkillsView } from "../skills/SkillsView";
+import { SettingsView } from "../settings/SettingsView";
 import { ApprovalOverlay } from "../approvals/ApprovalCard";
 import { useHaloConnection } from "../ipc/useHaloConnection";
 import type { IpcMessage } from "../ipc/contract";
@@ -78,6 +80,8 @@ export function WorkspaceRoot() {
     sendInterrupt,
     sendLanePin,
     sendMemoryEdit,
+    sendSkillOp,
+    sendSettingsUpdate,
     conversationId,
   } = useHaloConnection(onMessage);
 
@@ -232,6 +236,10 @@ export function WorkspaceRoot() {
                     <TasksView sendTaskOp={sendTaskOp} sendLanePin={sendLanePin} />
                   ) : v.id === "memory" ? (
                     <MemoryView sendMemoryEdit={sendMemoryEdit} />
+                  ) : v.id === "skills" ? (
+                    <SkillsView sendSkillOp={sendSkillOp} />
+                  ) : v.id === "settings" ? (
+                    <SettingsView sendSettingsUpdate={sendSettingsUpdate} />
                   ) : (
                     <ViewPlaceholder name={v.label} />
                   )}

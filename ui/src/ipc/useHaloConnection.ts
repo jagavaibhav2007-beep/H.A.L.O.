@@ -13,6 +13,8 @@ import {
   type IpcMessage,
   type LanePinMsg,
   type MemoryEditMsg,
+  type SettingsUpdateMsg,
+  type SkillOpMsg,
   type TaskOpMsg,
   type UndoMsg,
   type UserMsg,
@@ -27,7 +29,9 @@ type Outbound =
   | ApprovalResponseMsg
   | InterruptMsg
   | LanePinMsg
-  | MemoryEditMsg;
+  | MemoryEditMsg
+  | SkillOpMsg
+  | SettingsUpdateMsg;
 
 interface Session {
   port: number;
@@ -205,6 +209,21 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
       dispatch({ type: "memory_edit", ...env(), belief_id, op, text }),
     [dispatch],
   );
+  // Skills panel (Step 13): trial/disable/restore/delete a skill. The mock
+  // confirms with a fresh skill_state (rule 3); "trial" additionally streams
+  // scripted activity into the trial-run drawer.
+  const sendSkillOp = useCallback(
+    (skill_name: string, op: SkillOpMsg["op"]) => dispatch({ type: "skill_op", ...env(), skill_name, op }),
+    [dispatch],
+  );
+  // Settings view (Step 13): a toggle/value change. No confirming frame is
+  // expected — settings apply locally (theme) or are display-only against the
+  // mock (rule: "settings that need a real backend render disabled" — this
+  // sender exists for the toggles that ARE wired, not a promise every key does).
+  const sendSettingsUpdate = useCallback(
+    (key: string, value: unknown) => dispatch({ type: "settings_update", ...env(), key, value }),
+    [dispatch],
+  );
 
   return {
     connState,
@@ -216,6 +235,8 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     sendInterrupt,
     sendLanePin,
     sendMemoryEdit,
+    sendSkillOp,
+    sendSettingsUpdate,
     conversationId: conversationIdRef.current,
   };
 }

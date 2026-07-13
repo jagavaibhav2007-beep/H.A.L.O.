@@ -42,19 +42,23 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
 
   // rule 3: a belief's op locks until a fresh belief_state (new object ref)
   // confirms it. Same converge-on-ref-change pattern as the tasks view.
+  // `prev` is captured BEFORE mutating the ref so the updater is a pure
+  // function of its closure (StrictMode double-invokes function-form
+  // updaters in dev to catch side effects like mutating a ref inside one).
   const prevRefs = useRef<Record<string, BeliefStateMsg>>({});
   useEffect(() => {
-    setPending((prev) => {
+    const prev = prevRefs.current;
+    prevRefs.current = beliefs;
+    setPending((p) => {
       let changed = false;
-      const next = { ...prev };
-      for (const id of Object.keys(prev)) {
-        if (beliefs[id] !== prevRefs.current[id]) {
+      const next = { ...p };
+      for (const id of Object.keys(p)) {
+        if (beliefs[id] !== prev[id]) {
           delete next[id];
           changed = true;
         }
       }
-      prevRefs.current = beliefs;
-      return changed ? next : prev;
+      return changed ? next : p;
     });
   }, [beliefs]);
 

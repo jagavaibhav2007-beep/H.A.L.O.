@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { OrbRoot } from "./orb/OrbRoot";
 import { PeekWindow } from "./orb/PeekWindow";
 import { WorkspaceRoot } from "./workspace/WorkspaceRoot";
-import { initTheme } from "./styles/theme";
+import { initTheme, watchThemeAcrossWindows } from "./styles/theme";
 import "./styles/tokens.css";
 
 // ponytail: App and TokensPreview are lazy so their CSS (App.css sets an
@@ -16,6 +16,7 @@ const App = lazy(() => import("./App"));
 const TokensPreview = lazy(() => import("./dev/TokensPreview").then((m) => ({ default: m.TokensPreview })));
 
 initTheme();
+watchThemeAcrossWindows();
 
 const params = new URLSearchParams(window.location.search);
 

@@ -131,6 +131,20 @@ def _seed_skills() -> list[dict]:
     ]
 
 
+# Live skill registry — same pattern as _beliefs (Step 12): seeded once,
+# mutated by handle_skill_op so trial/disable/restore/delete round-trip for
+# real and a reconnect snapshot re-pushes current state (D6).
+_skills: dict[str, dict] = {}
+
+
+def _reset_skills() -> None:
+    _skills.clear()
+    _skills.update({s["skill_name"]: s for s in _seed_skills()})
+
+
+_reset_skills()
+
+
 def _seed_tasks() -> list[dict]:
     """Two live tasks -- one running, one paused (as if resumed post-crash)."""
     return [
@@ -152,7 +166,7 @@ async def push_snapshot(send: SendFn) -> None:
     try:
         for belief in _beliefs.values():
             await send("belief_state", belief)
-        for skill in _seed_skills():
+        for skill in _skills.values():
             await send("skill_state", skill)
         for task in _seed_tasks():
             await send("task_state", task)
@@ -309,6 +323,44 @@ async def handle_memory_edit(msg: dict, broadcast: BroadcastFn) -> None:
         return
 
 
+async def handle_skill_op(msg: dict, broadcast: BroadcastFn) -> None:
+    """Skills panel round-trips (Step 13). trial -> stream a scripted dry run
+    into the results drawer as narrated activity, no state change; disable ->
+    paused; restore -> active (clears any retire reason); delete -> retired
+    (soft, like memory's delete -- the schema has no 'deleted' status, so
+    retired-with-a-reason IS the soft-delete state, same as an auto-retire).
+    The store never mutates a skill locally (rule 3) -- confirming skill_state
+    frames are the only source of truth."""
+    try:
+        skill_name = msg.get("skill_name")
+        op = msg.get("op")
+        cur = _skills.get(skill_name)
+        if cur is None:
+            return  # ponytail: unknown skill -> silent no-op
+        if op == "trial":
+            trial_task = f"skill-trial-{skill_name}"
+            for line in (f"Trying {skill_name} on a sample input…", "Looks right.", "Trial run complete."):
+                await broadcast("activity", {
+                    "text": line, "narrate": False, "task_id": trial_task, "undoable": False, "tier": 1, "lane": 1,
+                })
+                await asyncio.sleep(0.15)
+        elif op == "disable":
+            paused = {**cur, "status": "paused"}
+            _skills[skill_name] = paused
+            await broadcast("skill_state", paused)
+        elif op == "restore":
+            restored = {k: v for k, v in cur.items() if k != "reason"}
+            restored["status"] = "active"
+            _skills[skill_name] = restored
+            await broadcast("skill_state", restored)
+        elif op == "delete":
+            retired = {**cur, "status": "retired", "reason": "you removed it"}
+            _skills[skill_name] = retired
+            await broadcast("skill_state", retired)
+    except ConnectionClosed:
+        return
+
+
 async def handle_lane_pin(msg: dict, broadcast: BroadcastFn) -> None:
     """Re-pin a task's lane. The mock keeps no task registry, so it just
     confirms with a task_state carrying the new lane (rule 3 disable-until-
@@ -438,10 +490,12 @@ async def _scenario_memory(conversation_id: str, task_id: str, broadcast: Broadc
 
 async def _scenario_skill(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
     skill_name = "weekly-report-formatter"
-    await broadcast("skill_state", {
+    born = {
         "skill_name": skill_name, "origin": "auto", "kind": "skill",
         "uses": 1, "success_rate": 1.0, "status": "active", "born_at": _now_iso(),
-    })
+    }
+    _skills[skill_name] = born  # keep the registry in step so a reconnect snapshot shows the birth
+    await broadcast("skill_state", born)
     undo_token = _new_undo_token(task_id)
     await broadcast("activity", {
         "text": f"Learned a new skill: {skill_name}.", "narrate": True,
