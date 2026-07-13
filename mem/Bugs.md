@@ -1,5 +1,12 @@
 # Bugs
 
+## Rule-3 "unlock on confirm" silently never fired in Tasks/Memory/Skills views - 2026-07-13
+**Severity:** High.
+**Symptom:** clicking Pause/Delete/Restore/etc. correctly locked a card's buttons, but the buttons stayed disabled forever even after the Brain's confirming frame landed — verified live only for Skills (Tasks/Memory had never actually been tested past the lock step, only the lock itself).
+**Root cause:** the "clear pending when a fresh object reference confirms" effect mutated a `useRef` **inside** the function passed to `setPending(prev => ...)`. React 18 StrictMode (active via `<React.StrictMode>` in `main.tsx`) double-invokes function-form state updaters in dev specifically to catch impure updaters — the first invocation mutated the ref as a side effect, so the second invocation (whose return value React actually keeps) compared the store's new value against the ref it had *just been mutated to*, saw no difference, and returned the unmodified `prev` — the pending entry never cleared.
+**Fix:** capture the ref's old value into a local (`const prev = prevRefs.current`) and mutate the ref *before* calling `setPending`, then have the updater close over that immutable local instead of reading/writing the ref itself — makes the updater a pure function of its closure, safe under double-invocation. Same fix applied identically in `TasksView.tsx`, `MemoryView.tsx`, `SkillsView.tsx`.
+**Never do:** mutate a `ref.current` (or any other side effect) from inside a function passed to `setState`/`setX(prev => ...)` — StrictMode's double-invoke exists precisely to catch this, and it silently produces a stuck-locked UI rather than a crash, so it's easy to ship unnoticed if the unlock path isn't actually exercised end-to-end.
+
 ## Skill snapshot entries appeared as new-skill orb peeks - 2026-07-12
 **Severity:** Medium.
 **Symptom:** seeded skills such as `flaky-scraper` could appear beside the orb as if Halo had just learned them during startup or reconnect.
