@@ -5,10 +5,18 @@
   min-height: 0;
   overflow-y: auto;
   padding: 16px;
+}
+
+/* A capped, centered column inside the full-width scroller above — without
+   this, `.settings-view` (a flex:1 row child) would render its max-width box
+   flush left and leave the rest of the row as dead empty space instead of
+   centering it. */
+.settings-content {
   display: flex;
   flex-direction: column;
   gap: 20px;
   max-width: 480px;
+  margin: 0 auto;
 }
 
 .settings-group {
