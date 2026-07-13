@@ -44,7 +44,8 @@ pub fn run() {
             windows::active_hotkey,
             windows::show_orb_menu,
             windows::show_peek,
-            windows::hide_peek
+            windows::hide_peek,
+            windows::show_workspace
         ])
         .setup({
             let sidecars = sidecars.clone();

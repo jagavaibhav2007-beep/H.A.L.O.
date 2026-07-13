@@ -310,4 +310,19 @@ function token(text: string, conversation_id: string): TokenMsg {
   assert(!state.conversations["c7"].needsInputRestore, "interleave: a fresh send clears input-restore");
 }
 
+// ---- Scenario 8: stream_frame keeps only the latest, drops stale seq ----
+{
+  let state: HaloState = initialState;
+  const frame = (seq: number, jpeg: string) =>
+    ({ type: "stream_frame", ...envelope(), task_id: "task-sb", jpeg_b64: jpeg, seq }) as const;
+
+  state = applyFrame(state, frame(0, "f0"));
+  state = applyFrame(state, frame(2, "f2"));
+  assert(state.streams["task-sb"].jpeg_b64 === "f2", "stream: newer seq replaces the current frame");
+
+  state = applyFrame(state, frame(1, "f1-stale")); // arrives late, out of order
+  assert(state.streams["task-sb"].jpeg_b64 === "f2", "stream: a stale (lower-seq) frame is dropped, not rendered");
+  assert(state.streams["task-sb"].seq === 2, "stream: latest seq retained");
+}
+
 console.log("[reducer.selfcheck] OK");

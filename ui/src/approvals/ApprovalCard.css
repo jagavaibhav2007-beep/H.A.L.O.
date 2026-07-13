@@ -1,0 +1,149 @@
+/* Phase 1 Step 10 — approval card & bottom-center overlay. All values from
+   tokens.css / primitives.css; no raw hex or ms literals here. */
+
+/* Bottom-center of the current view; sits above view content (--z-card).
+   pointer-events:none on the container so it never blocks the view where
+   there's no card, but each card re-enables them. */
+.approval-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 16px;
+  z-index: var(--z-card);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  pointer-events: none;
+}
+
+.approval-card {
+  pointer-events: auto;
+  width: 100%;
+  max-width: 440px;
+  padding: 16px;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Destructive/money: red border, the one visual that says "this is different". */
+.approval-card[data-destructive] {
+  border-color: color-mix(in srgb, var(--destructive) 60%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--destructive) 40%, transparent);
+}
+
+.approval-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.approval-tool {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.approval-summary {
+  margin: 0;
+  font-size: var(--text-base);
+  line-height: var(--line-height);
+  color: var(--text);
+}
+
+.approval-args-toggle {
+  align-self: flex-start;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.approval-args {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.approval-args-edit {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text);
+  resize: vertical;
+}
+
+.approval-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.approval-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.approval-note {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.approval-stop {
+  margin-left: auto;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.approval-stop:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Hold-to-approve: the fill grows left→right behind the label as the user
+   holds; width is set inline by rAF so reduced-motion can't zero it. */
+.approval-hold {
+  position: relative;
+  overflow: hidden;
+  touch-action: none; /* pointer hold shouldn't scroll on touch */
+  user-select: none;
+}
+.approval-hold-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  background: color-mix(in srgb, var(--destructive) 22%, transparent);
+  pointer-events: none;
+}
+.approval-hold-label {
+  position: relative;
+}
+
+.halo-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

@@ -179,7 +179,7 @@ async def check_linear_scenarios_all_validate(port: int, token: str) -> None:
     try:
         await _authenticate(ws, token)
         await _drain_snapshot(ws)
-        for i, text in enumerate(("demo memory", "demo skill", "demo voice", "demo flood", "just chatting")):
+        for i, text in enumerate(("demo memory", "demo skill", "demo voice", "demo flood", "demo stream", "just chatting")):
             await ws.send(json.dumps(_frame("user_msg", text=text, conversation_id=f"c-lin-{i}", source="ui")))
             count = 0
             while True:
@@ -192,7 +192,7 @@ async def check_linear_scenarios_all_validate(port: int, token: str) -> None:
             assert count > 0, f"trigger {text!r} produced no frames"
     finally:
         await ws.close()
-    print("[check 6] every linear scenario (memory/skill/voice/flood/generic) emits only contract-valid frames: OK")
+    print("[check 6] every linear scenario (memory/skill/voice/flood/stream/generic) emits only contract-valid frames: OK")
 
 
 async def check_voice_routing_subset(port: int, token: str) -> None:
@@ -237,6 +237,21 @@ async def check_voice_routing_subset(port: int, token: str) -> None:
     print("[check 7] role:voice gets its routing subset only (no snapshot, token not done): OK")
 
 
+async def check_same_conversation_is_serialized(port: int, token: str) -> None:
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        await _drain_snapshot(ws)
+        conversation_id = "c-serialized"
+        await ws.send(json.dumps(_frame("user_msg", text="demo error", conversation_id=conversation_id, source="ui")))
+        await ws.send(json.dumps(_frame("user_msg", text="second turn", conversation_id=conversation_id, source="ui")))
+        first_two = [(await _recv(ws))["type"], (await _recv(ws))["type"]]
+        assert first_two == ["token", "error"], first_two
+    finally:
+        await ws.close()
+    print("[check 8] mock messages in one conversation are serialized: OK")
+
+
 async def main() -> None:
     server, token = await start(mock=True)
     port = server.sockets[0].getsockname()[1]
@@ -248,6 +263,7 @@ async def main() -> None:
         await check_interrupt_cancels_pending_approval(port, token)
         await check_linear_scenarios_all_validate(port, token)
         await check_voice_routing_subset(port, token)
+        await check_same_conversation_is_serialized(port, token)
     finally:
         server.close()
         await server.wait_closed()

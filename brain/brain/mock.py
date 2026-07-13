@@ -43,6 +43,17 @@ _undo_tokens: dict[str, str] = {}
 
 FLOOD_COUNT = 2000
 
+# Three tiny (64x36) solid-colour JPEGs — red/blue/green — cycled by
+# `demo stream` so the sandbox tile visibly updates and the store's
+# drop-stale-by-seq rule is exercised. Kept small to stay out of the way in
+# source. # ponytail: real Lane-2/3 desktop capture is a Phase-3 concern; these
+# scripted frames only prove the tile renders and throttles.
+_STREAM_JPEGS = [
+    "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",
+]
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -87,6 +98,21 @@ def _seed_beliefs() -> list[dict]:
     ]
 
 
+# Live belief registry — seeded once, then mutated by handle_memory_edit and
+# _scenario_memory so the memory panel's edit/delete/restore round-trips are
+# real, and a reconnect snapshot re-pushes the CURRENT state (id-keyed upsert
+# converges, D6). # ponytail: global because the Brain is single-instance.
+_beliefs: dict[str, dict] = {}
+
+
+def _reset_beliefs() -> None:
+    _beliefs.clear()
+    _beliefs.update({b["belief_id"]: b for b in _seed_beliefs()})
+
+
+_reset_beliefs()
+
+
 def _seed_skills() -> list[dict]:
     """Auto + user, skill + playbook, one <60% success, one retired."""
     now = _now_iso()
@@ -124,7 +150,7 @@ async def push_snapshot(send: SendFn) -> None:
     client only. Id-keyed frames -> idempotent on reconnect. `spend_update`
     is always pushed last; tests rely on that to know the snapshot is done."""
     try:
-        for belief in _seed_beliefs():
+        for belief in _beliefs.values():
             await send("belief_state", belief)
         for skill in _seed_skills():
             await send("skill_state", skill)
@@ -248,6 +274,56 @@ async def handle_task_op(msg: dict, broadcast: BroadcastFn) -> None:
         return
 
 
+async def handle_memory_edit(msg: dict, broadcast: BroadcastFn) -> None:
+    """Memory panel round-trips (Step 12). edit -> supersede the old belief and
+    emit a new *user-stated* one (the provenance rule made visible); delete ->
+    archive; restore -> reactivate. The store never mutates a belief locally
+    (rule 3) — these confirming belief_state frames are the only source of truth."""
+    try:
+        belief_id = msg.get("belief_id")
+        op = msg.get("op")
+        cur = _beliefs.get(belief_id)
+        if cur is None:
+            return  # ponytail: unknown belief -> silent no-op
+        if op == "edit":
+            new_id = str(uuid.uuid4())
+            superseded = {**cur, "status": "superseded", "superseded_by": new_id,
+                          "salience": min(cur.get("salience", 0.5), 0.3)}
+            new_belief = {
+                "belief_id": new_id, "text": msg.get("text") or cur["text"], "kind": cur["kind"],
+                "provenance": "user", "salience": max(cur.get("salience", 0.5), 0.8), "status": "active",
+            }
+            _beliefs[belief_id] = superseded
+            _beliefs[new_id] = new_belief
+            await broadcast("belief_state", superseded)
+            await broadcast("belief_state", new_belief)
+        elif op == "delete":
+            archived = {**cur, "status": "archived"}
+            _beliefs[belief_id] = archived
+            await broadcast("belief_state", archived)
+        elif op == "restore":
+            restored = {**cur, "status": "active"}
+            _beliefs[belief_id] = restored
+            await broadcast("belief_state", restored)
+    except ConnectionClosed:
+        return
+
+
+async def handle_lane_pin(msg: dict, broadcast: BroadcastFn) -> None:
+    """Re-pin a task's lane. The mock keeps no task registry, so it just
+    confirms with a task_state carrying the new lane (rule 3 disable-until-
+    confirmed). # ponytail: state defaults to running — lane pins in the demo
+    happen on a live task; a real Brain preserves the actual state."""
+    try:
+        task_id = msg.get("task_id")
+        lane = msg.get("lane")
+        if task_id is None or lane not in (1, 2, 3):
+            return
+        await broadcast("task_state", {"task_id": task_id, "state": "running", "lane": lane})
+    except ConnectionClosed:
+        return
+
+
 # ---- Scenarios ----
 
 
@@ -339,15 +415,20 @@ async def _scenario_memory(conversation_id: str, task_id: str, broadcast: Broadc
     """Live auto-correct: supersedes the snapshot's active npm belief with a
     user-stated pnpm one -- a real, visible before/after (not already-settled
     in the snapshot)."""
-    await broadcast("belief_state", {
+    superseded = {
         "belief_id": "belief-pkg-manager", "text": "Uses npm for package management.",
         "kind": "preference", "provenance": "inferred", "salience": 0.3,
         "status": "superseded", "superseded_by": "belief-pkg-manager-new",
-    })
-    await broadcast("belief_state", {
+    }
+    new_belief = {
         "belief_id": "belief-pkg-manager-new", "text": "Uses pnpm for package management.",
         "kind": "preference", "provenance": "user", "salience": 0.8, "status": "active",
-    })
+    }
+    # Keep the registry in step so a reconnect snapshot shows the corrected state.
+    _beliefs["belief-pkg-manager"] = superseded
+    _beliefs["belief-pkg-manager-new"] = new_belief
+    await broadcast("belief_state", superseded)
+    await broadcast("belief_state", new_belief)
     await broadcast("activity", {
         "text": "Updated what I remember — you switched to pnpm.", "narrate": True,
         "task_id": task_id, "undoable": False, "tier": 1, "lane": 1,
@@ -404,6 +485,22 @@ async def _scenario_flood(conversation_id: str, task_id: str, broadcast: Broadca
             "task_id": task_id, "undoable": False, "tier": 1, "lane": 1,
         })
     await broadcast("done", {"conversation_id": conversation_id})
+
+
+async def _scenario_stream(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
+    """Sandbox (lane 3) task with a scripted desktop stream — cycles the three
+    tiny JPEGs so the tile visibly updates and the store's drop-stale-by-seq
+    rule gets exercised. Leaves the task running so the tile stays inspectable."""
+    await broadcast("task_state", {
+        "task_id": task_id, "state": "running", "lane": 3, "title": "Booking a table (sandbox)",
+        "step": 1, "steps_total": 1, "step_label": "Driving the browser",
+    })
+    for seq in range(6):
+        await broadcast("stream_frame", {
+            "task_id": task_id, "jpeg_b64": _STREAM_JPEGS[seq % len(_STREAM_JPEGS)], "seq": seq,
+        })
+        await asyncio.sleep(0.25)
+    await broadcast("done", {"conversation_id": conversation_id, "task_id": task_id})
 
 
 async def _scenario_everything(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
@@ -465,6 +562,7 @@ _TRIGGERS: dict[str, Callable[[str, str, BroadcastFn], Awaitable[None]]] = {
     "demo voice": _scenario_voice,
     "demo error": _scenario_error,
     "demo flood": _scenario_flood,
+    "demo stream": _scenario_stream,
     "demo everything": _scenario_everything,
 }
 

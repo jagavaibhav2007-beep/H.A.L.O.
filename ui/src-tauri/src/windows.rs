@@ -113,6 +113,14 @@ fn toggle_workspace_impl(app: &AppHandle, orb_x: f64, orb_y: f64) -> Result<(), 
     Ok(())
 }
 
+/// Show (never hide) the workspace — the away-approval toast's click target
+/// (Step 10). Toggling would risk hiding an already-open workspace; the card
+/// is a bottom-center overlay so "deep-jump to the card" is just "be visible".
+#[tauri::command]
+pub fn show_workspace(app: AppHandle) {
+    open_workspace(&app);
+}
+
 /// Always shows (never hides) the workspace, anchored at the orb's current
 /// position — used by the "Open workspace" menu item, where toggling would
 /// surprise-close an already-open workspace.

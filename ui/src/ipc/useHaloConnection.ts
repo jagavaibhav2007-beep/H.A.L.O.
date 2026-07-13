@@ -6,8 +6,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { parseIpcMessage, type IpcMessage, type TaskOpMsg, type UndoMsg, type UserMsg } from "./contract";
+import {
+  parseIpcMessage,
+  type ApprovalResponseMsg,
+  type InterruptMsg,
+  type IpcMessage,
+  type LanePinMsg,
+  type MemoryEditMsg,
+  type TaskOpMsg,
+  type UndoMsg,
+  type UserMsg,
+} from "./contract";
 import { flushQueuedMessages, sendOrQueue } from "./queue";
+
+// Every outbound type the UI can send; one queue/dispatch path for all of them.
+type Outbound =
+  | UserMsg
+  | TaskOpMsg
+  | UndoMsg
+  | ApprovalResponseMsg
+  | InterruptMsg
+  | LanePinMsg
+  | MemoryEditMsg;
 
 interface Session {
   port: number;
@@ -21,7 +41,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const [sidecarError, setSidecarError] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const authenticatedRef = useRef(false);
-  const queueRef = useRef<(UserMsg | TaskOpMsg | UndoMsg)[]>([]);
+  const queueRef = useRef<Outbound[]>([]);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
@@ -127,7 +147,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
 
   // One send/queue path for every outbound type: validate, send if
   // authenticated, else queue for the reconnect flush (Phase-0 rules).
-  const dispatch = useCallback((msg: UserMsg | TaskOpMsg | UndoMsg) => {
+  const dispatch = useCallback((msg: Outbound) => {
     parseIpcMessage(msg);
     const ws = wsRef.current;
     const openSocket = ws?.readyState === WebSocket.OPEN ? ws : null;
@@ -155,6 +175,36 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     (undo_token: string) => dispatch({ type: "undo", ...env(), undo_token }),
     [dispatch],
   );
+  // Approval card (Step 10). reply_to MUST be the approval's `approval_id`
+  // (what the Brain keys pending approvals by), never the request's envelope
+  // id — sending the envelope id leaves the approval unresolved forever.
+  const sendApprovalResponse = useCallback(
+    (reply_to: string, decision: ApprovalResponseMsg["decision"], edited_args?: unknown) =>
+      dispatch({ type: "approval_response", ...env(), reply_to, decision, edited_args }),
+    [dispatch],
+  );
+  // Stale-card rule (Step 10): an interrupt cancels the conversation's pending
+  // approval (implicit deny) and pauses the task — the mock then broadcasts
+  // task_state:paused, which removes the card from the store.
+  const sendInterrupt = useCallback(
+    (conversation_id: string) => dispatch({ type: "interrupt", ...env(), conversation_id }),
+    [dispatch],
+  );
+  // Tasks view (Step 11): re-pin a task's lane. The mock confirms by
+  // broadcasting a task_state with the new lane (rule 3 disable-until-confirm).
+  const sendLanePin = useCallback(
+    (task_id: string, lane: LanePinMsg["lane"]) => dispatch({ type: "lane_pin", ...env(), task_id, lane }),
+    [dispatch],
+  );
+  // Memory panel (Step 12): edit/delete/restore a belief. The store never
+  // mutates a belief locally (rule 3) — the mock replies with the confirming
+  // belief_state(s) (superseding user-stated for edit, archived/active for
+  // delete/restore).
+  const sendMemoryEdit = useCallback(
+    (belief_id: string, op: MemoryEditMsg["op"], text?: string) =>
+      dispatch({ type: "memory_edit", ...env(), belief_id, op, text }),
+    [dispatch],
+  );
 
   return {
     connState,
@@ -162,6 +212,10 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     sendUserMsg,
     sendTaskOp,
     sendUndo,
+    sendApprovalResponse,
+    sendInterrupt,
+    sendLanePin,
+    sendMemoryEdit,
     conversationId: conversationIdRef.current,
   };
 }

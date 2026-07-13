@@ -5,17 +5,26 @@
 // Spec: phase-1-plan.md Steps 5-6, ui_ux/02-workspace.md.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  isPermissionGranted,
+  onAction,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { GlassPanel } from "../components/GlassPanel";
 import { Sidebar } from "./Sidebar";
 import { StatusStrip } from "./StatusStrip";
 import { ChatView } from "../chat/ChatView";
 import { ActivityFeed } from "../activity/ActivityFeed";
+import { TasksView } from "../tasks/TasksView";
+import { MemoryView } from "../memory/MemoryView";
+import { ApprovalOverlay } from "../approvals/ApprovalCard";
 import { useHaloConnection } from "../ipc/useHaloConnection";
 import type { IpcMessage } from "../ipc/contract";
-import { useHaloStore, selectActiveView, selectFocusTarget } from "../state/store";
+import { useHaloStore, selectActiveView, selectApprovals, selectFocusTarget } from "../state/store";
 import type { ActiveView } from "../state/store";
 import "./WorkspaceRoot.css";
 
@@ -59,8 +68,18 @@ export function WorkspaceRoot() {
   const onMessage = useCallback((frame: IpcMessage) => {
     useHaloStore.getState().applyFrame(frame);
   }, []);
-  const { connState, sidecarError, sendTaskOp, sendUserMsg, sendUndo, conversationId } =
-    useHaloConnection(onMessage);
+  const {
+    connState,
+    sidecarError,
+    sendTaskOp,
+    sendUserMsg,
+    sendUndo,
+    sendApprovalResponse,
+    sendInterrupt,
+    sendLanePin,
+    sendMemoryEdit,
+    conversationId,
+  } = useHaloConnection(onMessage);
 
   // Forward the two Phase-0 signals into the store's connection slice,
   // kept distinct per the "never conflate WS state and sidecar health" rule.
@@ -78,6 +97,40 @@ export function WorkspaceRoot() {
     if (!sidecarError) return;
     useHaloStore.getState().applyConnectionEvent({ type: "sidecar_state", process: "brain", state: "error" });
   }, [sidecarError]);
+
+  // Away flow (Step 10): a pending approval that arrives while this window is
+  // hidden fires a Windows toast; clicking it opens the workspace (Rust
+  // `show_workspace`), where the card is already waiting as an overlay. Only
+  // the workspace window toasts (it alone knows its own visibility) so the orb
+  // window doesn't double-fire. onAction click delivery is best-effort on
+  // Windows desktop; if it doesn't land the orb's amber badge is still the way
+  // back — see mem/Gotchas.md.
+  const approvals = useHaloStore(selectApprovals);
+  const toastedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    void (async () => {
+      const visible = await getCurrentWindow().isVisible();
+      if (cancelled || visible) return;
+      const fresh = Object.values(approvals).filter((a) => !toastedRef.current.has(a.approval_id));
+      if (fresh.length === 0) return;
+      if (!((await isPermissionGranted()) || (await requestPermission()) === "granted")) return;
+      for (const a of fresh) {
+        toastedRef.current.add(a.approval_id);
+        sendNotification({ title: "Halo needs your OK", body: a.summary ?? `Approve ${a.tool}?` });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [approvals]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const p = onAction(() => void invoke("show_workspace"));
+    return () => void p.then((unlisten) => unlisten.unregister());
+  }, []);
 
   // Deep-jump plumbing (Step 6): a focusTarget switches to the relevant view
   // then clears itself. ponytail: scroll-into-view for the specific
@@ -175,11 +228,20 @@ export function WorkspaceRoot() {
                     />
                   ) : v.id === "activity" ? (
                     <ActivityFeed sendUndo={sendUndo} />
+                  ) : v.id === "tasks" ? (
+                    <TasksView sendTaskOp={sendTaskOp} sendLanePin={sendLanePin} />
+                  ) : v.id === "memory" ? (
+                    <MemoryView sendMemoryEdit={sendMemoryEdit} />
                   ) : (
                     <ViewPlaceholder name={v.label} />
                   )}
                 </div>
               ))}
+              <ApprovalOverlay
+                conversationId={conversationId}
+                sendApprovalResponse={sendApprovalResponse}
+                sendInterrupt={sendInterrupt}
+              />
             </div>
           </div>
         </GlassPanel>

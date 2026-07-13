@@ -58,6 +58,7 @@ export const selectConversation = (conversationId: string) => (s: HaloStore) =>
   s.conversations[conversationId];
 export const selectActivities = (s: HaloStore) => s.activities;
 export const selectTasks = (s: HaloStore) => s.tasks;
+export const selectStream = (taskId: string) => (s: HaloStore) => s.streams[taskId];
 export const selectApprovals = (s: HaloStore) => s.approvals;
 export const selectBeliefs = (s: HaloStore) => s.beliefs;
 export const selectSkills = (s: HaloStore) => s.skills;

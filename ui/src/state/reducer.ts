@@ -10,6 +10,7 @@ import type {
   BeliefStateMsg,
   IpcMessage,
   SkillStateMsg,
+  StreamFrameMsg,
   TaskStateMsg,
   VoiceStateMsg,
 } from "../ipc/contract";
@@ -86,6 +87,7 @@ export interface HaloState {
   conversations: Record<string, ConversationState>;
   activities: ActivityMsg[]; // ring buffer capped at ACTIVITY_CAP, arrival order (D7)
   tasks: Record<string, TaskStateMsg>; // keyed by task_id (idempotent upsert, D6)
+  streams: Record<string, StreamFrameMsg>; // latest sandbox stream_frame per task_id (stale seq dropped)
   approvals: Record<string, ApprovalRequestMsg>; // keyed by approval_id; presence = pending
   beliefs: Record<string, BeliefStateMsg>; // keyed by belief_id
   skills: Record<string, SkillStateMsg>; // keyed by skill_name
@@ -100,6 +102,7 @@ export const initialState: HaloState = {
   conversations: {},
   activities: [],
   tasks: {},
+  streams: {},
   approvals: {},
   beliefs: {},
   skills: {},
@@ -247,6 +250,14 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       // Unknown task_id -> create it; the reconnect snapshot may race deltas.
       const next = { ...state, tasks: upsert(state.tasks, frame.task_id, frame) };
       return frame.state === "waiting_approval" ? next : resolveApprovalsForTask(next, frame.task_id);
+    }
+
+    case "stream_frame": {
+      // Sandbox lane tile: keep only the latest frame per task, dropping any
+      // that arrive out of order (never queue jpegs — plan Step 11 edge case).
+      const prev = state.streams[frame.task_id];
+      if (prev && frame.seq < prev.seq) return state;
+      return { ...state, streams: upsert(state.streams, frame.task_id, frame) };
     }
 
     case "belief_state":
