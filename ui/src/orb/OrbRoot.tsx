@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { getCurrentWindow, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import { AlertTriangle, MicOff } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { useHaloConnection } from "../ipc/useHaloConnection";
@@ -19,6 +19,7 @@ import {
 } from "../state/store";
 import { PeekBubble } from "./PeekBubble";
 import { usePeekSource, PEEK_DISMISS_MS } from "./usePeekSource";
+import { nextOrbSize } from "./geometry";
 import "../styles/glass.css";
 import "./OrbRoot.css";
 
@@ -33,12 +34,6 @@ const DRAG_THRESHOLD_PX = 4;
 // grabbing the orb to move it started an OS resize instead and ballooned the
 // window into a giant letterboxed rectangle.
 const RESIZE_CORNER_PX = 16;
-
-// Resize is clamped and square (the sphere stays a circle, never a letterboxed
-// ellipse, and can't grow to fill the screen). Kept within tauri.conf's
-// min/max so the OS never overrides these.
-const MIN_ORB_PX = 48;
-const MAX_ORB_PX = 128;
 
 interface DragState {
   startScreenX: number;
@@ -164,8 +159,16 @@ export function OrbRoot() {
     // leaves the tiny window mid-gesture (both drag and resize need it).
     e.currentTarget.setPointerCapture(e.pointerId);
 
+    // Everything below works in LOGICAL pixels, to match the pointer's
+    // e.screenX/screenY (which are CSS/logical). outerPosition()/outerSize()
+    // return PHYSICAL px, so convert via the scale factor -- mixing the two
+    // broke drag (moved at 1/scale speed) and resize (read the window as
+    // already at max) on this 2x-DPI display. See Bugs.md "DPI mismatch".
+    const win = getCurrentWindow();
+    const scale = await win.scaleFactor();
+
     if (inResizeCorner(e)) {
-      const size = await getCurrentWindow().outerSize();
+      const size = (await win.outerSize()).toLogical(scale);
       resizeRef.current = {
         startScreenX: e.screenX,
         startScreenY: e.screenY,
@@ -175,7 +178,7 @@ export function OrbRoot() {
       return;
     }
 
-    const pos = await getCurrentWindow().outerPosition();
+    const pos = (await win.outerPosition()).toLogical(scale);
     dragRef.current = {
       startScreenX: e.screenX,
       startScreenY: e.screenY,
@@ -190,9 +193,12 @@ export function OrbRoot() {
     if (resize) {
       // Square-locked: one delta (whichever axis moved more) drives both
       // dimensions, clamped, so the window can never letterbox or balloon.
-      const delta = Math.max(e.screenX - resize.startScreenX, e.screenY - resize.startScreenY);
-      const next = Math.round(Math.min(MAX_ORB_PX, Math.max(MIN_ORB_PX, resize.startSize + delta)));
-      void getCurrentWindow().setSize(new PhysicalSize(next, next));
+      const next = nextOrbSize(
+        resize.startSize,
+        e.screenX - resize.startScreenX,
+        e.screenY - resize.startScreenY,
+      );
+      void getCurrentWindow().setSize(new LogicalSize(next, next));
       return;
     }
 
@@ -203,7 +209,7 @@ export function OrbRoot() {
     if (!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
     if (!drag.moved) void invoke("hide_peek"); // drag just started -- don't let a stale peek follow the window
     drag.moved = true;
-    void getCurrentWindow().setPosition(new PhysicalPosition(drag.windowStartX + dx, drag.windowStartY + dy));
+    void getCurrentWindow().setPosition(new LogicalPosition(drag.windowStartX + dx, drag.windowStartY + dy));
   }, []);
 
   const onPointerUp = useCallback(async (e: React.PointerEvent) => {
@@ -227,6 +233,14 @@ export function OrbRoot() {
     // edge-snapping. (window-state plugin persists the final position.)
   }, []);
 
+  const onPointerCancel = useCallback((e: React.PointerEvent) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    dragRef.current = null;
+    resizeRef.current = null;
+  }, []);
+
   const onContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     if (isTauri()) void invoke("show_orb_menu");
@@ -240,7 +254,7 @@ export function OrbRoot() {
   const orbVisual = (
     <div className="orb-stack">
       <div
-        className="orb glass"
+        className="orb"
         data-orb-state={orbState}
         data-indeterminate={orbState === "task" && !hasProgress ? "true" : undefined}
         style={{ width: orbSize, height: orbSize, "--task-progress": `${taskProgress}` } as React.CSSProperties}
@@ -290,6 +304,7 @@ export function OrbRoot() {
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
       onContextMenu={onContextMenu}
     >
       {orbVisual}

@@ -247,12 +247,22 @@ export const REQUIRED_FIELDS: Record<MsgType, readonly string[]> = {
 };
 
 const KNOWN_TYPES = new Set(Object.keys(REQUIRED_FIELDS));
-const PHASE0_STRING_FIELDS: Partial<Record<MsgType, readonly string[]>> = {
+const STRING_FIELDS: Partial<Record<MsgType, readonly string[]>> = {
   hello: ["token"],
   user_msg: ["text", "conversation_id", "source"],
+  interrupt: ["conversation_id"],
+  approval_response: ["reply_to", "decision"],
+  task_op: ["op"],
+  undo: ["undo_token"],
   token: ["text", "conversation_id"],
   done: ["conversation_id"],
   error: ["code", "message"],
+};
+
+const ENUM_FIELDS: Partial<Record<MsgType, Readonly<Record<string, readonly unknown[]>>>> = {
+  user_msg: { source: ["ui", "voice"] },
+  approval_response: { decision: ["approve", "deny", "edit"] },
+  task_op: { op: ["pause", "resume", "stop"] },
 };
 
 /** Validate an arbitrary decoded-JSON frame against the contract. Throws on
@@ -275,13 +285,15 @@ export function parseIpcMessage(raw: unknown): IpcMessage {
       throw new Error(`ipc: "${type}" missing required field "${field}"`);
     }
   }
-  for (const field of PHASE0_STRING_FIELDS[type as MsgType] ?? []) {
+  for (const field of STRING_FIELDS[type as MsgType] ?? []) {
     if (typeof obj[field] !== "string") {
       throw new Error(`ipc: "${type}" field "${field}" must be a string`);
     }
   }
-  if (type === "user_msg" && obj.source !== "ui" && obj.source !== "voice") {
-    throw new Error('ipc: "user_msg" field "source" must be "ui" or "voice"');
+  for (const [field, allowed] of Object.entries(ENUM_FIELDS[type as MsgType] ?? {})) {
+    if (!allowed.includes(obj[field])) {
+      throw new Error(`ipc: "${type}" field "${field}" has an invalid value`);
+    }
   }
   if (type === "error" && typeof obj.recoverable !== "boolean") {
     throw new Error('ipc: "error" field "recoverable" must be a boolean');

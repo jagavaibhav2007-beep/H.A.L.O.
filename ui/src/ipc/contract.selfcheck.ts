@@ -39,5 +39,21 @@ expectRejected(
   { ...sample, source: "other" },
   "invalid user_msg source",
 );
+expectRejected(
+  { type: "approval_response", id: "x", ts: "x", reply_to: [], decision: "approve" },
+  "invalid approval reply_to",
+);
+expectRejected(
+  { type: "interrupt", id: "x", ts: "x", conversation_id: [] },
+  "invalid interrupt conversation_id",
+);
+expectRejected(
+  { type: "undo", id: "x", ts: "x", undo_token: [] },
+  "invalid undo token",
+);
+expectRejected(
+  { type: "task_op", id: "x", ts: "x", op: "restart" },
+  "invalid task operation",
+);
 
 console.log("[contract.selfcheck.ts] self-check OK");

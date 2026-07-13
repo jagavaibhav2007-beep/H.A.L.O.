@@ -19,6 +19,18 @@
   --success: #059669;
   --on-primary: #ffffff; /* text on solid --primary fills; same in both modes */
 
+  /* ---- Companion orb ---- */
+  --orb-core-deep: #020653;
+  --orb-core-mid: #0719a8;
+  --orb-core-bright: #123cff;
+  --orb-cyan: #20e5ff;
+  --orb-green: #36f06f;
+  --orb-warm: #ffd34e;
+  --orb-rim: rgba(110, 221, 255, 0.72);
+  --orb-shade: rgba(0, 2, 44, 0.76);
+  --orb-glow: rgba(22, 184, 255, 0.58);
+  --orb-glow-hover: rgba(33, 220, 255, 0.88);
+
   /* ---- Motion — "nothing over 400ms" ---- */
   --motion-fast: 150ms; /* hover/press */
   --motion-base: 200ms; /* state changes */

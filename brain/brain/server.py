@@ -134,21 +134,28 @@ def write_session_file(port: int, token: str, session_file: Path = SESSION_FILE)
     tmp.replace(session_file)
 
 
-async def _handle_user_msg(broadcast, msg: dict, locks: dict[str, asyncio.Lock]) -> None:
+async def _handle_user_msg(broadcast, msg: dict) -> None:
     """Phase-0 stub echo turn. `broadcast` never raises ConnectionClosed (it
     prunes dead clients internally), so a turn here can't crash on a client
     that dropped mid-turn."""
     conversation_id = msg["conversation_id"]
-    async with locks.setdefault(conversation_id, asyncio.Lock()):
-        try:
-            await broadcast("token", {"text": f"echo: {msg['text']}", "conversation_id": conversation_id})
-            await broadcast("done", {"conversation_id": conversation_id})
-        except Exception as exc:  # noqa: BLE001 - turn must never drop silently
-            logger.exception("turn failed for conversation_id=%s", conversation_id)
-            await broadcast(
-                "error",
-                {"code": "turn_failed", "message": str(exc), "recoverable": True, "conversation_id": conversation_id},
-            )
+    try:
+        await broadcast("token", {"text": f"echo: {msg['text']}", "conversation_id": conversation_id})
+        await broadcast("done", {"conversation_id": conversation_id})
+    except Exception as exc:  # noqa: BLE001 - turn must never drop silently
+        logger.exception("turn failed for conversation_id=%s", conversation_id)
+        await broadcast(
+            "error",
+            {"code": "turn_failed", "message": str(exc), "recoverable": True, "conversation_id": conversation_id},
+        )
+
+
+async def _serialize_user_msg(msg: dict, locks: dict[str, asyncio.Lock], send, broadcast, mock: bool) -> None:
+    async with locks.setdefault(msg["conversation_id"], asyncio.Lock()):
+        if mock:
+            await mock_engine.handle_user_msg(msg, send, broadcast)
+        else:
+            await _handle_user_msg(broadcast, msg)
 
 
 async def _auth(ws: ServerConnection, token: str, timeout: float) -> str | None:
@@ -217,10 +224,7 @@ async def _connection_handler(
                 continue
 
             if msg["type"] == "user_msg":
-                if mock:
-                    asyncio.create_task(mock_engine.handle_user_msg(msg, send_fn, broadcast_fn))
-                else:
-                    asyncio.create_task(_handle_user_msg(broadcast_fn, msg, locks))
+                asyncio.create_task(_serialize_user_msg(msg, locks, send_fn, broadcast_fn, mock))
             elif mock and msg["type"] == "approval_response":
                 asyncio.create_task(mock_engine.handle_approval_response(msg, send_fn))
             elif mock and msg["type"] == "interrupt":
@@ -229,6 +233,10 @@ async def _connection_handler(
                 asyncio.create_task(mock_engine.handle_undo(msg, broadcast_fn))
             elif mock and msg["type"] == "task_op":
                 asyncio.create_task(mock_engine.handle_task_op(msg, broadcast_fn))
+            elif mock and msg["type"] == "lane_pin":
+                asyncio.create_task(mock_engine.handle_lane_pin(msg, broadcast_fn))
+            elif mock and msg["type"] == "memory_edit":
+                asyncio.create_task(mock_engine.handle_memory_edit(msg, broadcast_fn))
             # Other inbound types remain validated-but-unhandled outside mock
             # mode, per Phase 0 Step 4's original scope.
     finally:

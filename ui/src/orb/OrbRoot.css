@@ -32,7 +32,27 @@ body,
 .orb {
   box-sizing: border-box;
   border-radius: 50%;
-  position: relative; /* anchors the ::before/::after state rings below */
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border: 1px solid var(--orb-rim);
+  background:
+    radial-gradient(circle at 75% 33%, var(--orb-rim) 0%, transparent 29%),
+    radial-gradient(circle at 48% 112%, var(--orb-cyan) 0%, var(--orb-core-bright) 28%, transparent 54%),
+    radial-gradient(circle at 23% 42%, var(--orb-core-deep) 0%, var(--orb-core-mid) 47%, transparent 72%),
+    linear-gradient(145deg, var(--orb-core-mid) 6%, var(--orb-core-bright) 69%, var(--orb-cyan) 112%);
+  background-repeat: no-repeat;
+  background-size: 112% 112%, 118% 118%, 112% 112%, 100% 100%;
+  background-position: 47% 46%, 50% 55%, 48% 50%, 50% 50%;
+  box-shadow:
+    inset 15px 12px 24px var(--orb-shade),
+    inset -10px -7px 18px var(--orb-glow),
+    inset 0 0 5px var(--orb-rim),
+    0 0 7px var(--orb-glow);
+  transition:
+    filter var(--motion-base) var(--ease-out),
+    box-shadow var(--motion-base) var(--ease-out);
+  animation: orb-energy-drift 6s ease-in-out infinite alternate;
 }
 
 /* ---------------------------------------------------------------------
@@ -53,45 +73,72 @@ body,
   display: inline-flex;
 }
 
-.orb::before,
+.orb::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from 205deg,
+    var(--orb-core-bright),
+    var(--orb-cyan) 20%,
+    var(--orb-green) 43%,
+    transparent 58%,
+    var(--orb-warm) 72%,
+    var(--orb-core-bright) 89%,
+    var(--orb-cyan)
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1px));
+  opacity: 0.9;
+  animation: orb-rim-drift 12s linear infinite;
+}
+
 .orb::after {
   content: "";
   position: absolute;
-  inset: -5px;
+  inset: 2px;
+  border: 2px solid transparent;
   border-radius: 50%;
   pointer-events: none;
-  border: 2px solid transparent;
+}
+
+.orb-hit-area:hover .orb {
+  filter: brightness(1.1) saturate(1.16);
+  box-shadow:
+    inset 13px 10px 22px var(--orb-shade),
+    inset -12px -9px 22px var(--orb-glow-hover),
+    inset 0 0 9px var(--orb-cyan),
+    0 0 12px var(--orb-glow-hover);
 }
 
 /* Idle: faint breathing glow, 4s cycle. */
 .orb[data-orb-state="idle"]::after {
-  box-shadow: 0 0 10px 2px var(--accent-soft);
-  opacity: 0.5;
+  box-shadow: inset 0 0 10px var(--orb-glow);
+  opacity: 0.45;
   animation: orb-breathe 4s ease-in-out infinite;
 }
 
 /* Wake heard: one ripple ring outward, settling to a lit rim. */
-.orb[data-orb-state="wake"]::before {
-  border-color: var(--accent-soft);
-  opacity: 0.7;
-}
 .orb[data-orb-state="wake"]::after {
-  border-color: var(--accent-soft);
+  border-color: var(--orb-cyan);
+  box-shadow: inset 0 0 13px var(--orb-glow-hover);
   animation: orb-ripple 600ms var(--ease-out) 1;
 }
 
 /* Listening: rim lit --accent-soft. ponytail: "reacts subtly to your voice
    level" is fine static per plan -- there's no live audio-amplitude frame
    on the wire yet (Phase 3 voice worker), so the rim doesn't react. */
-.orb[data-orb-state="listening"]::before {
-  border-color: var(--accent-soft);
-  box-shadow: 0 0 8px 1px var(--accent-soft);
+.orb[data-orb-state="listening"]::after {
+  border-color: var(--orb-cyan);
+  box-shadow: inset 0 0 15px var(--orb-glow-hover);
 }
 
 /* Thinking: slow inner gradient swirl. */
 .orb[data-orb-state="thinking"]::after {
-  background: conic-gradient(from 0deg, var(--primary), transparent 60%, var(--primary));
-  opacity: 0.45;
+  background: conic-gradient(from 0deg, var(--orb-cyan), transparent 44%, var(--orb-green), transparent 78%);
+  opacity: 0.58;
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 4px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 4px));
   animation: orb-spin 3s linear infinite;
@@ -99,8 +146,8 @@ body,
 
 /* Speaking: glow pulses gently. */
 .orb[data-orb-state="speaking"]::after {
-  box-shadow: 0 0 14px 3px var(--primary);
-  opacity: 0.55;
+  box-shadow: inset 0 0 18px var(--orb-glow-hover);
+  opacity: 0.72;
   animation: orb-pulse 900ms ease-in-out infinite alternate;
 }
 
@@ -108,7 +155,7 @@ body,
    from step/steps_total; a small fixed arc when absent -- see
    [data-indeterminate] below for the motion-gated "still going" spin). */
 .orb[data-orb-state="task"]::after {
-  background: conic-gradient(var(--primary) calc(var(--task-progress, 0.15) * 360deg), transparent 0deg);
+  background: conic-gradient(var(--orb-cyan) calc(var(--task-progress, 0.15) * 360deg), transparent 0deg);
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
   mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
 }
@@ -119,11 +166,9 @@ body,
 /* Needs approval: ring turns --tier-3 amber, 2 gentle pulses then steady.
    The steady amber border is the plain declaration; the pulse animation
    plays twice on top and settles back onto it. */
-.orb[data-orb-state="approval"]::before {
-  border-color: var(--tier-3);
-  border-width: 3px;
-}
 .orb[data-orb-state="approval"]::after {
+  border-color: var(--tier-3);
+  box-shadow: inset 0 0 13px var(--tier-3);
   animation: orb-approval-pulse 500ms ease-out 2;
 }
 
@@ -138,10 +183,15 @@ body,
    glow off, gray. See .orb-mute-badge for the always-on slash overlay that
    layers on top regardless of which state is on top (ruling: mute is never
    hidden by a higher-priority state). */
-.orb[data-orb-state="muted"]::before,
+.orb[data-orb-state="muted"] {
+  filter: saturate(0.22) brightness(0.62);
+}
+.orb[data-orb-state="muted"]::before {
+  opacity: 0.24;
+}
 .orb[data-orb-state="muted"]::after {
   border-color: var(--text-muted);
-  opacity: 0.35;
+  opacity: 0.5;
 }
 
 @keyframes orb-breathe {
@@ -154,14 +204,26 @@ body,
   }
 }
 
+@keyframes orb-energy-drift {
+  to {
+    background-position: 54% 52%, 47% 47%, 53% 49%, 50% 50%;
+  }
+}
+
+@keyframes orb-rim-drift {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @keyframes orb-ripple {
   0% {
-    transform: scale(1);
-    opacity: 0.85;
+    transform: scale(0.78);
+    opacity: 0.25;
   }
   100% {
-    transform: scale(1.6);
-    opacity: 0;
+    transform: scale(1);
+    opacity: 0.9;
   }
 }
 
@@ -183,22 +245,22 @@ body,
 @keyframes orb-approval-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 transparent;
+    box-shadow: inset 0 0 7px var(--tier-3);
   }
   50% {
-    box-shadow: 0 0 10px 3px var(--tier-3);
+    box-shadow: inset 0 0 18px var(--tier-3);
   }
 }
 
 @keyframes orb-error-flash {
   0% {
     border-color: var(--destructive);
-    box-shadow: 0 0 12px 3px var(--destructive);
+    box-shadow: inset 0 0 18px var(--destructive);
     opacity: 1;
   }
   100% {
     border-color: transparent;
-    box-shadow: 0 0 0 0 transparent;
+    box-shadow: inset 0 0 0 transparent;
     opacity: 0;
   }
 }
@@ -260,8 +322,8 @@ body,
   bottom: 1px;
   width: 9px;
   height: 9px;
-  border-right: 2px solid var(--text-muted);
-  border-bottom: 2px solid var(--text-muted);
+  border-right: 2px solid var(--orb-cyan);
+  border-bottom: 2px solid var(--orb-cyan);
   opacity: 0;
   transition: opacity var(--motion-fast) var(--ease-out);
   pointer-events: none;

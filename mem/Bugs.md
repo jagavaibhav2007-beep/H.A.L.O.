@@ -1,4 +1,32 @@
 # Bugs
+
+## Skill snapshot entries appeared as new-skill orb peeks - 2026-07-12
+**Severity:** Medium.
+**Symptom:** seeded skills such as `flaky-scraper` could appear beside the orb as if Halo had just learned them during startup or reconnect.
+**Root cause:** `usePeekSource` diffed incrementally arriving `skill_state` snapshot frames; after the first frame seeded its seen-set, later frames in the same snapshot looked like new skills.
+**Fix:** removed the redundant skill-diff heuristic; real skill births already emit a narrated activity, which remains an orb peek source.
+**Never do:** infer event semantics from incremental snapshot arrival unless the protocol provides an explicit snapshot boundary; prefer the existing event frame when one exists.
+
+## Phase 1 inbound fields passed presence-only validation - 2026-07-12
+**Severity:** High.
+**Symptom:** malformed `approval_response.reply_to`, `interrupt.conversation_id`, or `undo.undo_token` values passed both contract validators and could crash detached mock handler tasks; an unknown approval decision could fall through the mock flow like an approval.
+**Root cause:** runtime type and enum validation still covered only the original Phase 0 fields after Phase 1 handlers became active.
+**Fix:** expanded the mirrored Python/TypeScript validators for active Phase 1 handler fields and enums; malformed-frame regression cases verify the Brain returns a recoverable error and keeps the connection open.
+**Never do:** when an inbound message type becomes executable, promote every field used for lookup or control flow from presence-only schema checking to runtime type/enum validation in both mirrors.
+
+## Mock Brain bypassed per-conversation serialization - 2026-07-12
+**Severity:** High.
+**Symptom:** two rapid mock `user_msg` frames for the same conversation interleaved output (`token,token` instead of the first turn's `token,error`) and could overwrite conversation-scoped pending approval state.
+**Root cause:** the conversation lock lived inside the non-mock echo handler, while mock user messages were dispatched directly as independent tasks.
+**Fix:** moved serialization to the shared user-message dispatch boundary and added a deterministic mock integration regression.
+**Never do:** keep conversation serialization outside individual turn implementations so every Brain mode and handler path crosses the same lock.
+
+## Orb dominant-axis resize could not shrink on one axis - 2026-07-12
+**Severity:** Medium.
+**Symptom:** dragging the bottom-right resize grip left while keeping the pointer vertically level (or upward while horizontally level) did not shrink the orb.
+**Root cause:** `Math.max(dx, dy)` selected the numerically larger delta, not the delta from the axis with the greatest absolute movement.
+**Fix:** extracted and tested a pure dominant-axis size calculation with 48-128px clamps; pointer cancellation now also clears gesture state.
+**Never do:** choose a resize axis by absolute movement magnitude, preserve that axis's sign, and regression-test growth, shrink, and clamps independently of the native window.
 > ⚠️ READ BEFORE WRITING ANY CODE. Every bug below has already been hit.
 > Do not repeat them. Each entry has a "Never do" rule — treat it as a hard constraint.
 

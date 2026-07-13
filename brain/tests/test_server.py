@@ -136,6 +136,10 @@ async def check_malformed_frame_rejected(port: int, token: str) -> None:
             {"type": "not_a_real_type", "id": "x", "ts": "x"},
             _frame("user_msg", text="hi", conversation_id=[], source="ui"),
             _frame("user_msg", text="hi", conversation_id="conv", source="other"),
+            _frame("approval_response", reply_to=[], decision="approve"),
+            _frame("interrupt", conversation_id=[]),
+            _frame("undo", undo_token=[]),
+            _frame("task_op", op="restart"),
         ]
         for frame in bad_frames:
             await ws.send(json.dumps(frame))

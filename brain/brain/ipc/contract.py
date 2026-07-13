@@ -234,12 +234,22 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "skill_state": ("skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"),
 }
 
-_PHASE0_STRING_FIELDS = {
+_STRING_FIELDS = {
     "hello": ("token",),
     "user_msg": ("text", "conversation_id", "source"),
+    "interrupt": ("conversation_id",),
+    "approval_response": ("reply_to", "decision"),
+    "task_op": ("op",),
+    "undo": ("undo_token",),
     "token": ("text", "conversation_id"),
     "done": ("conversation_id",),
     "error": ("code", "message"),
+}
+
+_ENUM_FIELDS = {
+    "user_msg": {"source": {"ui", "voice"}},
+    "approval_response": {"decision": {"approve", "deny", "edit"}},
+    "task_op": {"op": {"pause", "resume", "stop"}},
 }
 
 
@@ -269,14 +279,18 @@ def parse_ipc_message(raw: object) -> IpcMessage:
                 f'ipc: "{msg_type}" missing required field "{field}"'
             )
 
-    for field in _PHASE0_STRING_FIELDS.get(msg_type, ()):
+    for field in _STRING_FIELDS.get(msg_type, ()):
         if not isinstance(raw[field], str):
             raise IpcValidationError(
                 f'ipc: "{msg_type}" field "{field}" must be a string'
             )
 
-    if msg_type == "user_msg" and raw["source"] not in {"ui", "voice"}:
-        raise IpcValidationError('ipc: "user_msg" field "source" must be "ui" or "voice"')
+    for field, allowed in _ENUM_FIELDS.get(msg_type, {}).items():
+        if raw[field] not in allowed:
+            choices = ", ".join(sorted(allowed))
+            raise IpcValidationError(
+                f'ipc: "{msg_type}" field "{field}" must be one of: {choices}'
+            )
     if msg_type == "error" and not isinstance(raw["recoverable"], bool):
         raise IpcValidationError('ipc: "error" field "recoverable" must be a boolean')
     if msg_type == "error" and "conversation_id" in raw and not isinstance(raw["conversation_id"], str):
