@@ -12,6 +12,7 @@ import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
 import { useHaloStore, selectBeliefs } from "../state/store";
+import { usePendingConfirm } from "../lib/usePendingConfirm";
 import type { BeliefStateMsg, MemoryEditMsg } from "../ipc/contract";
 import "./MemoryView.css";
 
@@ -36,31 +37,9 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
 
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const [pending, setPending] = useState<Record<string, string>>({});
+  const { pending, begin } = usePendingConfirm(beliefs);
   const [pendingDelete, setPendingDelete] = useState<{ id: string; text: string } | null>(null);
   const deleteTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-
-  // rule 3: a belief's op locks until a fresh belief_state (new object ref)
-  // confirms it. Same converge-on-ref-change pattern as the tasks view.
-  // `prev` is captured BEFORE mutating the ref so the updater is a pure
-  // function of its closure (StrictMode double-invokes function-form
-  // updaters in dev to catch side effects like mutating a ref inside one).
-  const prevRefs = useRef<Record<string, BeliefStateMsg>>({});
-  useEffect(() => {
-    const prev = prevRefs.current;
-    prevRefs.current = beliefs;
-    setPending((p) => {
-      let changed = false;
-      const next = { ...p };
-      for (const id of Object.keys(p)) {
-        if (beliefs[id] !== prev[id]) {
-          delete next[id];
-          changed = true;
-        }
-      }
-      return changed ? next : p;
-    });
-  }, [beliefs]);
 
   useEffect(() => () => clearTimeout(deleteTimer.current), []);
 
@@ -71,9 +50,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
   const matches = (b: BeliefStateMsg) => !q || b.text.toLowerCase().includes(q);
 
   const saveEdit = (id: string, text: string) => {
-    if (pending[id]) return;
-    setPending((p) => ({ ...p, [id]: "Saving…" }));
-    sendMemoryEdit(id, "edit", text);
+    if (begin(id, "Saving…")) sendMemoryEdit(id, "edit", text);
   };
 
   const requestDelete = (b: BeliefStateMsg) => {
@@ -83,8 +60,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
     clearTimeout(deleteTimer.current);
     setPendingDelete({ id: b.belief_id, text: b.text });
     deleteTimer.current = setTimeout(() => {
-      setPending((p) => ({ ...p, [b.belief_id]: "Deleting…" }));
-      sendMemoryEdit(b.belief_id, "delete");
+      if (begin(b.belief_id, "Deleting…")) sendMemoryEdit(b.belief_id, "delete");
       setPendingDelete(null);
     }, DELETE_UNDO_MS);
   };
@@ -95,12 +71,11 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
   };
 
   const restore = (id: string) => {
-    if (pending[id]) return;
-    setPending((p) => ({ ...p, [id]: "Restoring…" }));
-    sendMemoryEdit(id, "restore");
+    if (begin(id, "Restoring…")) sendMemoryEdit(id, "restore");
   };
 
-  const archived = all.filter((b) => b.status === "archived").filter(matches);
+  const archived = all.filter((b) => b.status === "archived");
+  const archivedVisible = archived.filter(matches);
   const active = all.filter((b) => b.status === "active").filter(matches);
 
   return (
@@ -108,7 +83,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
       <div className="memory-toolbar">
         <input
           aria-label="Search memory"
-          className="memory-search"
+          className="halo-input memory-search"
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -121,17 +96,17 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
           onClick={() => setShowArchived((v) => !v)}
         >
           <Icon icon={Archive} size={16} />
-          {showArchived ? "Back to active" : `Archived (${all.filter((b) => b.status === "archived").length})`}
+          {showArchived ? "Back to active" : `Archived (${archived.length})`}
         </button>
       </div>
 
-      <div className="memory-scroll">
+      <div className="halo-scroll">
         {showArchived ? (
-          archived.length === 0 ? (
-            <div className="memory-empty">Nothing archived.</div>
+          archivedVisible.length === 0 ? (
+            <div className="halo-empty">Nothing archived.</div>
           ) : (
-            <ul className="memory-list">
-              {archived.map((b) => (
+            <ul className="halo-list memory-list">
+              {archivedVisible.map((b) => (
                 <li key={b.belief_id}>
                   <BeliefCard
                     belief={b}
@@ -147,7 +122,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
             </ul>
           )
         ) : active.length === 0 ? (
-          <div className="memory-empty">
+          <div className="halo-empty">
             {all.length === 0 ? "I haven't learned anything about you yet." : "No memories match that search."}
           </div>
         ) : (
@@ -158,8 +133,8 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
             if (group.length === 0) return null;
             return (
               <section key={kind} className="memory-group">
-                <h3 className="memory-group-title">{KIND_LABEL[kind]}</h3>
-                <ul className="memory-list">
+                <h3 className="halo-group-title memory-group-title">{KIND_LABEL[kind]}</h3>
+                <ul className="halo-list memory-list">
                   {group.map((b) => (
                     <li key={b.belief_id}>
                       <BeliefCard
@@ -210,7 +185,7 @@ function BeliefCard({ belief, history, pending, archivedView, onEdit, onDelete, 
   const inferred = belief.provenance === "inferred";
 
   return (
-    <div className="belief-card" data-provenance={belief.provenance}>
+    <div className="halo-card belief-card" data-provenance={belief.provenance}>
       {editing ? (
         <>
           <textarea
@@ -245,7 +220,7 @@ function BeliefCard({ belief, history, pending, archivedView, onEdit, onDelete, 
               label={inferred ? "Halo inferred" : "you said"}
               tone={inferred ? "primary" : "success"}
             />
-            <span className="belief-salience" aria-label={`salience ${belief.salience.toFixed(2)}`}>
+            <span className="halo-meter belief-salience" aria-label={`salience ${belief.salience.toFixed(2)}`}>
               <span style={{ width: `${Math.round(belief.salience * 100)}%` }} />
             </span>
           </div>

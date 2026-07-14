@@ -22,14 +22,7 @@
 
 .feed-select,
 .feed-search {
-  min-height: var(--hit-min);
   padding: 4px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  font-family: var(--font-sans);
-  font-size: var(--text-sm);
 }
 .feed-search {
   flex: 1;
@@ -139,10 +132,6 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--text-title);
-  color: var(--text-muted);
-  font-size: var(--text-base);
-  text-align: center;
 }
 
 /* ---- "new activity" pill ---- */

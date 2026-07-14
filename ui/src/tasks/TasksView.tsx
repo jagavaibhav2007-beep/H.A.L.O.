@@ -10,18 +10,16 @@
 // no double-render). Embedding the full ApprovalCard inside the task card is a
 // later refinement — the overlay already renders over this view.
 
-import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Check, CircleDot, Pause, Play, ShieldAlert, Square, Users, Zap } from "lucide-react";
+import { AlertTriangle, Check, CircleDot, Pause, Play, ShieldAlert, Square } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
 import { useHaloStore, selectTasks, selectStream } from "../state/store";
+import { usePendingConfirm } from "../lib/usePendingConfirm";
+import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
 import type { TaskStateMsg } from "../ipc/contract";
 import "./TasksView.css";
-
-const LANE_LABEL: Record<1 | 2 | 3, string> = { 1: "Fast", 2: "Takeover", 3: "Sandbox" };
-const LANE_ICON: Record<1 | 2 | 3, LucideIcon> = { 1: Zap, 2: Users, 3: ShieldAlert };
 
 // Card ordering: running first, done last (collapsed). Arrival order breaks ties.
 const STATE_RANK: Record<TaskStateMsg["state"], number> = {
@@ -41,41 +39,14 @@ interface TasksViewProps {
 
 export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
   const tasks = useHaloStore(selectTasks);
-
-  // Rule 3: a task's pending op (pause/resume/stop/pin) locks its controls
-  // until the Brain confirms via a fresh task_state. Every task_state upserts a
-  // NEW object, so a changed reference == confirmation — clear pending then.
-  // `prev` is captured BEFORE mutating the ref so the updater is a pure
-  // function of its closure (StrictMode double-invokes function-form
-  // updaters in dev to catch side effects like mutating a ref inside one).
-  const [pending, setPending] = useState<Record<string, string>>({});
-  const prevRefs = useRef<Record<string, TaskStateMsg>>({});
-  useEffect(() => {
-    const prev = prevRefs.current;
-    prevRefs.current = tasks;
-    setPending((p) => {
-      let changed = false;
-      const next = { ...p };
-      for (const id of Object.keys(p)) {
-        if (tasks[id] !== prev[id]) {
-          delete next[id];
-          changed = true;
-        }
-      }
-      return changed ? next : p;
-    });
-  }, [tasks]);
+  const { pending, begin } = usePendingConfirm(tasks);
 
   const op = (task: TaskStateMsg, kind: "pause" | "resume" | "stop", label: string) => {
-    if (pending[task.task_id]) return;
-    setPending((p) => ({ ...p, [task.task_id]: label }));
-    sendTaskOp(kind, task.task_id);
+    if (begin(task.task_id, label)) sendTaskOp(kind, task.task_id);
   };
-
   const pin = (task: TaskStateMsg, lane: 1 | 2 | 3) => {
-    if (pending[task.task_id] || lane === task.lane) return;
-    setPending((p) => ({ ...p, [task.task_id]: "pinning" }));
-    sendLanePin(task.task_id, lane);
+    if (lane === task.lane) return;
+    if (begin(task.task_id, "pinning")) sendLanePin(task.task_id, lane);
   };
 
   // Done cards collapse out after 24h (by ts display logic only — plan edge case).
@@ -83,18 +54,15 @@ export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
   const visible = Object.values(tasks).filter(
     (t) => t.state !== "done" || now - new Date(t.ts).getTime() < DAY_MS,
   );
-  const ordered = visible
-    .map((t, i) => ({ t, i }))
-    .sort((a, b) => STATE_RANK[a.t.state] - STATE_RANK[b.t.state] || a.i - b.i)
-    .map(({ t }) => t);
+  const ordered = visible.sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]);
 
   if (ordered.length === 0) {
-    return <div className="tasks-empty">Nothing running — tasks I take on will show up here.</div>;
+    return <div className="halo-empty">Nothing running — tasks I take on will show up here.</div>;
   }
 
   return (
-    <div className="tasks-view">
-      <ul className="tasks-list">
+    <div className="halo-scroll">
+      <ul className="halo-list tasks-list">
         {ordered.map((t) => (
           <li key={t.task_id}>
             <TaskCard task={t} pending={pending[t.task_id]} op={op} pin={pin} />
@@ -120,7 +88,7 @@ function TaskCard({ task, pending, op, pin }: CardProps) {
   const collapsed = state === "done";
 
   return (
-    <div className="task-card" data-state={state}>
+    <div className="halo-card task-card" data-state={state}>
       <div className="task-head">
         <span className="task-title">{title ?? "Working"}</span>
         <TaskStateChip state={state} />
@@ -131,7 +99,7 @@ function TaskCard({ task, pending, op, pin }: CardProps) {
         <>
           {hasProgress && (
             <div className="task-progress">
-              <div className="task-progress-bar">
+              <div className="halo-meter task-progress-bar">
                 <span style={{ width: `${(step! / steps_total!) * 100}%` }} />
               </div>
               <span className="task-progress-text">
@@ -186,18 +154,19 @@ function TaskCard({ task, pending, op, pin }: CardProps) {
   );
 }
 
+const TASK_STATE_CHIP: Record<
+  TaskStateMsg["state"],
+  { label: string; tone: "primary" | "tier3" | "muted" | "success" | "destructive"; icon: LucideIcon }
+> = {
+  running: { label: "Running", tone: "primary", icon: CircleDot },
+  waiting_approval: { label: "Waiting for you", tone: "tier3", icon: ShieldAlert },
+  paused: { label: "Paused", tone: "muted", icon: Pause },
+  done: { label: "Done", tone: "success", icon: Check },
+  failed: { label: "Failed", tone: "destructive", icon: AlertTriangle },
+};
+
 function TaskStateChip({ state }: { state: TaskStateMsg["state"] }) {
-  const map: Record<
-    TaskStateMsg["state"],
-    { label: string; tone: "primary" | "tier3" | "muted" | "success" | "destructive"; icon: LucideIcon }
-  > = {
-    running: { label: "Running", tone: "primary", icon: CircleDot },
-    waiting_approval: { label: "Waiting for you", tone: "tier3", icon: ShieldAlert },
-    paused: { label: "Paused", tone: "muted", icon: Pause },
-    done: { label: "Done", tone: "success", icon: Check },
-    failed: { label: "Failed", tone: "destructive", icon: AlertTriangle },
-  };
-  const { label, tone, icon } = map[state];
+  const { label, tone, icon } = TASK_STATE_CHIP[state];
   return <Chip icon={icon} label={label} tone={tone} className="task-state-chip" />;
 }
 
@@ -208,7 +177,7 @@ function LanePin({ task, disabled, onPin }: { task: TaskStateMsg; disabled: bool
     <label className="task-lane">
       <Icon icon={LANE_ICON[task.lane]} size={16} />
       <select
-        className="task-lane-select"
+        className="halo-input task-lane-select"
         value={task.lane}
         disabled={disabled}
         aria-label="Lane"

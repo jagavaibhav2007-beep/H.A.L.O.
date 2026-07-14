@@ -6,11 +6,12 @@
 // (trial/disable/restore/delete) are rule-3 locked — the store never mutates
 // a skill locally; a fresh skill_state is the only source of truth.
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Pencil, Play, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
 import { useHaloStore, selectSkills, selectActivities } from "../state/store";
+import { usePendingConfirm } from "../lib/usePendingConfirm";
 import type { ActivityMsg, SkillOpMsg, SkillStateMsg } from "../ipc/contract";
 import "./SkillsView.css";
 
@@ -30,36 +31,11 @@ export function SkillsView({ sendSkillOp }: SkillsViewProps) {
   const all = Object.values(skills);
 
   const [filter, setFilter] = useState<Filter>("all");
-  const [pending, setPending] = useState<Record<string, string>>({});
+  const { pending, begin } = usePendingConfirm(skills);
   const [trialOpenFor, setTrialOpenFor] = useState<string | null>(null);
-  const prevRefs = useRef<Record<string, SkillStateMsg>>({});
-
-  // rule 3: an op locks a skill's controls until a fresh skill_state (new
-  // object reference) confirms it — same converge-on-ref-change pattern as
-  // the tasks and memory views. `prev` is captured BEFORE mutating the ref so
-  // the updater passed to setPending is a pure function of its closure (React
-  // StrictMode double-invokes function-form updaters in dev specifically to
-  // catch side effects like mutating a ref inside one — see mem/Bugs.md).
-  useEffect(() => {
-    const prev = prevRefs.current;
-    prevRefs.current = skills;
-    setPending((p) => {
-      let changed = false;
-      const next = { ...p };
-      for (const name of Object.keys(p)) {
-        if (skills[name] !== prev[name]) {
-          delete next[name];
-          changed = true;
-        }
-      }
-      return changed ? next : p;
-    });
-  }, [skills]);
 
   const op = (s: SkillStateMsg, kind: "disable" | "restore" | "delete", label: string) => {
-    if (pending[s.skill_name]) return;
-    setPending((p) => ({ ...p, [s.skill_name]: label }));
-    sendSkillOp(s.skill_name, kind);
+    if (begin(s.skill_name, label)) sendSkillOp(s.skill_name, kind);
   };
 
   const trial = (s: SkillStateMsg) => {
@@ -74,7 +50,7 @@ export function SkillsView({ sendSkillOp }: SkillsViewProps) {
 
   if (all.length === 0) {
     return (
-      <div className="skills-empty">
+      <div className="halo-empty skills-empty">
         No skills yet — I create them when I notice you repeating a task. Do something a few times and watch this
         space.
       </div>
@@ -99,7 +75,7 @@ export function SkillsView({ sendSkillOp }: SkillsViewProps) {
         </div>
       </div>
 
-      <div className="skills-scroll">
+      <div className="halo-scroll">
         <SkillGroup title="Auto-learned ✨" skills={auto} pending={pending} op={op} onTrial={trial} />
         <SkillGroup title="User-made 🛠" skills={user} pending={pending} op={op} onTrial={trial} />
         {retired.length > 0 && (
@@ -136,8 +112,8 @@ function SkillGroup({
   if (skills.length === 0) return null;
   return (
     <section className="skills-group">
-      <h3 className="skills-group-title">{title}</h3>
-      <ul className="skills-list">
+      <h3 className="halo-group-title skills-group-title">{title}</h3>
+      <ul className="halo-list skills-list">
         {skills.map((s) => (
           <li key={s.skill_name}>
             <SkillCard skill={s} pending={pending[s.skill_name]} op={op} onTrial={onTrial} retiredGroup={retiredGroup} />
@@ -166,7 +142,7 @@ function SkillCard({
   const learnedDate = formatLearned(skill.born_at);
 
   return (
-    <div className="skill-card" data-status={skill.status}>
+    <div className="halo-card skill-card" data-status={skill.status}>
       <div className="skill-head">
         <Icon icon={skill.origin === "auto" ? Sparkles : Pencil} size={20} />
         <span className="skill-name">{skill.skill_name}</span>
@@ -177,7 +153,7 @@ function SkillCard({
         used {skill.uses}× · {Math.round(skill.success_rate * 100)}% success · learned {learnedDate}
       </p>
 
-      <div className="skill-rate-bar" data-low={lowSuccess || undefined}>
+      <div className="halo-meter skill-rate-bar" data-low={lowSuccess || undefined}>
         <span style={{ width: `${Math.round(skill.success_rate * 100)}%` }} />
       </div>
 

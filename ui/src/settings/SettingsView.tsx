@@ -41,17 +41,17 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   }
 
   return (
-    <div className="settings-view">
+    <div className="halo-scroll">
       <div className="settings-content">
         <section className="settings-group">
-          <h3 className="settings-group-title">General</h3>
+          <h3 className="halo-group-title settings-group-title">General</h3>
           <div className="settings-row">
             <span className="settings-label">Summon hotkey</span>
             <span className="settings-value">{hotkey ?? (isTauri() ? "…" : "not available in browser preview")}</span>
           </div>
           <div className="settings-row">
             <span className="settings-label">Theme</span>
-            <select className="settings-select" value={theme} onChange={(e) => onTheme(e.target.value as Theme)}>
+            <select className="halo-input settings-select" value={theme} onChange={(e) => onTheme(e.target.value as Theme)}>
               <option value="auto">Auto</option>
               <option value="light">Light</option>
               <option value="dark">Dark</option>
@@ -67,7 +67,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
         </section>
 
         <section className="settings-group">
-          <h3 className="settings-group-title">Voice</h3>
+          <h3 className="halo-group-title settings-group-title">Voice</h3>
           <div className="settings-row">
             <label className="settings-label">
               <input
@@ -98,7 +98,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
         </section>
 
         <section className="settings-group">
-          <h3 className="settings-group-title">Models</h3>
+          <h3 className="halo-group-title settings-group-title">Models</h3>
           {MOCK_MODELS.map((m) => (
             <div className="settings-row" key={m}>
               <span className="settings-value">{m}</span>
@@ -111,7 +111,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
         </section>
 
         <section className="settings-group">
-          <h3 className="settings-group-title">Keys &amp; connections</h3>
+          <h3 className="halo-group-title settings-group-title">Keys &amp; connections</h3>
           {["OpenAI", "Anthropic", "Google"].map((name) => (
             <div className="settings-row" key={name} data-disabled>
               <span className="settings-label">{name}</span>
@@ -122,7 +122,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
         </section>
 
         <details className="settings-advanced">
-          <summary>Advanced</summary>
+          <summary className="halo-group-title">Advanced</summary>
           <div className="settings-row" data-disabled>
             <span className="settings-label">Activity log cap</span>
             <span className="settings-value">10,000 entries</span>

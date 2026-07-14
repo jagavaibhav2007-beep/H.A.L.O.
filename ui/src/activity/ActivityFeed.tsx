@@ -6,16 +6,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Activity as ActivityIcon, ArrowDown, RotateCcw, ShieldAlert, Users, Zap } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { Activity as ActivityIcon, ArrowDown, RotateCcw, ShieldAlert } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { useHaloStore, selectActivities } from "../state/store";
+import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
 import type { ActivityMsg } from "../ipc/contract";
 import "./ActivityFeed.css";
-
-const LANE_LABEL: Record<1 | 2 | 3, string> = { 1: "Fast", 2: "Takeover", 3: "Sandbox" };
-const LANE_ICON: Record<1 | 2 | 3, LucideIcon> = { 1: Zap, 2: Users, 3: ShieldAlert };
 
 type TierFilter = "all" | "1" | "2" | "3";
 type LaneFilter = "all" | "1" | "2" | "3";
@@ -126,19 +123,19 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
   return (
     <div className="feed">
       <div className="feed-filters">
-        <select aria-label="Filter by tier" className="feed-select" value={tier} onChange={(e) => setTier(e.target.value as TierFilter)}>
+        <select aria-label="Filter by tier" className="halo-input feed-select" value={tier} onChange={(e) => setTier(e.target.value as TierFilter)}>
           <option value="all">All tiers</option>
           <option value="1">Tier 1</option>
           <option value="2">Tier 2</option>
           <option value="3">Tier 3</option>
         </select>
-        <select aria-label="Filter by lane" className="feed-select" value={lane} onChange={(e) => setLane(e.target.value as LaneFilter)}>
+        <select aria-label="Filter by lane" className="halo-input feed-select" value={lane} onChange={(e) => setLane(e.target.value as LaneFilter)}>
           <option value="all">All lanes</option>
           <option value="1">Fast</option>
           <option value="2">Takeover</option>
           <option value="3">Sandbox</option>
         </select>
-        <select aria-label="Filter by task" className="feed-select" value={task} onChange={(e) => setTask(e.target.value)}>
+        <select aria-label="Filter by task" className="halo-input feed-select" value={task} onChange={(e) => setTask(e.target.value)}>
           <option value="all">All tasks</option>
           {taskIds.map((id) => (
             <option key={id} value={id}>
@@ -152,7 +149,7 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
         </label>
         <input
           aria-label="Search activity"
-          className="feed-search"
+          className="halo-input feed-search"
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -162,7 +159,7 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
 
       <div className="feed-scroll" ref={scrollRef}>
         {rows.length === 0 ? (
-          <div className="feed-empty">
+          <div className="halo-empty feed-empty">
             {activities.length === 0
               ? "Nothing yet — everything I do will show up here."
               : "No entries match these filters."}

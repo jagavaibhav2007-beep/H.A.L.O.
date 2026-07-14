@@ -5,15 +5,12 @@
 // Spec: phase-1-plan.md Step 6.
 
 import { useEffect, useState } from "react";
-import { Mic, MicOff, ShieldAlert, Users, Zap } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { Mic, MicOff } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
 import { useHaloStore, selectRunningTask, selectVoice } from "../state/store";
-
-const LANE_LABEL: Record<1 | 2 | 3, string> = { 1: "Fast", 2: "Takeover", 3: "Sandbox" };
-const LANE_ICON: Record<1 | 2 | 3, LucideIcon> = { 1: Zap, 2: Users, 3: ShieldAlert };
+import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
 
 const MIC_LABEL: Record<string, string> = {
   idle: "Mic idle",
