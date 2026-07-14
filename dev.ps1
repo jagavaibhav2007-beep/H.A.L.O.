@@ -1,8 +1,8 @@
 # Launches Halo Phase 0 for local development. Tauri owns and supervises
 # Brain and Voice; the standalone options are for worker-only debugging.
 # Usage: ./dev.ps1  (or ./dev.ps1 -Only brain|voice|ui to launch just one)
-#        ./dev.ps1 -Smoke  runs the Phase 0 exit-criteria smoke test in-place
-#        (no windows spawned) instead of launching the dev processes.
+#        ./dev.ps1 -Smoke  runs the Phase 0 and Phase 1 exit-criteria protocol
+#        checks in-place (no windows spawned) instead of launching processes.
 #        ./dev.ps1 -Mock  runs the scripted mock Brain (Phase 1 Step 2). With
 #        the default (-Only all) it launches the full app: Tauri spawns the
 #        Brain with --mock via the HALO_MOCK env var, so the real UI talks to
@@ -38,6 +38,9 @@ function Start-Voice {
 
 if ($Smoke) {
     python "$root\shared\smoke_test.py"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    python "$root\shared\phase1_check.py"
     exit $LASTEXITCODE
 }
 

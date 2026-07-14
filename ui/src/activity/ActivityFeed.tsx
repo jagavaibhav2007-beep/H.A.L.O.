@@ -126,19 +126,19 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
   return (
     <div className="feed">
       <div className="feed-filters">
-        <select className="feed-select" value={tier} onChange={(e) => setTier(e.target.value as TierFilter)}>
+        <select aria-label="Filter by tier" className="feed-select" value={tier} onChange={(e) => setTier(e.target.value as TierFilter)}>
           <option value="all">All tiers</option>
           <option value="1">Tier 1</option>
           <option value="2">Tier 2</option>
           <option value="3">Tier 3</option>
         </select>
-        <select className="feed-select" value={lane} onChange={(e) => setLane(e.target.value as LaneFilter)}>
+        <select aria-label="Filter by lane" className="feed-select" value={lane} onChange={(e) => setLane(e.target.value as LaneFilter)}>
           <option value="all">All lanes</option>
           <option value="1">Fast</option>
           <option value="2">Takeover</option>
           <option value="3">Sandbox</option>
         </select>
-        <select className="feed-select" value={task} onChange={(e) => setTask(e.target.value)}>
+        <select aria-label="Filter by task" className="feed-select" value={task} onChange={(e) => setTask(e.target.value)}>
           <option value="all">All tasks</option>
           {taskIds.map((id) => (
             <option key={id} value={id}>
@@ -151,6 +151,7 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
           Undoable only
         </label>
         <input
+          aria-label="Search activity"
           className="feed-search"
           type="search"
           value={query}

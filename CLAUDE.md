@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-**H.A.L.O.** — a local, resident desktop AI companion: Tauri+React UI, Python/LangGraph brain, Python/Pipecat voice worker, talking over an authenticated local-loopback WebSocket. **Phase 0 (skeleton & contract) is complete and hardened** — three real processes spawn, authenticate, and recover from crashes with proper shutdown ordering. **Phase 1 (front-end shell) is in progress** — the full premium UI with mocked Brain, design tokens, global hotkey, and orb+workspace windows. See [phases.md](phases.md) for the roadmap; [phase-1-plan.md](phase-1-plan.md) for current work.
+**H.A.L.O.** — a local, resident desktop AI companion: Tauri+React UI, Python/LangGraph brain, Python/Pipecat voice worker, talking over an authenticated local-loopback WebSocket. **Phase 0 (skeleton & contract) is complete and hardened** — three real processes spawn, authenticate, and recover from crashes with proper shutdown ordering. **Phase 1 (front-end shell) is complete** — the full premium UI (chat, activity, memory, tasks, skills, settings, orb+workspace windows) renders and animates against a scripted mock Brain; the automated gate (`./dev.ps1 -Smoke`) and the native checklist ([VERIFY.md](VERIFY.md)) are both green. **Phase 2 (backend spine) has not started yet** — the real Brain (LangGraph loop, permission gate, memory, model router) still needs to be built behind the same mock-proven contract. See [phases.md](phases.md) for the roadmap; [phase-1-plan.md](phase-1-plan.md) for how Phase 1 was built (reference for the mocked-Brain pattern, not open work).
 
 The repo has two layers: design docs (source of truth for *behavior* and *architecture*) and the code that implements them.
 
@@ -25,10 +25,12 @@ Three independent process trees (`ui/` Rust+Node, `brain/` Python, `voice/` Pyth
 ```powershell
 ./dev.ps1              # launches Tauri (UI parent spawns brain, voice sidecars)
 ./dev.ps1 -Only ui      # just one of: ui | brain | voice (for standalone debugging)
-./dev.ps1 -Smoke        # runs the Phase 0 E2E smoke test in-place (no windows)
+./dev.ps1 -Mock         # full app, but Brain launches with --mock (HALO_MOCK) for scripted demo scenarios
+./dev.ps1 -Smoke        # runs Phase 0 (shared/smoke_test.py) then Phase 1 (shared/phase1_check.py) protocol gates in-place (no windows)
 ```
+The default `./dev.ps1` (no flags) spawns the plain Phase 0 echo Brain, which does not respond to `demo ...` triggers — use `-Mock` to drive any of the scripted scenarios in `brain/brain/mock.py`. After the automated gate passes, [VERIFY.md](VERIFY.md) is the manual native-app checklist (render matrix, keyboard/a11y, performance/recovery) — run it against `./dev.ps1 -Mock` for anything with a visual/runtime surface, since green scripts alone don't catch rendering or lifecycle bugs (see Architecture below).
 
-**Phase 1 (mocked Brain) for UI development:**
+**Mocked Brain for standalone UI development** (no Tauri, browser-only iteration):
 ```powershell
 python -m brain --mock   # starts Brain in mock mode with scripted scenarios
 # Then launch UI separately with npm run tauri dev or npm run dev
@@ -41,6 +43,8 @@ npm run tauri dev       # native window; needs Rust/cargo + MSVC Build Tools (C+
 npm run dev              # browser-only fallback, no Rust toolchain needed
 npx tsc --noEmit         # typecheck
 node ui/src/ipc/contract.selfcheck.ts   # contract self-check (from repo root)
+node ui/src/ipc/queue.selfcheck.ts      # interrupted-queue-flush self-check (from repo root)
+npx tsx ui/src/state/reducer.selfcheck.ts   # event-store reducer self-check: replays a canned frame log and asserts projected state
 ```
 Rust side (`ui/src-tauri/`):
 ```powershell
@@ -71,7 +75,12 @@ python shared/check_contract_sync.py
 ```powershell
 python shared/smoke_test.py
 ```
-No test framework is used anywhere in this repo (plain `asyncio` + `assert` scripts) — don't introduce pytest/jest without a real reason.
+
+**Phase 1 exit-criteria protocol check** (connects as a fake UI client to `--mock`, triggers every `demo *` scenario, asserts frame sequences — contract-valid frames, approval approve/deny/edit branches, undo reversal, reconnect snapshot idempotence; visual rendering is out of scope here, that's [VERIFY.md](VERIFY.md)):
+```powershell
+python shared/phase1_check.py
+```
+Both run together via `./dev.ps1 -Smoke`. No test framework is used anywhere in this repo (plain `asyncio` + `assert` scripts) — don't introduce pytest/jest without a real reason.
 
 ## Architecture
 
@@ -89,6 +98,10 @@ No test framework is used anywhere in this repo (plain `asyncio` + `assert` scri
 
 **UI WS client** (`ui/src/ipc/useHaloConnection.ts`) is transport-only by design — no business logic lives in the UI. It re-reads `session.json` via a Tauri command (`read_session` in `lib.rs`) on every (re)connect, queues outbound `user_msg`s until `hello_ack`, and is written to survive React StrictMode's double-invoke of effects (teardown flag checked before every async continuation; handlers nulled before the intentional close so it doesn't trigger the reconnect loop).
 
+**UI event store is split pure/impure on purpose.** `ui/src/state/reducer.ts` is a framework-free `applyFrame(state, frame) → state` projection of every IPC frame type (plus `deriveOrbState`, the priority selector `approval > error > task > voice`) — this is what `reducer.selfcheck.ts` replays canned frame logs against. `ui/src/state/store.ts` is the only impure piece: a thin zustand wrapper that calls the pure reducer inside `set()`, plus UI-only navigation state (`activeView`/`focusTarget`) that never came from a frame and so has no business being in the reducer. Each of the orb and workspace windows boots its **own** store instance (separate webviews, no shared JS heap) — both independently open a WS connection and independently project state from the same broadcast frames.
+
+**"Lock on press, unlock only on confirm" (rule 3) governs every outbound action with a visible affordance** (approve/deny/edit, pause/resume/stop, lane-pin, memory edit/delete/restore, skill trial/disable/restore). The control disables immediately on click and clears only when a frame confirming that exact change arrives — never optimistically. Implement the "did it confirm" check by comparing object identity/timestamp of the relevant store slice, not by mutating a ref inside a `setState` functional updater — React 18 StrictMode double-invokes functional updaters in dev, and a side effect (ref mutation) inside one silently breaks the unlock path on the second invocation while looking correct on the first (see `mem/Bugs.md`, "Rule-3 unlock on confirm"). If you add a new confirmable action, exercise the unlock step live, not just the lock step — the failure mode is invisible until a real confirming frame lands.
+
 **Testing & verification — green tests are not sufficient.** Automated selfchecks and contract validators catch schema drift and logic errors in isolation. But several classes of bugs are *only* found by running the real stack end-to-end:
   - **UI/rendering bugs** (orb resize conflicts with drag, window state persistence quirks, component layering).
   - **Routing & visibility rules** (Voice should never receive the full UI snapshot; confirmed by running the real three-process stack).
@@ -96,7 +109,7 @@ No test framework is used anywhere in this repo (plain `asyncio` + `assert` scri
   - **Mock handler completeness** (UI affordances that send outbound message types must be handled by the mock or the UI will hang waiting for confirmation).
   - **Process lifecycle** (shutdown-flag-before-kill ordering is tested only by an actual graceful-close test, not by checking "does it spawn").
 
-**Pattern: After implementing a Phase 1+ step or fixing a bug, launch the real app (`./dev.ps1`) and exercise the surface.** Selfchecks pass → run the app. This is part of the standard verification flow, not optional.
+**Pattern: after implementing a step or fixing a bug, launch the real app (`./dev.ps1` or `./dev.ps1 -Mock`) and exercise the surface.** Selfchecks pass → run the app. This is part of the standard verification flow, not optional.
 
 **Contract drift between TypeScript and Python is caught by:** `python shared/check_contract_sync.py` (after editing `shared/ipc-contract.json`, `ui/src/ipc/contract.ts`, or `brain/brain/ipc/contract.py`).
 
@@ -107,17 +120,17 @@ No test framework is used anywhere in this repo (plain `asyncio` + `assert` scri
 - Commit messages and PR descriptions should stand on their own for outside contributors: explain *why*, avoid internal shorthand, don't assume prior conversation context.
 - Prefer small, reviewable commits over large mixed ones.
 
-## Phase 1 specifics — UI against a mocked Brain
+## Working against the mocked Brain
 
-Phase 1 build ([phase-1-plan.md](phase-1-plan.md)) renders every surface against a **scripted mock Brain** that replays predetermined IPC events. The mock is in `brain/server.py` (`--mock` flag) and supports role-based routing (Voice only sees its protocol subset, UI sees everything).
+The UI still has no real Brain to talk to — Phase 2 hasn't started — so every UI surface (including Phase 2+ contract additions, until the real Brain lands) is built and verified against a **scripted mock Brain** that replays predetermined IPC events. The mock lives in `brain/brain/mock.py` (state + `demo_*`/`_scenario_*` scenario methods, plus live `_beliefs`/`_skills` registries so edits round-trip realistically) and is dispatched from `brain/server.py` (`--mock` flag / `HALO_MOCK` env var), which also supports role-based routing (Voice only sees its protocol subset, UI sees everything).
 
-**When implementing a Phase 1 step that sends a new outbound message type:**
+**When adding a new outbound message type:**
 1. Add the type to `shared/ipc-contract.json`, mirror it to both `ui/src/ipc/contract.ts` and `brain/brain/ipc/contract.py`.
-2. **Add a mock handler in `brain/server.py`** before testing the UI. If the UI sends `task_op` and the mock doesn't handle it, the UI affordance (e.g., "Stop" button) will hang indefinitely waiting for a confirming `task_state` that never arrives — indistinguishable from a UI bug.
+2. **Add a mock handler in `brain/brain/mock.py` and wire it into `server.py`'s dispatch table** before testing the UI. If the UI sends `task_op` and the mock doesn't handle it, the UI affordance (e.g., "Stop" button) will hang indefinitely waiting for a confirming `task_state` that never arrives — indistinguishable from a UI bug (this exact bug happened once, see `mem/Bugs.md`).
 3. Verify with `python shared/check_contract_sync.py`.
-4. Test with `./dev.ps1` and exercise the surface end to end.
+4. Test with `./dev.ps1 -Mock` and exercise the surface end to end (plain `./dev.ps1` uses the non-mock Phase 0 echo Brain and won't respond to `demo ...` triggers).
 
-**Mock Brain scenarios** are scripted in `brain/server.py` (`demo_*` methods). When adding a new inbound message type, verify the mock *and* the test suite (`brain/tests/test_mock.py`) handle it.
+**Mock Brain scenarios** are scripted in `brain/brain/mock.py` (`demo_*`/`_scenario_*` methods). When adding a new inbound message type, verify the mock *and* the test suite (`brain/tests/test_mock.py`) handle it, and extend `shared/phase1_check.py` if the new scenario needs an automated frame-sequence assertion.
 
 ## Picking a skill/plugin
 
@@ -131,6 +144,7 @@ Before doing non-trivial work, check whether an available skill or agent already
 - **[mem/Gotchas.md](mem/Gotchas.md)** — non-obvious traps: port ephemeral, shutdown flag ordering, StrictMode double-invoke, Tauri window-state plugin gotchas.
 - **[mem/Patterns.md](mem/Patterns.md)** — established patterns for common tasks (event store, mock design, etc.).
 - **[mem/Decisions.md](mem/Decisions.md)** — why certain design choices were made (e.g., why orb is user-resizable, why all-edge resize was replaced with corner grip).
+- **[mem/MigrationLog.md](mem/MigrationLog.md)** — database schema changes, newest first (empty until Phase 2 introduces SQLite).
 
 **Before implementing or debugging:** check `mem/Bugs.md` for similar symptoms and "Never do" rules. Before starting a new feature, check `mem/Decisions.md` to understand prior reasoning. **Update mem/ at the end of your session** if you:
 - Hit a new bug (add to Bugs.md with root cause and "Never do" rule).

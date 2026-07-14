@@ -107,6 +107,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
     <div className="memory-view">
       <div className="memory-toolbar">
         <input
+          aria-label="Search memory"
           className="memory-search"
           type="search"
           value={query}
