@@ -26,7 +26,7 @@ import { SettingsView } from "../settings/SettingsView";
 import { ApprovalOverlay } from "../approvals/ApprovalCard";
 import { useHaloConnection } from "../ipc/useHaloConnection";
 import type { IpcMessage } from "../ipc/contract";
-import { useHaloStore, selectActiveView, selectApprovals, selectFocusTarget } from "../state/store";
+import { useHaloStore, selectActiveView, selectApprovals } from "../state/store";
 import type { ActiveView } from "../state/store";
 import "./WorkspaceRoot.css";
 
@@ -55,8 +55,6 @@ export function WorkspaceRoot() {
 
   const activeView = useHaloStore(selectActiveView);
   const setActiveView = useHaloStore((s) => s.setActiveView);
-  const focusTarget = useHaloStore(selectFocusTarget);
-  const clearFocusTarget = useHaloStore((s) => s.clearFocusTarget);
 
   // The workspace window owns the live connection; it feeds every inbound
   // frame straight into the event store (Step 4).
@@ -129,15 +127,6 @@ export function WorkspaceRoot() {
     const p = onAction(() => void invoke("show_workspace"));
     return () => void p.then((unlisten) => unlisten.unregister());
   }, []);
-
-  // Deep-jump plumbing (Step 6): a focusTarget switches to the relevant view
-  // then clears itself. ponytail: scroll-into-view for the specific
-  // approval/task card lands once the real panels exist (Steps 9-10).
-  useEffect(() => {
-    if (!focusTarget) return;
-    setActiveView("tasks");
-    clearFocusTarget();
-  }, [focusTarget, setActiveView, clearFocusTarget]);
 
   // Ctrl+K focuses the chat input from anywhere — not Tauri-specific, so it
   // works in the D9 browser fallback too.

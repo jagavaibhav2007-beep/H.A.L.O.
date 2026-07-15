@@ -122,21 +122,17 @@ export function deriveOrbState(state: HaloState): OrbState {
   if (state.connection.brainStatus === "error") return "error";
   if (Object.values(state.tasks).some((t) => t.state === "running")) return "task";
   // voice.state is already a single value, not several simultaneous signals,
-  // so this is a direct passthrough rather than a priority scan: muted/wake/
-  // listening/thinking/speaking each map 1:1, "idle" is the fallthrough.
-  switch (state.voice.state) {
-    case "muted":
-    case "wake":
-    case "listening":
-    case "thinking":
-    case "speaking":
-      return state.voice.state;
-    default:
-      return "idle";
-  }
+  // and every VoiceStateMsg state is a valid OrbState — direct passthrough.
+  return state.voice.state;
 }
 
 // ---- Helpers ----
+
+// TS can't narrow `t === open` to AssistantTurn by identity alone, so the
+// role check rides along at every patch site — centralized here.
+function patchOpenTurn(turns: Turn[], open: Turn, patch: Partial<AssistantTurn>): Turn[] {
+  return turns.map((t) => (t === open && t.role === "assistant" ? { ...t, ...patch } : t));
+}
 
 function getConversation(state: HaloState, conversationId: string): ConversationState {
   return (
@@ -218,9 +214,7 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       const conv = getConversation(state, frame.conversation_id);
       const open = openTurn(conv);
       if (!open) return state; // nothing streaming to close
-      const turns = conv.turns.map((t) =>
-        t === open && t.role === "assistant" ? { ...t, status: "done" as const, taskId: frame.task_id } : t,
-      );
+      const turns = patchOpenTurn(conv.turns, open, { status: "done", taskId: frame.task_id });
       return replaceConversation(state, { ...conv, turns });
     }
 
@@ -229,11 +223,7 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       const conv = getConversation(state, frame.conversation_id);
       const open = openTurn(conv);
       const error = { code: frame.code, message: frame.message, recoverable: frame.recoverable };
-      const turns = open
-        ? conv.turns.map((t) =>
-            t === open && t.role === "assistant" ? { ...t, status: "error" as const, error } : t,
-          )
-        : conv.turns;
+      const turns = open ? patchOpenTurn(conv.turns, open, { status: "error", error }) : conv.turns;
       // rule 8: a turn is never lost — flag the input for restore regardless
       // of whether a turn had started streaming yet.
       return replaceConversation(state, { ...conv, turns, needsInputRestore: true });
@@ -328,11 +318,10 @@ export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): 
         conversations[id] = open
           ? {
               ...conv,
-              turns: conv.turns.map((t) =>
-                t === open && t.role === "assistant"
-                  ? { ...t, status: "interrupted" as const, note: "interrupted — connection lost" }
-                  : t,
-              ),
+              turns: patchOpenTurn(conv.turns, open, {
+                status: "interrupted",
+                note: "interrupted — connection lost",
+              }),
             }
           : conv;
       }
