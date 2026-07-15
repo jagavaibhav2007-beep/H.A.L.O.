@@ -51,10 +51,14 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn brain_cmd() -> Command {
+fn python_cmd(module: &str) -> Command {
     let mut cmd = Command::new("python");
-    cmd.args(["-m", "brain"])
-        .current_dir(repo_root().join("brain"));
+    cmd.args(["-m", module]).current_dir(repo_root().join(module));
+    cmd
+}
+
+fn brain_cmd() -> Command {
+    let mut cmd = python_cmd("brain");
     // ponytail: HALO_MOCK=1 (set by dev.ps1 -Mock) runs the supervised Brain
     // as the scripted mock scenario player. An env var, not a Cargo feature,
     // because it's a dev-time toggle, not a compile-time one.
@@ -65,10 +69,25 @@ fn brain_cmd() -> Command {
 }
 
 fn voice_cmd() -> Command {
-    let mut cmd = Command::new("python");
-    cmd.args(["-m", "voice"])
-        .current_dir(repo_root().join("voice"));
-    cmd
+    python_cmd("voice")
+}
+
+/// One rung of the ladder: sleeps and returns true to retry, or emits the
+/// persistent "error" state and returns false once the ladder is exhausted.
+/// (Control flow only — `backoff_delay` stays a separate pure fn for its test.)
+fn backoff_or_error(app: &AppHandle, name: &'static str, attempt: &mut u32) -> bool {
+    match backoff_delay(*attempt) {
+        Some(d) => {
+            *attempt += 1;
+            emit_state(app, name, "restarting");
+            thread::sleep(d);
+            true
+        }
+        None => {
+            emit_state(app, name, "error");
+            false
+        }
+    }
 }
 
 fn publish_child(shared: &Shared, shutdown: &AtomicBool, mut child: Child) -> bool {
@@ -104,18 +123,10 @@ fn supervise(
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("halo: failed to spawn {name}: {e}");
-                    match backoff_delay(attempt) {
-                        Some(d) => {
-                            attempt += 1;
-                            emit_state(&app, name, "restarting");
-                            thread::sleep(d);
-                            continue;
-                        }
-                        None => {
-                            emit_state(&app, name, "error");
-                            return;
-                        }
+                    if backoff_or_error(&app, name, &mut attempt) {
+                        continue;
                     }
+                    return;
                 }
             };
             if !publish_child(&shared, &shutdown, child) {
@@ -146,16 +157,8 @@ fn supervise(
             if start.elapsed() > HEALTHY_UPTIME {
                 attempt = 0;
             }
-            match backoff_delay(attempt) {
-                Some(d) => {
-                    attempt += 1;
-                    emit_state(&app, name, "restarting");
-                    thread::sleep(d);
-                }
-                None => {
-                    emit_state(&app, name, "error");
-                    return;
-                }
+            if !backoff_or_error(&app, name, &mut attempt) {
+                return;
             }
         }
     });
