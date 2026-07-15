@@ -95,7 +95,7 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
 
   return (
     <div className="chat-view">
-      <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
+      <div className="halo-scroll chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {empty ? (
           <div className="chat-empty">
             <p className="chat-empty-line">Ask me anything, or just say "Halo".</p>

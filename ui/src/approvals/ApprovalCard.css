@@ -142,8 +142,3 @@
 .approval-hold-label {
   position: relative;
 }
-
-.halo-btn:disabled {
-  opacity: 0.55;
-  cursor: default;
-}

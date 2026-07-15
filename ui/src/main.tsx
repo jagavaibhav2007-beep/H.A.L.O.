@@ -8,11 +8,10 @@ import { WorkspaceRoot } from "./workspace/WorkspaceRoot";
 import { initTheme, watchThemeAcrossWindows } from "./styles/theme";
 import "./styles/tokens.css";
 
-// ponytail: App and TokensPreview are lazy so their CSS (App.css sets an
-// opaque background on :root) only loads when one of those routes actually
-// renders — a static import would inject that stylesheet into every route,
-// including the orb/workspace windows that need to stay transparent.
-const App = lazy(() => import("./App"));
+// ponytail: TokensPreview is lazy so its CSS only loads when that route
+// actually renders — a static import would inject that stylesheet into
+// every route, including the orb/workspace windows that need to stay
+// transparent.
 const TokensPreview = lazy(() => import("./dev/TokensPreview").then((m) => ({ default: m.TokensPreview })));
 
 initTheme();
@@ -23,9 +22,9 @@ const params = new URLSearchParams(window.location.search);
 // D3/D9: the Tauri window label picks the root when running natively
 // (`orb`/`main`/`peek`); `?window=orb|workspace|peek` picks it in a plain
 // browser tab, where there is no window label. `?dev=tokens` stays the
-// Step-3 preview route; anything else falls back to the Phase-0
-// single-window chat prototype.
-function resolveRoot(): "orb" | "workspace" | "peek" | "tokens" | "legacy" {
+// Step-3 preview route; anything else (including no param at all) falls
+// back to the workspace root.
+function resolveRoot(): "orb" | "workspace" | "peek" | "tokens" {
   if (params.get("dev") === "tokens") return "tokens";
   if (isTauri()) {
     const label = getCurrentWindow().label;
@@ -35,22 +34,19 @@ function resolveRoot(): "orb" | "workspace" | "peek" | "tokens" | "legacy" {
   }
   const windowParam = params.get("window");
   if (windowParam === "orb") return "orb";
-  if (windowParam === "workspace") return "workspace";
   if (windowParam === "peek") return "peek";
-  return "legacy";
+  return "workspace";
 }
 
 const root = resolveRoot();
 const Root =
   root === "orb"
     ? OrbRoot
-    : root === "workspace"
-      ? WorkspaceRoot
-      : root === "peek"
-        ? PeekWindow
-        : root === "tokens"
-          ? TokensPreview
-          : App;
+    : root === "peek"
+      ? PeekWindow
+      : root === "tokens"
+        ? TokensPreview
+        : WorkspaceRoot;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

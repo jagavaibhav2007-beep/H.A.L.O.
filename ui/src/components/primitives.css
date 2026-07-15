@@ -6,17 +6,11 @@
   color: var(--text);
   font-family: var(--font-sans);
 }
-.halo-elevation-companion {
-  z-index: var(--z-companion);
-}
 .halo-elevation-panel {
   z-index: var(--z-panel);
 }
 .halo-elevation-card {
   z-index: var(--z-card);
-}
-.halo-elevation-modal {
-  z-index: var(--z-modal);
 }
 
 /* Button */
@@ -41,6 +35,11 @@
 }
 .halo-btn:active {
   transform: scale(var(--press-scale));
+}
+/* Disabled styling is part of the primitive, not per-consumer. */
+.halo-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .halo-btn-primary {

@@ -50,7 +50,7 @@ export function Sidebar() {
 
   return (
     <nav className="sidebar" aria-label="Workspace views">
-      <ul className="sidebar-list">
+      <ul className="halo-list">
         {NAV_ITEMS.map((item) => (
           <li key={item.id}>{renderItem(item.id, item.label, item.icon)}</li>
         ))}

@@ -48,13 +48,6 @@ const VIEWS: { id: ActiveView; label: string }[] = [
   { id: "settings", label: "Settings" },
 ];
 
-// Chat is real as of Step 8; the other five panels land in Steps 9-14. Until
-// then they mount this placeholder so switching views already exercises the
-// mounted-hidden routing those panels rely on for scroll/state preservation.
-function ViewPlaceholder({ name }: { name: string }) {
-  return <div className="view-placeholder">{name}</div>;
-}
-
 export function WorkspaceRoot() {
   const shellRef = useRef<HTMLDivElement>(null);
   const [anim, setAnim] = useState<"idle" | "enter" | "leave">("idle");
@@ -240,10 +233,8 @@ export function WorkspaceRoot() {
                     <MemoryView sendMemoryEdit={sendMemoryEdit} />
                   ) : v.id === "skills" ? (
                     <SkillsView sendSkillOp={sendSkillOp} />
-                  ) : v.id === "settings" ? (
-                    <SettingsView sendSettingsUpdate={sendSettingsUpdate} />
                   ) : (
-                    <ViewPlaceholder name={v.label} />
+                    <SettingsView sendSettingsUpdate={sendSettingsUpdate} />
                   )}
                 </div>
               ))}

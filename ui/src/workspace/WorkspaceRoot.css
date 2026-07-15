@@ -56,14 +56,6 @@ body,
   border-right: 1px solid var(--border);
 }
 
-.sidebar-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-
 .sidebar-item {
   position: relative;
   display: flex;
@@ -177,11 +169,4 @@ body,
 }
 .workspace-view[hidden] {
   display: none;
-}
-.view-placeholder {
-  margin: auto;
-  padding: var(--text-title);
-  color: var(--text-muted);
-  font-size: var(--text-base);
-  text-align: center;
 }

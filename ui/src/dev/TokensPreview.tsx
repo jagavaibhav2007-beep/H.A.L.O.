@@ -34,9 +34,7 @@ function PrimitivesSample() {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <Button variant="primary">Approve</Button>
         <Button variant="ghost">Deny</Button>
-        <Button variant="destructive" confirm>
-          Delete
-        </Button>
+        <Button variant="destructive">Delete</Button>
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <Chip icon={ShieldAlert} label="Tier 3" tone="tier3" />
