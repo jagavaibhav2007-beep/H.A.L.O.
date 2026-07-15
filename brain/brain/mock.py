@@ -15,6 +15,7 @@ socket or the contract validator directly.
 from __future__ import annotations
 
 import asyncio
+import functools
 import random
 import uuid
 from datetime import datetime, timezone
@@ -63,6 +64,62 @@ def _new_undo_token(task_id: str) -> str:
     token = str(uuid.uuid4())
     _undo_tokens[token] = task_id
     return token
+
+
+def _swallow_closed(fn):
+    """ConnectionClosed is a routine race (client dropped mid-send) every
+    broadcast/send-driven handler must swallow the same way -- factor the
+    identical try/except out of all nine of them."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except ConnectionClosed:
+            return
+
+    return wrapper
+
+
+async def _activity(
+    broadcast: BroadcastFn,
+    text: str,
+    task_id: str,
+    *,
+    narrate: bool = True,
+    undoable: bool = False,
+    undo_token: str | None = None,
+    tier: int = 1,
+    lane: int = 1,
+) -> None:
+    """Shared shape for the ~10 `activity` frames scenarios/handlers emit."""
+    payload = {
+        "text": text, "narrate": narrate, "task_id": task_id, "undoable": undoable,
+        "tier": tier, "lane": lane,
+    }
+    if undo_token is not None:
+        payload["undo_token"] = undo_token
+    await broadcast("activity", payload)
+
+
+async def _stream_words(broadcast: BroadcastFn, conversation_id: str, text: str, delay: float) -> None:
+    """Shared fixed-delay word-token streaming loop used by several scenarios."""
+    for word in text.split(" "):
+        await broadcast("token", {"text": word + " ", "conversation_id": conversation_id})
+        await asyncio.sleep(delay)
+
+
+async def _run_reorg_steps(task_id: str, broadcast: BroadcastFn, delay: float) -> str:
+    """Shared "Reorganizing Downloads" step sequence used by `_scenario_task`
+    and `_scenario_everything` -- identical apart from the per-step delay."""
+    title = "Reorganizing Downloads"
+    for step, label in [(1, "Scanning files"), (2, "Sorting by type"), (3, "Moving PDFs")]:
+        await broadcast("task_state", {
+            "task_id": task_id, "state": "running", "lane": 1, "title": title,
+            "step": step, "steps_total": 4, "step_label": label,
+        })
+        await asyncio.sleep(delay)
+    return title
 
 
 # ---- Snapshot-on-connect (D6) ----
@@ -159,22 +216,20 @@ def _seed_spend() -> dict:
     return {"session_usd": 0.42, "month_usd": 8.13}
 
 
+@_swallow_closed
 async def push_snapshot(send: SendFn) -> None:
     """D6: right after hello_ack, push seeded + live state to the connecting
     client only. Id-keyed frames -> idempotent on reconnect. `spend_update`
     is always pushed last; tests rely on that to know the snapshot is done."""
-    try:
-        for belief in _beliefs.values():
-            await send("belief_state", belief)
-        for skill in _skills.values():
-            await send("skill_state", skill)
-        for task in _seed_tasks():
-            await send("task_state", task)
-        for payload in list(_pending_approval_payloads.values()):
-            await send("approval_request", payload)
-        await send("spend_update", _seed_spend())
-    except ConnectionClosed:
-        return
+    for belief in _beliefs.values():
+        await send("belief_state", belief)
+    for skill in _skills.values():
+        await send("skill_state", skill)
+    for task in _seed_tasks():
+        await send("task_state", task)
+    for payload in list(_pending_approval_payloads.values()):
+        await send("approval_request", payload)
+    await send("spend_update", _seed_spend())
 
 
 # ---- Reactive approval await-point ----
@@ -215,114 +270,102 @@ async def _await_approval(
         _conversation_pending.pop(conversation_id, None)
 
 
+@_swallow_closed
 async def handle_approval_response(msg: dict, send: SendFn) -> None:
     """First approval_response for an approval_id wins; a second response to
     an already-resolved (or unknown) approval gets a recoverable error."""
-    try:
-        approval_id = msg["reply_to"]
-        fut = _pending_approvals.get(approval_id)
-        if fut is None or fut.done():
-            await send("error", {
-                "code": "approval_already_handled",
-                "message": "This approval was already handled.",
-                "recoverable": True,
-            })
-            return
-        fut.set_result(msg)
-    except ConnectionClosed:
+    approval_id = msg["reply_to"]
+    fut = _pending_approvals.get(approval_id)
+    if fut is None or fut.done():
+        await send("error", {
+            "code": "approval_already_handled",
+            "message": "This approval was already handled.",
+            "recoverable": True,
+        })
         return
+    fut.set_result(msg)
 
 
+@_swallow_closed
 async def handle_interrupt(msg: dict, broadcast: BroadcastFn) -> None:
     """Interrupt-vs-pending-approval rule (11-ipc-contract.md): cancel the
     pending approval as an implicit deny, then pause the task."""
-    try:
-        conversation_id = msg["conversation_id"]
-        pending = _conversation_pending.pop(conversation_id, None)
-        if pending is None:
-            return
-        approval_id = pending["approval_id"]
-        task_id = pending["task_id"]
-        _pending_approval_payloads.pop(approval_id, None)
-        fut = _pending_approvals.pop(approval_id, None)
-        if fut is not None and not fut.done():
-            fut.set_result({"decision": "cancelled"})
-        await broadcast("task_state", {"task_id": task_id, "state": "paused", "lane": 3, "reason": "interrupted"})
-    except ConnectionClosed:
+    conversation_id = msg["conversation_id"]
+    pending = _conversation_pending.pop(conversation_id, None)
+    if pending is None:
         return
+    approval_id = pending["approval_id"]
+    task_id = pending["task_id"]
+    _pending_approval_payloads.pop(approval_id, None)
+    fut = _pending_approvals.pop(approval_id, None)
+    if fut is not None and not fut.done():
+        fut.set_result({"decision": "cancelled"})
+    await broadcast("task_state", {"task_id": task_id, "state": "paused", "lane": 3, "reason": "interrupted"})
 
 
+@_swallow_closed
 async def handle_undo(msg: dict, broadcast: BroadcastFn) -> None:
-    try:
-        token = msg["undo_token"]
-        task_id = _undo_tokens.pop(token, None)
-        if task_id is None:
-            return  # ponytail: unknown/already-used token is a silent no-op
-        await broadcast("activity", {
-            "text": "Undone.", "narrate": True, "task_id": task_id, "undoable": False,
-            "tier": 1, "lane": 1,
-        })
-    except ConnectionClosed:
-        return
+    token = msg["undo_token"]
+    task_id = _undo_tokens.pop(token, None)
+    if task_id is None:
+        return  # ponytail: unknown/already-used token is a silent no-op
+    await _activity(broadcast, "Undone.", task_id)
 
 
+@_swallow_closed
 async def handle_task_op(msg: dict, broadcast: BroadcastFn) -> None:
     """Status-strip / orb task controls (pause/resume/stop). The mock keeps no
     task registry beyond the seeds, so it just broadcasts the resulting
     task_state for the named id -- enough to satisfy the UI's rule-3
     disable-until-confirmed contract (a real Brain owns the lifecycle).
     ponytail: an omitted task_id ('Pause all') is treated as the running seed."""
-    try:
-        op = msg.get("op")
-        new_state = {"stop": "done", "pause": "paused", "resume": "running"}.get(op)
-        if new_state is None:
-            return
-        task_id = msg.get("task_id") or "task-seed-1"
-        payload = {"task_id": task_id, "state": new_state, "lane": 1, "title": "Syncing calendar"}
-        if op == "stop":
-            payload["reason"] = "you stopped it"
-        elif op == "pause":
-            payload["reason"] = "you paused it"
-        await broadcast("task_state", payload)
-    except ConnectionClosed:
+    op = msg.get("op")
+    new_state = {"stop": "done", "pause": "paused", "resume": "running"}.get(op)
+    if new_state is None:
         return
+    task_id = msg.get("task_id") or "task-seed-1"
+    payload = {"task_id": task_id, "state": new_state, "lane": 1, "title": "Syncing calendar"}
+    if op == "stop":
+        payload["reason"] = "you stopped it"
+    elif op == "pause":
+        payload["reason"] = "you paused it"
+    await broadcast("task_state", payload)
 
 
+@_swallow_closed
 async def handle_memory_edit(msg: dict, broadcast: BroadcastFn) -> None:
     """Memory panel round-trips (Step 12). edit -> supersede the old belief and
     emit a new *user-stated* one (the provenance rule made visible); delete ->
     archive; restore -> reactivate. The store never mutates a belief locally
     (rule 3) — these confirming belief_state frames are the only source of truth."""
-    try:
-        belief_id = msg.get("belief_id")
-        op = msg.get("op")
-        cur = _beliefs.get(belief_id)
-        if cur is None:
-            return  # ponytail: unknown belief -> silent no-op
-        if op == "edit":
-            new_id = str(uuid.uuid4())
-            superseded = {**cur, "status": "superseded", "superseded_by": new_id,
-                          "salience": min(cur.get("salience", 0.5), 0.3)}
-            new_belief = {
-                "belief_id": new_id, "text": msg.get("text") or cur["text"], "kind": cur["kind"],
-                "provenance": "user", "salience": max(cur.get("salience", 0.5), 0.8), "status": "active",
-            }
-            _beliefs[belief_id] = superseded
-            _beliefs[new_id] = new_belief
-            await broadcast("belief_state", superseded)
-            await broadcast("belief_state", new_belief)
-        elif op == "delete":
-            archived = {**cur, "status": "archived"}
-            _beliefs[belief_id] = archived
-            await broadcast("belief_state", archived)
-        elif op == "restore":
-            restored = {**cur, "status": "active"}
-            _beliefs[belief_id] = restored
-            await broadcast("belief_state", restored)
-    except ConnectionClosed:
-        return
+    belief_id = msg.get("belief_id")
+    op = msg.get("op")
+    cur = _beliefs.get(belief_id)
+    if cur is None:
+        return  # ponytail: unknown belief -> silent no-op
+    if op == "edit":
+        new_id = str(uuid.uuid4())
+        superseded = {**cur, "status": "superseded", "superseded_by": new_id,
+                      "salience": min(cur.get("salience", 0.5), 0.3)}
+        new_belief = {
+            "belief_id": new_id, "text": msg.get("text") or cur["text"], "kind": cur["kind"],
+            "provenance": "user", "salience": max(cur.get("salience", 0.5), 0.8), "status": "active",
+        }
+        _beliefs[belief_id] = superseded
+        _beliefs[new_id] = new_belief
+        await broadcast("belief_state", superseded)
+        await broadcast("belief_state", new_belief)
+    elif op == "delete":
+        archived = {**cur, "status": "archived"}
+        _beliefs[belief_id] = archived
+        await broadcast("belief_state", archived)
+    elif op == "restore":
+        restored = {**cur, "status": "active"}
+        _beliefs[belief_id] = restored
+        await broadcast("belief_state", restored)
 
 
+@_swallow_closed
 async def handle_skill_op(msg: dict, broadcast: BroadcastFn) -> None:
     """Skills panel round-trips (Step 13). trial -> stream a scripted dry run
     into the results drawer as narrated activity, no state change; disable ->
@@ -331,58 +374,49 @@ async def handle_skill_op(msg: dict, broadcast: BroadcastFn) -> None:
     retired-with-a-reason IS the soft-delete state, same as an auto-retire).
     The store never mutates a skill locally (rule 3) -- confirming skill_state
     frames are the only source of truth."""
-    try:
-        skill_name = msg.get("skill_name")
-        op = msg.get("op")
-        cur = _skills.get(skill_name)
-        if cur is None:
-            return  # ponytail: unknown skill -> silent no-op
-        if op == "trial":
-            trial_task = f"skill-trial-{skill_name}"
-            for line in (f"Trying {skill_name} on a sample input…", "Looks right.", "Trial run complete."):
-                await broadcast("activity", {
-                    "text": line, "narrate": False, "task_id": trial_task, "undoable": False, "tier": 1, "lane": 1,
-                })
-                await asyncio.sleep(0.15)
-        elif op == "disable":
-            paused = {**cur, "status": "paused"}
-            _skills[skill_name] = paused
-            await broadcast("skill_state", paused)
-        elif op == "restore":
-            restored = {k: v for k, v in cur.items() if k != "reason"}
-            restored["status"] = "active"
-            _skills[skill_name] = restored
-            await broadcast("skill_state", restored)
-        elif op == "delete":
-            retired = {**cur, "status": "retired", "reason": "you removed it"}
-            _skills[skill_name] = retired
-            await broadcast("skill_state", retired)
-    except ConnectionClosed:
-        return
+    skill_name = msg.get("skill_name")
+    op = msg.get("op")
+    cur = _skills.get(skill_name)
+    if cur is None:
+        return  # ponytail: unknown skill -> silent no-op
+    if op == "trial":
+        trial_task = f"skill-trial-{skill_name}"
+        for line in (f"Trying {skill_name} on a sample input…", "Looks right.", "Trial run complete."):
+            await _activity(broadcast, line, trial_task, narrate=False)
+            await asyncio.sleep(0.15)
+    elif op == "disable":
+        paused = {**cur, "status": "paused"}
+        _skills[skill_name] = paused
+        await broadcast("skill_state", paused)
+    elif op == "restore":
+        restored = {k: v for k, v in cur.items() if k != "reason"}
+        restored["status"] = "active"
+        _skills[skill_name] = restored
+        await broadcast("skill_state", restored)
+    elif op == "delete":
+        retired = {**cur, "status": "retired", "reason": "you removed it"}
+        _skills[skill_name] = retired
+        await broadcast("skill_state", retired)
 
 
+@_swallow_closed
 async def handle_mic(msg: dict, broadcast: BroadcastFn) -> None:
     """Mute round-trip (Step 14). Mute -> muted (visually loud everywhere);
     unmute -> idle. There is no ambiguous mic state by design."""
-    try:
-        await broadcast("voice_state", {"state": "muted" if msg.get("op") == "mute" else "idle"})
-    except ConnectionClosed:
-        return
+    await broadcast("voice_state", {"state": "muted" if msg.get("op") == "mute" else "idle"})
 
 
+@_swallow_closed
 async def handle_lane_pin(msg: dict, broadcast: BroadcastFn) -> None:
     """Re-pin a task's lane. The mock keeps no task registry, so it just
     confirms with a task_state carrying the new lane (rule 3 disable-until-
     confirmed). # ponytail: state defaults to running — lane pins in the demo
     happen on a live task; a real Brain preserves the actual state."""
-    try:
-        task_id = msg.get("task_id")
-        lane = msg.get("lane")
-        if task_id is None or lane not in (1, 2, 3):
-            return
-        await broadcast("task_state", {"task_id": task_id, "state": "running", "lane": lane})
-    except ConnectionClosed:
+    task_id = msg.get("task_id")
+    lane = msg.get("lane")
+    if task_id is None or lane not in (1, 2, 3):
         return
+    await broadcast("task_state", {"task_id": task_id, "state": "running", "lane": lane})
 
 
 # ---- Scenarios ----
@@ -418,10 +452,7 @@ async def _scenario_approval(conversation_id: str, task_id: str, broadcast: Broa
     if decision == "cancelled":
         return  # task_state:paused already emitted by handle_interrupt
     if decision == "deny":
-        await broadcast("activity", {
-            "text": "Skipped — you denied the request.", "narrate": True,
-            "task_id": task_id, "undoable": False, "tier": 3, "lane": lane,
-        })
+        await _activity(broadcast, "Skipped — you denied the request.", task_id, tier=3, lane=lane)
         await broadcast("task_state", {"task_id": task_id, "state": "paused", "lane": lane, "reason": "denied by user"})
         return
 
@@ -429,22 +460,13 @@ async def _scenario_approval(conversation_id: str, task_id: str, broadcast: Broa
     if decision == "edit":
         text = "Applied your edits and " + ("deleted the selected files." if destructive else "sent the email.")
     undo_token = _new_undo_token(task_id)
-    await broadcast("activity", {
-        "text": text, "narrate": True, "task_id": task_id, "undoable": True,
-        "undo_token": undo_token, "tier": 3, "lane": lane,
-    })
+    await _activity(broadcast, text, task_id, undoable=True, undo_token=undo_token, tier=3, lane=lane)
     await broadcast("task_state", {"task_id": task_id, "state": "done", "lane": lane})
     await broadcast("done", {"conversation_id": conversation_id, "task_id": task_id})
 
 
 async def _scenario_task(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
-    title = "Reorganizing Downloads"
-    for step, label in [(1, "Scanning files"), (2, "Sorting by type"), (3, "Moving PDFs")]:
-        await broadcast("task_state", {
-            "task_id": task_id, "state": "running", "lane": 1, "title": title,
-            "step": step, "steps_total": 4, "step_label": label,
-        })
-        await asyncio.sleep(0.2)
+    title = await _run_reorg_steps(task_id, broadcast, 0.2)
 
     result = await _await_approval(
         task_id, conversation_id, broadcast,
@@ -490,10 +512,7 @@ async def _scenario_memory(conversation_id: str, task_id: str, broadcast: Broadc
     _beliefs["belief-pkg-manager-new"] = new_belief
     await broadcast("belief_state", superseded)
     await broadcast("belief_state", new_belief)
-    await broadcast("activity", {
-        "text": "Updated what I remember — you switched to pnpm.", "narrate": True,
-        "task_id": task_id, "undoable": False, "tier": 1, "lane": 1,
-    })
+    await _activity(broadcast, "Updated what I remember — you switched to pnpm.", task_id)
     await broadcast("done", {"conversation_id": conversation_id})
 
 
@@ -506,10 +525,7 @@ async def _scenario_skill(conversation_id: str, task_id: str, broadcast: Broadca
     _skills[skill_name] = born  # keep the registry in step so a reconnect snapshot shows the birth
     await broadcast("skill_state", born)
     undo_token = _new_undo_token(task_id)
-    await broadcast("activity", {
-        "text": f"Learned a new skill: {skill_name}.", "narrate": True,
-        "task_id": task_id, "undoable": True, "undo_token": undo_token, "tier": 1, "lane": 1,
-    })
+    await _activity(broadcast, f"Learned a new skill: {skill_name}.", task_id, undoable=True, undo_token=undo_token)
     await broadcast("done", {"conversation_id": conversation_id})
 
 
@@ -525,39 +541,27 @@ async def _scenario_voice(conversation_id: str, task_id: str, broadcast: Broadca
     await broadcast("voice_state", {"state": "thinking"})
     await asyncio.sleep(0.2)
     await broadcast("voice_state", {"state": "speaking"})
-    for word in "You have two meetings today:".split(" "):
-        await broadcast("token", {"text": word + " ", "conversation_id": conversation_id})
-        await asyncio.sleep(0.03)
+    await _stream_words(broadcast, conversation_id, "You have two meetings today:", 0.03)
     # barge-in beat: user cuts in mid-reply -> orb drops to listening instantly
     # (the speaking pulse stops), then resumes.
     await broadcast("voice_state", {"state": "listening"})
     await asyncio.sleep(0.2)
     await broadcast("voice_state", {"state": "speaking"})
-    for word in "standup at 10am and design review at 2pm.".split(" "):
-        await broadcast("token", {"text": word + " ", "conversation_id": conversation_id})
-        await asyncio.sleep(0.03)
+    await _stream_words(broadcast, conversation_id, "standup at 10am and design review at 2pm.", 0.03)
     await broadcast("done", {"conversation_id": conversation_id})
     await broadcast("voice_state", {"state": "idle"})
 
 
 async def _scenario_tts_down(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
     """Degraded: text-to-speech is out, so Halo replies as text and says so."""
-    await broadcast("activity", {
-        "text": "My voice output is down — I'll reply as text until it's back.",
-        "narrate": True, "task_id": task_id, "undoable": False, "tier": 1, "lane": 1,
-    })
-    for word in "Sure — you have three meetings tomorrow, first one at 9.".split(" "):
-        await broadcast("token", {"text": word + " ", "conversation_id": conversation_id})
-        await asyncio.sleep(0.03)
+    await _activity(broadcast, "My voice output is down — I'll reply as text until it's back.", task_id)
+    await _stream_words(broadcast, conversation_id, "Sure — you have three meetings tomorrow, first one at 9.", 0.03)
     await broadcast("done", {"conversation_id": conversation_id})
 
 
 async def _scenario_stt_down(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
     """Degraded: speech-to-text is out, so listening is off and typing works."""
-    await broadcast("activity", {
-        "text": "I can't hear right now — my mic input is unavailable. Type and I'll answer.",
-        "narrate": True, "task_id": task_id, "undoable": False, "tier": 1, "lane": 1,
-    })
+    await _activity(broadcast, "I can't hear right now — my mic input is unavailable. Type and I'll answer.", task_id)
     await broadcast("done", {"conversation_id": conversation_id})
 
 
@@ -572,10 +576,7 @@ async def _scenario_error(conversation_id: str, task_id: str, broadcast: Broadca
 
 async def _scenario_flood(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
     for i in range(FLOOD_COUNT):
-        await broadcast("activity", {
-            "text": f"Background scan step {i + 1}.", "narrate": False,
-            "task_id": task_id, "undoable": False, "tier": 1, "lane": 1,
-        })
+        await _activity(broadcast, f"Background scan step {i + 1}.", task_id, narrate=False)
     await broadcast("done", {"conversation_id": conversation_id})
 
 
@@ -596,18 +597,10 @@ async def _scenario_stream(conversation_id: str, task_id: str, broadcast: Broadc
 
 
 async def _scenario_everything(conversation_id: str, task_id: str, broadcast: BroadcastFn) -> None:
-    for word in "Let's walk through everything I can do.".split(" "):
-        await broadcast("token", {"text": word + " ", "conversation_id": conversation_id})
-        await asyncio.sleep(0.02)
+    await _stream_words(broadcast, conversation_id, "Let's walk through everything I can do.", 0.02)
     await broadcast("done", {"conversation_id": conversation_id})
 
-    title = "Reorganizing Downloads"
-    for step, label in [(1, "Scanning files"), (2, "Sorting by type"), (3, "Moving PDFs")]:
-        await broadcast("task_state", {
-            "task_id": task_id, "state": "running", "lane": 1, "title": title,
-            "step": step, "steps_total": 4, "step_label": label,
-        })
-        await asyncio.sleep(0.15)
+    title = await _run_reorg_steps(task_id, broadcast, 0.15)
 
     regular = await _await_approval(
         task_id, conversation_id, broadcast,
@@ -619,10 +612,7 @@ async def _scenario_everything(conversation_id: str, task_id: str, broadcast: Br
         return
     if regular["decision"] != "deny":
         undo_token = _new_undo_token(task_id)
-        await broadcast("activity", {
-            "text": "Sent the weekly report email.", "narrate": True, "task_id": task_id,
-            "undoable": True, "undo_token": undo_token, "tier": 3, "lane": 1,
-        })
+        await _activity(broadcast, "Sent the weekly report email.", task_id, undoable=True, undo_token=undo_token, tier=3)
         await asyncio.sleep(0.2)
         await handle_undo({"undo_token": undo_token}, broadcast)
 

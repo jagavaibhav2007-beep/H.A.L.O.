@@ -150,6 +150,22 @@ async def _handle_user_msg(broadcast, msg: dict) -> None:
         )
 
 
+# Mock-only inbound types -> (mock_engine handler name, needs send_fn instead
+# of broadcast_fn). Keep in sync with mock.py's handle_* functions -- a type
+# handled here but not in mock.py (or vice versa) is the documented "affordance
+# hangs forever" bug class (see CLAUDE.md, "Working against the mocked Brain").
+_MOCK_DISPATCH: dict[str, tuple[str, bool]] = {
+    "approval_response": ("handle_approval_response", True),
+    "interrupt": ("handle_interrupt", False),
+    "undo": ("handle_undo", False),
+    "task_op": ("handle_task_op", False),
+    "lane_pin": ("handle_lane_pin", False),
+    "memory_edit": ("handle_memory_edit", False),
+    "skill_op": ("handle_skill_op", False),
+    "mic": ("handle_mic", False),
+}
+
+
 async def _serialize_user_msg(msg: dict, locks: dict[str, asyncio.Lock], send, broadcast, mock: bool) -> None:
     async with locks.setdefault(msg["conversation_id"], asyncio.Lock()):
         if mock:
@@ -225,22 +241,10 @@ async def _connection_handler(
 
             if msg["type"] == "user_msg":
                 asyncio.create_task(_serialize_user_msg(msg, locks, send_fn, broadcast_fn, mock))
-            elif mock and msg["type"] == "approval_response":
-                asyncio.create_task(mock_engine.handle_approval_response(msg, send_fn))
-            elif mock and msg["type"] == "interrupt":
-                asyncio.create_task(mock_engine.handle_interrupt(msg, broadcast_fn))
-            elif mock and msg["type"] == "undo":
-                asyncio.create_task(mock_engine.handle_undo(msg, broadcast_fn))
-            elif mock and msg["type"] == "task_op":
-                asyncio.create_task(mock_engine.handle_task_op(msg, broadcast_fn))
-            elif mock and msg["type"] == "lane_pin":
-                asyncio.create_task(mock_engine.handle_lane_pin(msg, broadcast_fn))
-            elif mock and msg["type"] == "memory_edit":
-                asyncio.create_task(mock_engine.handle_memory_edit(msg, broadcast_fn))
-            elif mock and msg["type"] == "skill_op":
-                asyncio.create_task(mock_engine.handle_skill_op(msg, broadcast_fn))
-            elif mock and msg["type"] == "mic":
-                asyncio.create_task(mock_engine.handle_mic(msg, broadcast_fn))
+            elif mock and msg["type"] in _MOCK_DISPATCH:
+                handler_name, needs_send = _MOCK_DISPATCH[msg["type"]]
+                handler = getattr(mock_engine, handler_name)
+                asyncio.create_task(handler(msg, send_fn if needs_send else broadcast_fn))
             # Other inbound types remain validated-but-unhandled outside mock
             # mode, per Phase 0 Step 4's original scope.
     finally:
