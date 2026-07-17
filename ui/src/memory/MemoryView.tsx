@@ -57,6 +57,12 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
     // Soft: the card stays (no local mutation) while a 5s toast offers undo;
     // at expiry the delete is sent and the confirming `belief_state: archived`
     // moves it to the archived filter. Undo before then simply never sends.
+    // A delete already waiting out its window commits now rather than being
+    // silently dropped when a different belief's delete starts (each is
+    // explicit intent). Side effect stays outside the setState updater.
+    if (pendingDelete && pendingDelete.id !== b.belief_id) {
+      if (begin(pendingDelete.id, "Deleting…")) sendMemoryEdit(pendingDelete.id, "delete");
+    }
     clearTimeout(deleteTimer.current);
     setPendingDelete({ id: b.belief_id, text: b.text });
     deleteTimer.current = setTimeout(() => {
@@ -112,6 +118,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
                     belief={b}
                     history={[]}
                     pending={pending[b.belief_id]}
+                    pendingFor={(id) => pending[id]}
                     archivedView
                     onEdit={saveEdit}
                     onDelete={requestDelete}
@@ -141,6 +148,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
                         belief={b}
                         history={historyOf(b.belief_id)}
                         pending={pending[b.belief_id]}
+                        pendingFor={(id) => pending[id]}
                         onEdit={saveEdit}
                         onDelete={requestDelete}
                         onRestore={restore}
@@ -171,13 +179,14 @@ interface CardProps {
   belief: BeliefStateMsg;
   history: BeliefStateMsg[];
   pending: string | undefined;
+  pendingFor: (id: string) => string | undefined;
   archivedView?: boolean;
   onEdit: (id: string, text: string) => void;
   onDelete: (b: BeliefStateMsg) => void;
   onRestore: (id: string) => void;
 }
 
-function BeliefCard({ belief, history, pending, archivedView, onEdit, onDelete, onRestore }: CardProps) {
+function BeliefCard({ belief, history, pending, pendingFor, archivedView, onEdit, onDelete, onRestore }: CardProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(belief.text);
   const [showHistory, setShowHistory] = useState(false);
@@ -236,8 +245,12 @@ function BeliefCard({ belief, history, pending, archivedView, onEdit, onDelete, 
                   {history.map((h) => (
                     <li key={h.belief_id}>
                       <span>{h.text}</span>
-                      <button type="button" disabled={busy} onClick={() => onRestore(h.belief_id)}>
-                        Restore
+                      <button
+                        type="button"
+                        disabled={pendingFor(h.belief_id) !== undefined}
+                        onClick={() => onRestore(h.belief_id)}
+                      >
+                        {pendingFor(h.belief_id) ?? "Restore"}
                       </button>
                     </li>
                   ))}
