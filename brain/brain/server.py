@@ -176,9 +176,20 @@ _MOCK_DISPATCH: dict[str, tuple[str, bool]] = {
 
 
 async def _serialize_user_msg(msg: dict, locks: dict[str, asyncio.Lock], send, broadcast, mock: bool) -> None:
-    async with locks.setdefault(msg["conversation_id"], asyncio.Lock()):
+    conversation_id = msg["conversation_id"]
+    async with locks.setdefault(conversation_id, asyncio.Lock()):
         if mock:
-            await mock_engine.handle_user_msg(msg, send, broadcast)
+            # Same turn_failed recovery the non-mock path has -- a mock handler
+            # raising anything other than ConnectionClosed must not drop the turn
+            # silently, leaving the UI waiting on a `done` that never comes.
+            try:
+                await mock_engine.handle_user_msg(msg, send, broadcast)
+            except Exception as exc:  # noqa: BLE001 - turn must never drop silently
+                logger.exception("mock turn failed for conversation_id=%s", conversation_id)
+                await broadcast(
+                    "error",
+                    {"code": "turn_failed", "message": str(exc), "recoverable": True, "conversation_id": conversation_id},
+                )
         else:
             await _handle_user_msg(broadcast, msg)
 
