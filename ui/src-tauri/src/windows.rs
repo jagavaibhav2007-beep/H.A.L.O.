@@ -183,6 +183,16 @@ fn clamp_offscreen(app: &AppHandle, label: &str) {
 /// the workspace, the global hotkey, and the tray icon + shared context menu.
 /// Called once from `lib.rs`'s `setup`.
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
+    // The window-state plugin restores a persisted SIZE before setup() runs,
+    // and a size persisted by an older build (the resizable circular orb)
+    // silently overrides tauri.conf.json's fixed capsule dimensions — the
+    // documented "stale window-state SIZE" bug class (mem/Bugs.md). The
+    // capsule is fixed-size, so re-assert it here; the plugin then persists
+    // the corrected size, self-healing the state file.
+    if let Some(orb) = app.get_webview_window("orb") {
+        let _ = orb.set_size(tauri::LogicalSize::new(360.0, 52.0));
+    }
+
     clamp_offscreen(app, "orb");
     clamp_offscreen(app, "main");
 

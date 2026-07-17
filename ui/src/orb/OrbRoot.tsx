@@ -179,7 +179,10 @@ export function OrbRoot() {
   }, []);
 
   const capsule = (
-    <div className="capsule glass">
+    // Not .glass: the capsule paints its own fixed midnight surface — native
+    // WebView2 can't backdrop-blur the desktop behind the window, and the
+    // capsule must look identical in light/dark theme.
+    <div className="capsule">
       <div className="capsule-glow" aria-hidden="true" />
 
       <div className="capsule-left">

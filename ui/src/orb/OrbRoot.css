@@ -22,7 +22,15 @@ body,
   cursor: grabbing;
 }
 
+/* The capsule is its OWN surface — always midnight glass, identical in
+   light/dark theme and over any desktop (user decision: option A, "the
+   gradient is Halo's skin"). It therefore carries a fixed local palette
+   instead of the theme tokens: native WebView2 can't backdrop-blur the
+   desktop behind a transparent window, and a light OS theme must never
+   flip the capsule's text dark. */
 .capsule {
+  --cap-text: #cdd9f5;
+  --cap-text-muted: #8a9bc4;
   position: relative;
   width: 360px;
   height: 52px;
@@ -32,6 +40,9 @@ body,
   gap: 8px;
   padding: 0 14px;
   overflow: hidden; /* clips the ambient glow to the pill shape */
+  background: linear-gradient(180deg, rgba(13, 20, 40, 0.92), rgba(4, 8, 18, 0.95));
+  color: var(--cap-text);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.1),
     0 8px 24px rgba(0, 0, 0, 0.35);
@@ -72,25 +83,34 @@ body,
   gap: 8px;
 }
 
-/* Chips: icon + text, tabular counts so they don't jitter. Reuses the
-   shared .halo-chip look (primitives.css) with capsule-specific sizing --
-   min 32px hit target on the clickable ones. */
+/* Chips: pill-shaped, icon + text, tabular counts so they don't jitter.
+   Fixed capsule palette (see .capsule) — never theme tokens. */
 .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  color: var(--cap-text);
+}
+.lane-chip {
+  color: var(--cap-text-muted);
 }
 button.chip {
   min-height: 32px;
   border: none;
-  background: color-mix(in srgb, var(--text) 8%, transparent);
-  color: var(--text);
+  font-family: inherit;
+  background: rgba(140, 175, 250, 0.12);
   cursor: pointer;
   transition:
     background-color var(--motion-fast) var(--ease-out),
     transform var(--motion-fast) var(--ease-out);
 }
 button.chip:hover {
-  background: color-mix(in srgb, var(--text) 14%, transparent);
+  background: rgba(140, 175, 250, 0.2);
 }
 button.chip:active {
   transform: scale(var(--press-scale));
@@ -125,7 +145,7 @@ button.chip:active {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--text-sm);
-  color: var(--text);
+  color: var(--cap-text);
 }
 
 .mic-indicator {
@@ -134,7 +154,7 @@ button.chip:active {
   justify-content: center;
   min-width: 32px;
   min-height: 32px;
-  color: var(--text-muted);
+  color: var(--cap-text-muted);
 }
 .capsule-center[data-voice-state="muted"] ~ .capsule-right .mic-indicator {
   color: var(--destructive);
