@@ -1,13 +1,9 @@
-// Phase 1 Step 7 (rework) — shared "what should the peek bubble show right
-// now" detection, extracted so both the D9 browser-fallback inline bubble
-// (PeekBubble.tsx) and the Tauri dedicated peek window's caller (OrbRoot.tsx)
-// have one source of truth. Most-recent-wins across two sources: live
-// transcript while listening/speaking and the newest narrate:true activity.
-// Skill births already arrive as narrated activities, so they need no second
-// snapshot-diff path. Dismiss
-// timing is NOT this hook's job -- each consumer owns its own timer on top
-// of the text this returns (inline bubble: hover-pin support; Tauri path:
-// invoke("hide_peek")).
+// Companion capsule — "what should the inline narration show right now"
+// detection (ui_ux/01-companion-orb.md "Narration"). Most-recent-wins across
+// two sources: live transcript while listening/speaking and the newest
+// narrate:true activity. Skill births already arrive as narrated activities,
+// so they need no second snapshot-diff path. Dismiss timing is NOT this
+// hook's job -- OrbRoot owns a local timer on top of the text this returns.
 
 import { useEffect, useRef, useState } from "react";
 import { useHaloStore, selectActivities, selectVoice } from "../state/store";

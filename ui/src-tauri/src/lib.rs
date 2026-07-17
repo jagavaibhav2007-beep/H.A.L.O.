@@ -43,8 +43,6 @@ pub fn run() {
             windows::toggle_workspace,
             windows::active_hotkey,
             windows::show_orb_menu,
-            windows::show_peek,
-            windows::hide_peek,
             windows::show_workspace
         ])
         .setup({

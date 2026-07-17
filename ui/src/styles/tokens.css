@@ -7,9 +7,11 @@
 
 :root {
   /* ---- Color (light) — ui_ux/00-design-language.md color table ---- */
-  --primary: #2563eb;
+  --primary: #0356c5;
   --accent-soft: #93c5fd;
+  --midnight: #02060e;
   --bg: #f8fafc;
+  --canvas: linear-gradient(160deg, #f8fafc, #dce9ff);
   --surface: rgba(255, 255, 255, 0.65);
   --text: #0f172a;
   --text-muted: #64748b;
@@ -69,14 +71,16 @@
 /* Auto theme: follow OS preference unless a manual override is set. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --primary: #3b82f6;
-    --accent-soft: #60a5fa;
-    --bg: #0b1220;
-    --surface: rgba(15, 23, 42, 0.55);
+    --primary: #3d82f5;
+    --accent-soft: #6b96f7;
+    --midnight: #02060e;
+    --bg: #040810;
+    --canvas: linear-gradient(160deg, #02060e, #021a45 52%, #0356c5);
+    --surface: rgba(10, 16, 34, 0.62);
     --text: #e2e8f0;
     --text-muted: #94a3b8;
-    --border: rgba(148, 163, 184, 0.15);
-    --tier-3: #f59e0b;
+    --border: rgba(255, 255, 255, 0.1);
+    --tier-3: #ffbe69;
     --destructive: #ef4444;
     --success: #10b981;
   }
@@ -84,23 +88,27 @@
 
 /* Manual override: explicit dark, regardless of OS preference. */
 [data-theme="dark"] {
-  --primary: #3b82f6;
-  --accent-soft: #60a5fa;
-  --bg: #0b1220;
-  --surface: rgba(15, 23, 42, 0.55);
+  --primary: #3d82f5;
+  --accent-soft: #6b96f7;
+  --midnight: #02060e;
+  --bg: #040810;
+  --canvas: linear-gradient(160deg, #02060e, #021a45 52%, #0356c5);
+  --surface: rgba(10, 16, 34, 0.62);
   --text: #e2e8f0;
   --text-muted: #94a3b8;
-  --border: rgba(148, 163, 184, 0.15);
-  --tier-3: #f59e0b;
+  --border: rgba(255, 255, 255, 0.1);
+  --tier-3: #ffbe69;
   --destructive: #ef4444;
   --success: #10b981;
 }
 
 /* Manual override: explicit light, regardless of OS preference. */
 [data-theme="light"] {
-  --primary: #2563eb;
+  --primary: #0356c5;
   --accent-soft: #93c5fd;
+  --midnight: #02060e;
   --bg: #f8fafc;
+  --canvas: linear-gradient(160deg, #f8fafc, #dce9ff);
   --surface: rgba(255, 255, 255, 0.65);
   --text: #0f172a;
   --text-muted: #64748b;

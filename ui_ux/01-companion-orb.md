@@ -1,34 +1,57 @@
-# Halo UI/UX: The Companion Orb
+# Halo UI/UX: The Companion Capsule
 
-Halo's face — a small glass orb, on screen whenever Halo runs (user decision). 95% of the relationship happens here. Behavior source: [systemdesign/02-voice](../systemdesign/02-voice.md), [10-ui](../systemdesign/10-ui.md).
+Halo's face — a small glass capsule, on screen whenever Halo runs (user decision). 95% of the relationship happens here. Behavior source: [systemdesign/02-voice](../systemdesign/02-voice.md), [10-ui](../systemdesign/10-ui.md).
+
+**Supersedes the orb-only design.** The original companion was a bare glass circle whose colour/glow encoded one state at a time. It was pretty and useless: you could not tell what Halo was doing or what needed you without opening the whole workspace. The companion is now a **capsule** — the orb survives as its centre, doing the one job it was good at (voice + narration), with status chips flanking it.
 
 ## Anatomy
-- ~56px glass sphere, baby-blue inner gradient, soft shadow. Draggable anywhere; **snaps to screen edges**, position remembered. Always-on-top but never steals focus.
-- A thin **status ring** around the orb carries most state; the core glow carries mood.
 
-## State language (the orb IS the voice UI)
-| State | Visual | Also |
+A horizontal capsule, ~360×52px, fixed size, `border-radius = height/2` (a true pill, never a rounded rectangle). Frosted midnight glass over the desktop; always-on-top, never steals focus, dragged anywhere by its body, position remembered ([Decisions.md](../mem/Decisions.md): free placement, no edge-snap).
+
+```
+[ lane · task ]   ((orb))   [ approval · mic ]
+  ambient          hero        needs you
+```
+
+- **Left cluster — ambient:** lane indicator (PRD §4 requires the active control lane always be visible) and running-task count with a mini progress ring.
+- **Centre — the orb:** the hero. ~26px core, ~44px glow halo, dominant over the chips by size so the eye lands here first. Carries **voice state only** (idle/wake/listening/thinking/speaking/muted) and renders short narration text inline.
+- **Right cluster — needs you:** pending-approval count (amber) and mic state.
+
+**Everything visible at once — there is no priority ladder.** The old `approval > error > task > voice` selector existed only because a single circle could show one thing; chips have their own space, so every true signal is shown simultaneously. Anything urgent is a chip, not a colour change.
+
+## State language
+
+The orb core carries voice mood; every other signal is a chip beside it.
+
+| Signal | Where | Visual |
 |---|---|---|
-| Idle | faint breathing glow (4s cycle) | — |
-| Wake heard ("Halo") | one ripple ring outward | soft chime |
-| Listening | rim lit `--accent-soft`, ring reacts subtly to your voice level | live transcript in peek bubble |
-| Thinking | inner gradient slowly swirls | — |
-| Speaking | glow pulses gently with speech amplitude | barge-in: pulse stops instantly → listening |
-| Task running | thin progress arc on the ring | hover shows "what I'm doing" tooltip |
-| **Needs approval** | ring turns `--tier-3` amber, 2 gentle pulses then steady | badge with count; click jumps to card |
-| Error | one brief red ring flash, then persistent small badge | never a modal from the orb |
-| Mic muted | glow off, gray, slashed-mic glyph | mute is always visually loud |
+| Idle | orb | faint breathing glow (~3.4s cycle) |
+| Wake heard ("Halo") | orb | one ripple ring outward + soft chime |
+| Listening | orb | rim lit, live transcript inline |
+| Thinking | orb | inner gradient slowly swirls |
+| Speaking | orb | glow pulses with amplitude; barge-in stops it instantly |
+| Mic muted | orb + right chip | glow off, gray, slashed-mic glyph — mute is always visually loud |
+| Task running | left chip | progress ring + count; hover reveals title/step |
+| Active lane | left chip | icon + name (Fast / Takeover / Sandbox) |
+| **Needs approval** | right chip | amber chip + count, the one thing allowed to break the blue |
+| Error | right chip | red chip; never a modal from the capsule |
 
-One state at a time; approval > error > task > voice in priority. All states also exist as color/opacity only (reduced motion).
+Every state also reads via icon/text, never colour alone (reduced-motion and colour-blind safe).
 
 ## Interactions
-- **Click / global hotkey** → expands into the [workspace](02-workspace.md) (250ms scale+fade from the orb — spatial continuity).
-- **Right-click** → quick menu: Mute mic · Pause all tasks · Open workspace · Quit.
-- **Hover** → peek bubble: current status sentence + last activity line.
-- **Voice needs no interaction** — say "Halo…" from anywhere; the orb acknowledges even while collapsed.
 
-## Peek bubble
-A small glass bubble that slides from the orb (200ms) for moments that deserve a glance but not the full window: live transcript while you speak, one-line narration of main task events, "made a new skill" notices. Auto-dismisses in 4s; hover pins it. Never used for approvals — those get the amber ring + card.
+- **Click a chip** → opens the [workspace](02-workspace.md) deep-linked to that view (approval chip → the approval; task chip → tasks).
+- **Click the capsule body** → expands into the workspace at the last view (250ms scale+fade from the capsule — spatial continuity).
+- **Right-click** → quick menu: Mute mic · Pause all tasks · Open workspace · Quit.
+- **Voice needs no interaction** — say "Halo…" from anywhere; the orb acknowledges while collapsed.
+- Press-scale 0.97 on tappable chips; hover raises chip contrast.
+
+## Narration
+
+Short narration renders **inline in the capsule**, beside the orb: live transcript while you speak, one-line narration of main task events, "made a new skill" notices. Auto-clears after 4s.
+
+*This replaces the separate peek-bubble window.* The old design floated a second always-on-top window beside the orb because a 64px circle had nowhere to put text. The capsule has room, so the peek window, its two Rust commands, and its cross-window plumbing are gone. Approvals are still never narration — they are the amber chip.
 
 ## When the window is closed
-The orb never disappears while Halo runs; quitting is explicit (right-click → Quit). If the user is away and a Tier-3 gate fires: orb goes amber **and** a Windows toast fires ([systemdesign/04-permissions](../systemdesign/04-permissions.md)). Clicking the toast opens the workspace focused on the approval card.
+
+The capsule never disappears while Halo runs; quitting is explicit (right-click → Quit). If the user is away and a Tier-3 gate fires: the approval chip goes amber **and** a Windows toast fires ([systemdesign/04-permissions](../systemdesign/04-permissions.md)). Clicking the toast opens the workspace focused on the approval card.

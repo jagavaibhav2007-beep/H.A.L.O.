@@ -1,25 +1,26 @@
-// Phase 1 Step 5/7 — the orb window's content: draggable/clickable glass
-// circle (Step 5 plumbing, untouched) plus the 9-state visual language and
-// peek bubble (Step 7). Spec: phase-1-plan.md Steps 5 & 7,
-// ui_ux/01-companion-orb.md.
+// The companion capsule — Halo's face, always on top. Spec:
+// ui_ux/01-companion-orb.md "Anatomy"/"State language"/"Interactions".
+// Layout: [lane · task]  ((orb))  [approval · mic] — all simultaneous, no
+// priority ladder (the old one-state-at-a-time orb selector crammed 4
+// signals into one circle; chips have their own space now, so every true
+// signal shows at once).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
-import { AlertTriangle, MicOff } from "lucide-react";
+import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
+import { AlertTriangle, Mic, MicOff } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { useHaloConnection } from "../ipc/useHaloConnection";
 import type { IpcMessage } from "../ipc/contract";
 import {
   useHaloStore,
-  selectOrbState,
+  selectBrainStatus,
   selectPendingApprovalCount,
-  selectRunningTask,
+  selectTasks,
   selectVoice,
 } from "../state/store";
-import { PeekBubble } from "./PeekBubble";
+import { LANE_ICON, LANE_LABEL } from "../lib/lanes";
 import { usePeekSource, PEEK_DISMISS_MS } from "./usePeekSource";
-import { nextOrbSize } from "./geometry";
 import "../styles/glass.css";
 import "./OrbRoot.css";
 
@@ -27,13 +28,6 @@ import "./OrbRoot.css";
 // it's a drag (move the window). Plan: "manual pointer-drag with a 4px
 // movement threshold".
 const DRAG_THRESHOLD_PX = 4;
-
-// Resize happens ONLY from this small bottom-right corner square; the whole
-// rest of the orb drags to move. Edge-based resize was the bug: on a ~64px
-// window an 8px handle on every edge covers almost the entire surface, so
-// grabbing the orb to move it started an OS resize instead and ballooned the
-// window into a giant letterboxed rectangle.
-const RESIZE_CORNER_PX = 16;
 
 interface DragState {
   startScreenX: number;
@@ -43,44 +37,13 @@ interface DragState {
   moved: boolean;
 }
 
-interface ResizeState {
-  startScreenX: number;
-  startScreenY: number;
-  startSize: number;
-}
-
-// True only inside the bottom-right corner square — the sole resize zone.
-// clientX/clientY are viewport-relative, so this is the window's own corner.
-function inResizeCorner(e: React.PointerEvent): boolean {
-  return (
-    e.clientX > window.innerWidth - RESIZE_CORNER_PX && e.clientY > window.innerHeight - RESIZE_CORNER_PX
-  );
-}
-
 export function OrbRoot() {
   const dragRef = useRef<DragState | null>(null);
-  const resizeRef = useRef<ResizeState | null>(null);
-  // The glass sphere fills the window (resize is square-locked below, so the
-  // window stays square and the sphere stays a circle). Recomputed live via
-  // ResizeObserver as the window resizes — a plain resize event isn't enough:
-  // this tracks the actual content box, and works identically in the D9
-  // browser-fallback tab.
-  const [orbSize, setOrbSize] = useState(64);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    const observer = new ResizeObserver(([entry]) => {
-      const { width, height } = entry.contentRect;
-      setOrbSize(Math.floor(Math.min(width, height)));
-    });
-    observer.observe(root);
-    return () => observer.disconnect();
-  }, []);
 
   // The orb window has no store of its own to read (each webview boots its
   // own instance) -- it owns its own live connection, mirroring
-  // WorkspaceRoot's wiring verbatim so the orb's state visuals (below) react
-  // to the same frames the workspace does.
+  // WorkspaceRoot's wiring verbatim so the capsule's state visuals react to
+  // the same frames the workspace does.
   const onMessage = useCallback((frame: IpcMessage) => {
     useHaloStore.getState().applyFrame(frame);
   }, []);
@@ -101,54 +64,39 @@ export function OrbRoot() {
     useHaloStore.getState().applyConnectionEvent({ type: "sidecar_state", process: "brain", state: "error" });
   }, [sidecarError]);
 
-  // Dedicated peek window (rework -- see PeekWindow.tsx): the inline bubble
-  // is invisible in the real app (clipped by the 64x64 window rect), so the
-  // Tauri branch drives a separate always-on-top window instead of rendering
-  // <PeekBubble/>. show_peek repositions+shows it and emits the text; a local
-  // 4s timer (reset on every fresh source text) calls hide_peek.
-  // ponytail: hover-pin (pause dismiss on hover) would need cross-window
-  // pointer-event plumbing to the peek webview -- dropped here, kept in the
-  // browser-fallback inline bubble where it's free.
-  const peekText = usePeekSource();
-  const peekHideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-
+  // Narration renders inline beside the orb -- the capsule has room, unlike
+  // the old 64px circle (ui_ux/01-companion-orb.md "Narration"). A local
+  // timer clears it PEEK_DISMISS_MS after the source text last changed;
+  // usePeekSource itself doesn't own dismiss timing.
+  const sourceText = usePeekSource();
+  const [narration, setNarration] = useState<string | null>(null);
+  const dismissTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
-    if (!isTauri() || peekText == null) return;
-    let cancelled = false;
-    void (async () => {
-      const win = getCurrentWindow();
-      const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()]);
-      if (cancelled) return;
-      await invoke("show_peek", { text: peekText, orbX: pos.x, orbY: pos.y, orbW: size.width, orbH: size.height });
-    })();
-    if (peekHideTimer.current) clearTimeout(peekHideTimer.current);
-    peekHideTimer.current = setTimeout(() => void invoke("hide_peek"), PEEK_DISMISS_MS);
-    return () => {
-      cancelled = true;
-    };
-  }, [peekText]);
-
+    if (sourceText == null) return;
+    setNarration(sourceText);
+    if (dismissTimer.current) clearTimeout(dismissTimer.current);
+    dismissTimer.current = setTimeout(() => setNarration(null), PEEK_DISMISS_MS);
+  }, [sourceText]);
   useEffect(
     () => () => {
-      if (peekHideTimer.current) clearTimeout(peekHideTimer.current);
+      if (dismissTimer.current) clearTimeout(dismissTimer.current);
     },
     [],
   );
 
-  const orbState = useHaloStore(selectOrbState);
   const approvalCount = useHaloStore(selectPendingApprovalCount);
-  const runningTask = useHaloStore(selectRunningTask);
+  const brainStatus = useHaloStore(selectBrainStatus);
+  const tasks = useHaloStore(selectTasks);
   const voice = useHaloStore(selectVoice);
 
-  // Task progress arc: a CSS custom property read by OrbRoot.css's
-  // conic-gradient ring (`--task-progress`, 0..1). No step/steps_total yet ->
-  // a small fixed arc reads as "something's running" without claiming a
-  // (nonexistent) percentage -- see OrbRoot.css's [data-indeterminate] rule
-  // for the motion-gated spin that says so more clearly when allowed.
-  const hasProgress = runningTask?.step != null && runningTask?.steps_total != null;
-  const taskProgress = hasProgress ? runningTask!.step! / runningTask!.steps_total! : 0.15;
-  const taskTooltip = runningTask
-    ? [runningTask.title ?? "Working", hasProgress ? `step ${runningTask.step}/${runningTask.steps_total}` : null, runningTask.step_label]
+  const runningTasks = Object.values(tasks).filter((t) => t.state === "running");
+  const primaryTask = runningTasks[0];
+  const lane = primaryTask?.lane ?? 1;
+  const LaneGlyph = LANE_ICON[lane];
+  const hasProgress = primaryTask?.step != null && primaryTask?.steps_total != null;
+  const taskProgress = hasProgress ? primaryTask!.step! / primaryTask!.steps_total! : 0.15;
+  const taskTitle = primaryTask
+    ? [primaryTask.title ?? "Working", hasProgress ? `step ${primaryTask.step}/${primaryTask.steps_total}` : null, primaryTask.step_label]
         .filter(Boolean)
         .join(" — ")
     : undefined;
@@ -156,28 +104,16 @@ export function OrbRoot() {
   const onPointerDown = useCallback(async (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     // Capture on this element so move/up keep firing even if the pointer
-    // leaves the tiny window mid-gesture (both drag and resize need it).
+    // leaves the tiny window mid-gesture.
     e.currentTarget.setPointerCapture(e.pointerId);
 
     // Everything below works in LOGICAL pixels, to match the pointer's
-    // e.screenX/screenY (which are CSS/logical). outerPosition()/outerSize()
-    // return PHYSICAL px, so convert via the scale factor -- mixing the two
-    // broke drag (moved at 1/scale speed) and resize (read the window as
-    // already at max) on this 2x-DPI display. See Bugs.md "DPI mismatch".
+    // e.screenX/screenY (which are CSS/logical). outerPosition() returns
+    // PHYSICAL px, so convert via the scale factor -- mixing the two broke
+    // drag (moved at 1/scale speed) on a 2x-DPI display. See Bugs.md "DPI
+    // mismatch".
     const win = getCurrentWindow();
     const scale = await win.scaleFactor();
-
-    if (inResizeCorner(e)) {
-      const size = (await win.outerSize()).toLogical(scale);
-      resizeRef.current = {
-        startScreenX: e.screenX,
-        startScreenY: e.screenY,
-        startSize: Math.min(size.width, size.height),
-      };
-      void invoke("hide_peek"); // don't let a stale peek float beside a resizing orb
-      return;
-    }
-
     const pos = (await win.outerPosition()).toLogical(scale);
     dragRef.current = {
       startScreenX: e.screenX,
@@ -189,36 +125,17 @@ export function OrbRoot() {
   }, []);
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
-    const resize = resizeRef.current;
-    if (resize) {
-      // Square-locked: one delta (whichever axis moved more) drives both
-      // dimensions, clamped, so the window can never letterbox or balloon.
-      const next = nextOrbSize(
-        resize.startSize,
-        e.screenX - resize.startScreenX,
-        e.screenY - resize.startScreenY,
-      );
-      void getCurrentWindow().setSize(new LogicalSize(next, next));
-      return;
-    }
-
     const drag = dragRef.current;
     if (!drag) return;
     const dx = e.screenX - drag.startScreenX;
     const dy = e.screenY - drag.startScreenY;
     if (!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
-    if (!drag.moved) void invoke("hide_peek"); // drag just started -- don't let a stale peek follow the window
     drag.moved = true;
     void getCurrentWindow().setPosition(new LogicalPosition(drag.windowStartX + dx, drag.windowStartY + dy));
   }, []);
 
   const onPointerUp = useCallback(async (e: React.PointerEvent) => {
     e.currentTarget.releasePointerCapture(e.pointerId);
-    if (resizeRef.current) {
-      resizeRef.current = null;
-      return; // a resize is never a click
-    }
-
     const drag = dragRef.current;
     dragRef.current = null;
     if (!drag) return;
@@ -238,7 +155,6 @@ export function OrbRoot() {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
     dragRef.current = null;
-    resizeRef.current = null;
   }, []);
 
   const onContextMenu = useCallback((e: React.MouseEvent) => {
@@ -246,68 +162,121 @@ export function OrbRoot() {
     if (isTauri()) void invoke("show_orb_menu");
   }, []);
 
-  // Nine-state visuals (ui_ux/01-companion-orb.md "State language") plus the
-  // always-on mute overlay (ruling: mute is never hidden by a higher-priority
-  // state, layered on top of whatever deriveOrbState returns rather than
-  // replacing it). Shared between the Tauri and D9 browser-fallback branches
-  // below -- the only difference between them is the pointer/drag handlers.
-  const orbVisual = (
-    <div className="orb-stack">
-      <div
-        className="orb"
-        data-orb-state={orbState}
-        data-indeterminate={orbState === "task" && !hasProgress ? "true" : undefined}
-        style={{ width: orbSize, height: orbSize, "--task-progress": `${taskProgress}` } as React.CSSProperties}
-        title={orbState === "task" ? taskTooltip : undefined}
-      />
-      {approvalCount > 0 && (
+  // Chips are buttons: clicking approval/task opens the workspace, same as
+  // the capsule body. Deep-linking to a specific view needs a cross-window
+  // nav channel that doesn't exist (the old focusTarget was deleted as dead
+  // code) -- ponytail: deep-link to the specific view once the workspace has
+  // a cross-window nav channel. stopPropagation on pointerdown so the click
+  // doesn't also register as the body's drag/click gesture.
+  const stopChipPointer = useCallback((e: React.PointerEvent) => e.stopPropagation(), []);
+  const onChipClick = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isTauri()) return;
+    const win = getCurrentWindow();
+    const scale = await win.scaleFactor();
+    const pos = (await win.outerPosition()).toLogical(scale);
+    await invoke("toggle_workspace", { orbX: pos.x, orbY: pos.y });
+  }, []);
+
+  const capsule = (
+    <div className="capsule glass">
+      <div className="capsule-glow" aria-hidden="true" />
+
+      <div className="capsule-left">
+        <span className="chip lane-chip" role="status" aria-label={`Active lane: ${LANE_LABEL[lane]}`}>
+          <Icon icon={LaneGlyph} size={16} />
+          <span>{LANE_LABEL[lane]}</span>
+        </span>
+        {runningTasks.length > 0 && (
+          <button
+            type="button"
+            className="chip task-chip"
+            onPointerDown={stopChipPointer}
+            onClick={onChipClick}
+            title={taskTitle}
+            aria-label={`${runningTasks.length} task${runningTasks.length > 1 ? "s" : ""} running`}
+          >
+            <TaskRing progress={taskProgress} indeterminate={!hasProgress} />
+            <span>{runningTasks.length}</span>
+          </button>
+        )}
+      </div>
+
+      <div className="capsule-center" data-voice-state={voice.state}>
+        <div className="orb-wrap">
+          <div className="orb-halo" aria-hidden="true" />
+          <div className="orb-core" aria-hidden="true" />
+        </div>
+        {narration && <span className="narration">{narration}</span>}
+      </div>
+
+      <div className="capsule-right">
+        {brainStatus === "error" && (
+          <span className="chip error-chip" role="status" aria-label="Brain failed to start">
+            <Icon icon={AlertTriangle} size={16} />
+          </span>
+        )}
+        {approvalCount > 0 && (
+          <button
+            type="button"
+            className="chip approval-chip"
+            onPointerDown={stopChipPointer}
+            onClick={onChipClick}
+            aria-label={`${approvalCount} pending approval${approvalCount > 1 ? "s" : ""}`}
+          >
+            {approvalCount}
+          </button>
+        )}
         <span
-          className="orb-badge orb-badge-approval"
+          className="mic-indicator"
           role="status"
-          aria-label={`${approvalCount} pending approval${approvalCount > 1 ? "s" : ""}`}
+          aria-label={voice.state === "muted" ? "Microphone muted" : "Microphone live"}
         >
-          {approvalCount}
+          <Icon icon={voice.state === "muted" ? MicOff : Mic} size={16} />
         </span>
-      )}
-      {orbState === "error" && (
-        <span className="orb-badge orb-badge-error" role="status" aria-label="Brain connection error">
-          <Icon icon={AlertTriangle} size={16} />
-        </span>
-      )}
-      {voice.state === "muted" && (
-        <span className="orb-mute-badge" role="status" aria-label="Microphone muted">
-          <Icon icon={MicOff} size={16} />
-        </span>
-      )}
-      {/* Tauri: the dedicated peek window (above) handles this instead --
-          rendering it here too would double-show the same text inline,
-          invisibly, inside the clipped 64x64 window rect. */}
-      {!isTauri() && <PeekBubble />}
-      {/* Bottom-right resize grip (Tauri only) — the sole resize zone; the
-          pointer handlers detect the corner by coordinate, this is the hint. */}
-      {isTauri() && <span className="orb-resize-handle" aria-hidden="true" />}
+      </div>
     </div>
   );
 
-  // D9 browser fallback: no OS window to drag/resize/expand, just the visual
-  // (still circle-locked via the same ResizeObserver, for eyeball parity).
-  // Note: without a Tauri connection there's no session.json to read, so
-  // useHaloConnection retries read_session forever and the store never gets
-  // frames -- the orb just shows idle here, same as before any connection.
+  // D9 browser fallback: no OS window to drag/expand, just the visual.
   if (!isTauri()) {
-    return <div className="orb-hit-area">{orbVisual}</div>;
+    return <div className="capsule-hit-area">{capsule}</div>;
   }
 
   return (
     <div
-      className="orb-hit-area"
+      className="capsule-hit-area"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
       onContextMenu={onContextMenu}
     >
-      {orbVisual}
+      {capsule}
     </div>
+  );
+}
+
+// Small SVG progress ring for the task chip. Indeterminate spin is killed by
+// prefers-reduced-motion globally (glass.css forces ~0 animation duration).
+function TaskRing({ progress, indeterminate }: { progress: number; indeterminate: boolean }) {
+  const r = 5;
+  const c = 2 * Math.PI * r;
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" className={indeterminate ? "task-ring task-ring-spin" : "task-ring"}>
+      <circle cx="7" cy="7" r={r} fill="none" stroke="var(--border)" strokeWidth="2" />
+      <circle
+        cx="7"
+        cy="7"
+        r={r}
+        fill="none"
+        stroke="var(--primary)"
+        strokeWidth="2"
+        strokeDasharray={c}
+        strokeDashoffset={c * (1 - progress)}
+        strokeLinecap="round"
+        transform="rotate(-90 7 7)"
+      />
+    </svg>
   );
 }

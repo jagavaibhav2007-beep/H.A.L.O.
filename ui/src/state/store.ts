@@ -5,7 +5,7 @@
 
 import { create } from "zustand";
 import type { IpcMessage } from "../ipc/contract";
-import { appendUserTurn, applyConnectionEvent, applyFrame, deriveOrbState, initialState } from "./reducer";
+import { appendUserTurn, applyConnectionEvent, applyFrame, initialState } from "./reducer";
 import type { ConnectionEvent, HaloState } from "./reducer";
 
 // UI navigation state (Step 6, ui_ux/02-workspace.md) — not IPC-derived, so
@@ -53,9 +53,7 @@ export const selectSkills = (s: HaloStore) => s.skills;
 export const selectVoice = (s: HaloStore) => s.voice;
 export const selectSpend = (s: HaloStore) => s.spend;
 export const selectActiveView = (s: HaloStore) => s.activeView;
+export const selectBrainStatus = (s: HaloStore) => s.connection.brainStatus;
 export const selectPendingApprovalCount = (s: HaloStore) => Object.keys(s.approvals).length;
 export const selectRunningTask = (s: HaloStore) =>
   Object.values(s.tasks).find((t) => t.state === "running");
-// Step 7: thin wrapper so the orb component subscribes like any other slice
-// (deriveOrbState itself stays framework-free in reducer.ts for the selfcheck).
-export const selectOrbState = (s: HaloStore) => deriveOrbState(s);
