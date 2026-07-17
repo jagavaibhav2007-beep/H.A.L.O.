@@ -31,6 +31,11 @@ SESSION_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Halo"
 SESSION_FILE = SESSION_DIR / "session.json"
 INSTANCE_LOCK_FILE = SESSION_DIR / "brain.lock"
 
+# Per-client send timeout for _broadcast. A client whose socket buffer fills
+# (it stopped reading but hasn't closed) would otherwise block the send
+# forever while the conversation lock is held -- freezing every conversation.
+_SEND_TIMEOUT_S = 5.0
+
 
 class BrainAlreadyRunning(RuntimeError):
     pass
@@ -112,8 +117,12 @@ async def _broadcast(authenticated: dict[ServerConnection, str], msg_type: str, 
         if not _frame_visible_to(role, msg_type, payload):
             continue
         try:
-            await client.send(raw)
-        except ConnectionClosed:
+            await asyncio.wait_for(client.send(raw), timeout=_SEND_TIMEOUT_S)
+        except (ConnectionClosed, asyncio.TimeoutError):
+            # Closed, or stalled-but-open (buffer full). Drop it from routing so
+            # it can't hold the conversation lock hostage; it will reconnect and
+            # re-snapshot. ponytail: transport teardown is left to the
+            # connection handler's own finally.
             authenticated.pop(client, None)
 
 

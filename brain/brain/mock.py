@@ -114,7 +114,7 @@ async def _run_reorg_steps(task_id: str, broadcast: BroadcastFn, delay: float) -
     and `_scenario_everything` -- identical apart from the per-step delay."""
     title = "Reorganizing Downloads"
     for step, label in [(1, "Scanning files"), (2, "Sorting by type"), (3, "Moving PDFs")]:
-        await broadcast("task_state", {
+        await _emit_task(broadcast, {
             "task_id": task_id, "state": "running", "lane": 1, "title": title,
             "step": step, "steps_total": 4, "step_label": label,
         })
@@ -212,6 +212,36 @@ def _seed_tasks() -> list[dict]:
     ]
 
 
+# Live task registry — same pattern as _beliefs/_skills. The UI reducer REPLACES
+# a task on its task_id (it does not merge), so every task_state the UI receives
+# must be a COMPLETE object. _emit_task merges each partial update onto the
+# stored task and broadcasts the whole thing; a reconnect snapshot re-pushes the
+# current state (D6). # ponytail: global because the Brain is single-instance.
+_tasks: dict[str, dict] = {}
+
+
+def _reset_tasks() -> None:
+    _tasks.clear()
+    _tasks.update({t["task_id"]: t for t in _seed_tasks()})
+
+
+_reset_tasks()
+
+
+async def _emit_task(broadcast: BroadcastFn, patch: dict) -> None:
+    """Merge `patch` into the live task by task_id and broadcast the complete
+    task. A key set to None is removed (e.g. clearing `reason` on resume)."""
+    task_id = patch["task_id"]
+    merged = dict(_tasks.get(task_id, {}))
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    _tasks[task_id] = merged
+    await broadcast("task_state", merged)
+
+
 def _seed_spend() -> dict:
     return {"session_usd": 0.42, "month_usd": 8.13}
 
@@ -225,7 +255,7 @@ async def push_snapshot(send: SendFn) -> None:
         await send("belief_state", belief)
     for skill in _skills.values():
         await send("skill_state", skill)
-    for task in _seed_tasks():
+    for task in _tasks.values():
         await send("task_state", task)
     for payload in list(_pending_approval_payloads.values()):
         await send("approval_request", payload)
@@ -260,7 +290,7 @@ async def _await_approval(
         "destructive": destructive,
     }
     _pending_approval_payloads[approval_id] = payload
-    await broadcast("task_state", {"task_id": task_id, "state": "waiting_approval", "lane": lane})
+    await _emit_task(broadcast, {"task_id": task_id, "state": "waiting_approval", "lane": lane})
     await broadcast("approval_request", payload)
     try:
         return await fut
@@ -300,7 +330,7 @@ async def handle_interrupt(msg: dict, broadcast: BroadcastFn) -> None:
     fut = _pending_approvals.pop(approval_id, None)
     if fut is not None and not fut.done():
         fut.set_result({"decision": "cancelled"})
-    await broadcast("task_state", {"task_id": task_id, "state": "paused", "lane": 3, "reason": "interrupted"})
+    await _emit_task(broadcast, {"task_id": task_id, "state": "paused", "reason": "interrupted"})
 
 
 @_swallow_closed
@@ -314,22 +344,24 @@ async def handle_undo(msg: dict, broadcast: BroadcastFn) -> None:
 
 @_swallow_closed
 async def handle_task_op(msg: dict, broadcast: BroadcastFn) -> None:
-    """Status-strip / orb task controls (pause/resume/stop). The mock keeps no
-    task registry beyond the seeds, so it just broadcasts the resulting
-    task_state for the named id -- enough to satisfy the UI's rule-3
-    disable-until-confirmed contract (a real Brain owns the lifecycle).
+    """Status-strip / orb task controls (pause/resume/stop). Merges the new
+    state onto the live task via _emit_task so the confirming frame keeps the
+    task's real title/lane/step (the UI reducer replaces on task_id) -- a real
+    Brain owns the lifecycle.
     ponytail: an omitted task_id ('Pause all') is treated as the running seed."""
     op = msg.get("op")
     new_state = {"stop": "done", "pause": "paused", "resume": "running"}.get(op)
     if new_state is None:
         return
     task_id = msg.get("task_id") or "task-seed-1"
-    payload = {"task_id": task_id, "state": new_state, "lane": 1, "title": "Syncing calendar"}
+    patch = {"task_id": task_id, "state": new_state}
     if op == "stop":
-        payload["reason"] = "you stopped it"
+        patch["reason"] = "you stopped it"
     elif op == "pause":
-        payload["reason"] = "you paused it"
-    await broadcast("task_state", payload)
+        patch["reason"] = "you paused it"
+    else:  # resume clears any prior pause/stop reason
+        patch["reason"] = None
+    await _emit_task(broadcast, patch)
 
 
 @_swallow_closed
@@ -408,15 +440,14 @@ async def handle_mic(msg: dict, broadcast: BroadcastFn) -> None:
 
 @_swallow_closed
 async def handle_lane_pin(msg: dict, broadcast: BroadcastFn) -> None:
-    """Re-pin a task's lane. The mock keeps no task registry, so it just
-    confirms with a task_state carrying the new lane (rule 3 disable-until-
-    confirmed). # ponytail: state defaults to running — lane pins in the demo
-    happen on a live task; a real Brain preserves the actual state."""
+    """Re-pin a task's lane. Merges the new lane onto the live task via
+    _emit_task so the confirming frame keeps the task's real state/title/step
+    (rule 3 disable-until-confirmed)."""
     task_id = msg.get("task_id")
     lane = msg.get("lane")
     if task_id is None or lane not in (1, 2, 3):
         return
-    await broadcast("task_state", {"task_id": task_id, "state": "running", "lane": lane})
+    await _emit_task(broadcast, {"task_id": task_id, "lane": lane})
 
 
 # ---- Scenarios ----
@@ -453,7 +484,7 @@ async def _scenario_approval(conversation_id: str, task_id: str, broadcast: Broa
         return  # task_state:paused already emitted by handle_interrupt
     if decision == "deny":
         await _activity(broadcast, "Skipped — you denied the request.", task_id, tier=3, lane=lane)
-        await broadcast("task_state", {"task_id": task_id, "state": "paused", "lane": lane, "reason": "denied by user"})
+        await _emit_task(broadcast, {"task_id": task_id, "state": "paused", "lane": lane, "reason": "denied by user"})
         return
 
     text = "Deleted 12 old export files." if destructive else "Sent the weekly report email."
@@ -461,7 +492,7 @@ async def _scenario_approval(conversation_id: str, task_id: str, broadcast: Broa
         text = "Applied your edits and " + ("deleted the selected files." if destructive else "sent the email.")
     undo_token = _new_undo_token(task_id)
     await _activity(broadcast, text, task_id, undoable=True, undo_token=undo_token, tier=3, lane=lane)
-    await broadcast("task_state", {"task_id": task_id, "state": "done", "lane": lane})
+    await _emit_task(broadcast, {"task_id": task_id, "state": "done", "lane": lane})
     await broadcast("done", {"conversation_id": conversation_id, "task_id": task_id})
 
 
@@ -477,17 +508,17 @@ async def _scenario_task(conversation_id: str, task_id: str, broadcast: Broadcas
     if result["decision"] == "cancelled":
         return
     if result["decision"] == "deny":
-        await broadcast("task_state", {
+        await _emit_task(broadcast, {
             "task_id": task_id, "state": "paused", "lane": 1, "title": title, "reason": "you denied a step",
         })
         return
 
-    await broadcast("task_state", {
+    await _emit_task(broadcast, {
         "task_id": task_id, "state": "running", "lane": 1, "title": title,
         "step": 4, "steps_total": 4, "step_label": "Cleaning up",
     })
     await asyncio.sleep(0.2)
-    await broadcast("task_state", {
+    await _emit_task(broadcast, {
         "task_id": task_id, "state": "done", "lane": 1, "title": title,
         "step": 4, "steps_total": 4, "step_label": "Done",
     })
@@ -584,7 +615,7 @@ async def _scenario_stream(conversation_id: str, task_id: str, broadcast: Broadc
     """Sandbox (lane 3) task with a scripted desktop stream — cycles the three
     tiny JPEGs so the tile visibly updates and the store's drop-stale-by-seq
     rule gets exercised. Leaves the task running so the tile stays inspectable."""
-    await broadcast("task_state", {
+    await _emit_task(broadcast, {
         "task_id": task_id, "state": "running", "lane": 3, "title": "Booking a table (sandbox)",
         "step": 1, "steps_total": 1, "step_label": "Driving the browser",
     })
@@ -624,8 +655,12 @@ async def _scenario_everything(conversation_id: str, task_id: str, broadcast: Br
     )
     if destructive["decision"] == "cancelled":
         return
+    if destructive["decision"] == "deny":
+        await _activity(broadcast, "Skipped — you denied the file deletion.", task_id, tier=3, lane=3)
+        await _emit_task(broadcast, {"task_id": task_id, "state": "paused", "reason": "you denied a step"})
+        return
 
-    await broadcast("task_state", {
+    await _emit_task(broadcast, {
         "task_id": task_id, "state": "done", "lane": 1, "title": title,
         "step": 4, "steps_total": 4, "step_label": "Done",
     })
