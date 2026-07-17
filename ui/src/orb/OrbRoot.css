@@ -32,13 +32,19 @@ body,
   --cap-text: #cdd9f5;
   --cap-text-muted: #8a9bc4;
   position: relative;
-  width: 360px;
-  height: 52px;
-  border-radius: 26px; /* height/2 -- a true pill */
-  display: flex;
+  box-sizing: border-box; /* fill the window exactly -- padding/border must
+                             not push the pill past the fixed window width */
+  width: 100%;
+  height: 100%;
+  /* 999px always clamps to height/2 -> a true pill at ANY window height, so a
+     stale-tall window degrades to a fat pill, never a rounded rectangle. */
+  border-radius: 999px;
+  /* Orb dead-centre: symmetric 1fr side columns keep it centred regardless of
+     how much sits in the left/right clusters; no flex:1 void. */
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 8px;
-  padding: 0 14px;
+  padding: 0 16px;
   overflow: hidden; /* clips the ambient glow to the pill shape */
   background: linear-gradient(180deg, rgba(13, 20, 40, 0.92), rgba(4, 8, 18, 0.95));
   color: var(--cap-text);
@@ -70,13 +76,18 @@ body,
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-shrink: 0;
+}
+.capsule-left {
+  justify-self: start;
+}
+.capsule-right {
+  justify-self: end;
 }
 
 .capsule-center {
   position: relative;
   z-index: 1;
-  flex: 1;
+  justify-self: center;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -139,8 +150,7 @@ button.chip:active {
 /* Narration: inline, truncated, transient -- takes the remaining center
    space while chips stay put (ui_ux/01-companion-orb.md "Narration"). */
 .narration {
-  flex: 1;
-  min-width: 0;
+  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
