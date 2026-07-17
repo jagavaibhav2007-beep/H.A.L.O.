@@ -1,5 +1,38 @@
 # Bugs
 
+## Broadcast could hang every conversation on one stalled-but-open client - 2026-07-17
+**Severity:** Medium. Found by subagent bug-hunt, not live testing.
+**Symptom:** none observed yet — a latent hang. `server.py`'s `_broadcast` awaited each client's `.send()` sequentially with no timeout, only catching `ConnectionClosed` (a closed socket), not a stalled-but-open one (peer stopped reading, OS send buffer fills). Since `_broadcast` runs inside the per-conversation `asyncio.Lock`, a stuck send there froze every future message on every conversation.
+**Fix:** wrap each client send in `asyncio.wait_for(..., timeout=5)`; treat `TimeoutError` the same as `ConnectionClosed` (drop the client from routing).
+**Never do:** await an unbounded per-client send inside a shared lock — bound every fan-out send with a timeout, or gather with per-client timeouts, so one slow consumer can't freeze the rest.
+
+## Mock task_state confirmations carried the wrong task's title/lane/progress - 2026-07-17
+**Severity:** High. The UI reducer replaces a task wholesale on `task_state` (no merge), so any handler that broadcasts a partial/hardcoded payload corrupts the card.
+**Symptom:** pausing/stopping/lane-pinning any task other than the hardcoded seed relabeled the card and wiped its progress; a reconnect snapshot re-seeded fresh state (mock kept no live task registry), discarding real mutations and diverging between the orb/workspace windows.
+**Root cause:** `handle_task_op`/`handle_lane_pin`/`handle_interrupt` each hardcoded fields instead of reading/merging the task's actual state; `push_snapshot` called `_seed_tasks()` fresh instead of reading live state.
+**Fix:** added a live `_tasks: dict` registry (same pattern as `_beliefs`/`_skills`) plus an `_emit_task(broadcast, patch)` helper that merges a partial patch onto the stored task and broadcasts the complete object; every task_state emit site now routes through it; `push_snapshot` reads `_tasks.values()`.
+**Never do:** broadcast a partial state object to a client whose reducer replaces (not merges) on that object's id — either merge server-side before sending, or never send an incomplete object.
+
+## Denied destructive approval in "demo everything" reported as done - 2026-07-17
+**Severity:** Low-Medium (safety-relevant surface). `_scenario_everything`'s destructive-delete branch checked only `"cancelled"`, not `"deny"`, so denying the file-delete approval still broadcast `task_state: done` — a denied destructive action was shown as completed successfully.
+**Fix:** added an explicit deny branch (mirrors the sibling `_scenario_approval`/`_scenario_task` pattern) that pauses the task with a "you denied a step" reason instead of falling through to done.
+**Never do:** when one branch of a decision (`approve`/`deny`/`edit`/`cancelled`) is handled, verify every sibling scenario handling the same decision enum handles all branches too — copy-pasted approval flows are exactly where one gets missed.
+
+## Rapid sequential memory deletes silently dropped all but the last - 2026-07-17
+**Severity:** High (silent data-loss of explicit user intent). `MemoryView.tsx`'s `requestDelete` used one `deleteTimer`/`pendingDelete` slot; clicking Delete on belief A then B within the 5s undo window cancelled A outright with no local mutation (by design) and no error — A just silently stayed in the active list while the toast showed B.
+**Fix:** before arming a new pending delete, flush (send) any delete already pending for a *different* belief. The flush side-effect stays outside the `setState` updater per the StrictMode rule (see "Rule-3 unlock on confirm" below).
+**Never do:** let a single-slot "debounce pending action" pattern silently cancel a *different* target's pending action — either queue, or flush-before-replace.
+
+## Memory history-row Restore showed no lock/pending feedback - 2026-07-17
+**Severity:** Low (feedback-only; `usePendingConfirm`'s dedup still prevented an actual double-send). The superseded-history Restore button read the *active* belief's `pending[belief_id]`, not the history row's own id, so it never disabled or showed "Restoring…".
+**Fix:** pass a per-id `pendingFor(id)` lookup into `BeliefCard` so each history row reads its own pending state.
+**Never do:** when a card renders controls for more than one entity (an active belief + its history rows), make sure each control's disabled/label state keys off *that entity's* id, not the card's primary prop.
+
+## Mock turn path had no turn_failed recovery (asymmetric with the real path) - 2026-07-17
+**Severity:** Low (defensive; no live trigger found — every mock-reachable field is already validated). The non-mock echo turn wraps its work in try/except and emits a recoverable `turn_failed` error frame on exception; the mock dispatch branch called `mock_engine.handle_user_msg` unguarded, so an unexpected exception there would drop the turn silently (UI waits on a `done` that never comes).
+**Fix:** wrapped the mock branch in the same try/except/turn_failed pattern as the non-mock path.
+**Never do:** add a second code path that handles the same message type as an existing path without checking it has the same failure-recovery guarantees.
+
 ## Workspace-sync events repeatedly reloaded the floating window - 2026-07-17
 **Severity:** High.
 **Symptom:** while Codex edited the dirty worktree, the capsule repeatedly disappeared and reopened; the terminal reported many Vite HMR updates and Tauri rebuilds for files whose contents had not changed. Repeated `./dev.ps1 -Mock` calls could also leave detached launchers competing for port 1420.
@@ -145,18 +178,17 @@
 **Never do:** never assume a green test suite proves routing/visibility rules — write a regression test that actually asserts what a restricted-role client receives (see `test_mock.py`'s `check_voice_routing_subset`), and confirm it live at least once.
 
 ## Stale window-state SIZE silently overrode the orb's fixed dimensions — 2026-07-12
-**Severity:** Medium.
-**Symptom:** the orb window rendered as a non-square rectangle with the 56px circle visually offset instead of centered, despite `tauri.conf.json` correctly specifying 64×64.
-**Root cause:** `tauri_plugin_window_state`'s `StateFlags` are global across every window registered on one `Builder` (see Gotchas.md) — enabling `SIZE` so the workspace's size/position persist also restores whatever size was last saved under the "orb" label, silently overriding the config on every launch once any stale entry existed.
-**Fix (superseded):** an `enforce_orb_size()` override was added, then removed once the orb became intentionally resizable (2026-07-12 same day) — see Decisions.md "Orb is user-resizable". The CSS fix (circle always sizes to `min(window width, height)` via `ResizeObserver`, centered by flexbox) makes the orb visually correct regardless of window aspect ratio going forward, so this class of bug can't recur even if window-state restores an odd size.
-**Never do:** don't assume a plugin's per-flag config (`StateFlags::SIZE`) applies per-window just because you pass a per-window label elsewhere in the same file — check whether the flags are global to the `Builder` before trusting size/position persistence on a fixed-size window.
+**Severity:** Medium. **Symptom:** the orb rendered as a non-square rectangle with the circle off-center despite config specifying 64×64.
+**Root cause:** `tauri_plugin_window_state`'s `StateFlags` are global across every window on one `Builder` — enabling `SIZE` for the workspace also restored whatever size was last saved under the "orb" label.
+**Fix (superseded 2026-07-12):** circle now always sizes to `min(window width, height)` via `ResizeObserver`, centered by flexbox — correct regardless of window aspect ratio, so this class of bug can't recur.
+**Never do:** don't assume a plugin's per-flag config applies per-window just because a per-window label exists elsewhere — check whether flags are global to the `Builder`.
 
 ## Edge-based orb resize handle conflicted with drag-to-move — 2026-07-12
 **Severity:** High. Found only by live manual testing (tsc/cargo/selfchecks were all green).
-**Symptom:** dragging the orb to move it would intermittently balloon the window into a large non-square rectangle — the user reported "as soon as I moved it, it turned back into [a giant] screenshot."
-**Root cause:** `resizeDirectionAt` treated the outer 8px (`RESIZE_HANDLE_PX`) of *every* window edge as a native-resize zone. On a ~64px orb that 8px band covers nearly the entire clickable surface, so a normal grab-to-drag pointer-down frequently landed inside a resize zone instead and started `startResizeDragging` — combined with the pre-existing persisted large size (see the "Stale window-state SIZE" entry above, same day), this was very easy to trigger and hard to distinguish from a rendering bug at first glance.
-**Fix:** replaced all-edge resize detection with a single small bottom-right corner grip (`RESIZE_CORNER_PX`, hover-revealed), and made resizing square-locked + clamped 48–128px (`MIN_ORB_PX`/`MAX_ORB_PX`) via manual `setSize` rather than native `startResizeDragging`, so drag-to-move now owns the entire rest of the surface unambiguously.
-**Never do:** never size a resize-hit-zone as a fraction of the window when the window itself can be very small — a fixed-px band that's fine on a normal-sized window can swallow almost the whole surface on a ~64px one. Give resize and move mutually exclusive, clearly-bounded hit areas (a small corner grip, not "every edge"), especially on borderless windows with no OS-drawn resize affordance.
+**Symptom:** dragging the orb to move it would intermittently balloon the window into a large non-square rectangle.
+**Root cause:** the resize-zone check treated the outer 8px of *every* window edge as a native-resize zone; on a ~64px orb that band covers nearly the whole clickable surface, so grab-to-move pointer-downs kept landing in a resize zone instead.
+**Fix:** replaced all-edge detection with a single hover-revealed bottom-right corner grip, resize square-locked + clamped 48–128px via manual `setSize` (not native `startResizeDragging`) — drag-to-move now unambiguously owns the rest of the surface.
+**Never do:** never size a resize-hit-zone as a fraction of the window when the window can be very small. Give resize and move mutually exclusive, clearly-bounded hit areas (a small corner grip, not "every edge").
 
 ## Mock Brain had no `task_op` handler — Stop button stuck forever — 2026-07-12
 **Severity:** Medium. Found only by live manual testing.
