@@ -2,12 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the orb and workspace windows",
-  "windows": ["orb", "main", "peek"],
+  "windows": ["orb", "main"],
   "permissions": [
     "core:default",
     "core:window:allow-set-position",
     "core:window:allow-hide",
-    "core:window:allow-start-resize-dragging",
     "global-shortcut:default",
     "notification:default",
     "window-state:default"

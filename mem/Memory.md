@@ -1,6 +1,14 @@
 # Memory
 _Current project state, active goals, and key context._
 
+## 2026-07-17 Remediation Resume Point
+- Done: verified fixes for executable Phase-1 IPC field validation in both mirrors, capped-activity arrival boundaries, destructive-approval pointer filtering, mock snapshot disconnect cleanup, sidecar polling/startup ownership, oversized restored-window clamping, and native Windows capsule clipping.
+- Launcher stability: `./dev.ps1 -Mock` is now attached and stable by default (`vite preview` plus Tauri `--no-watch`), with a named-mutex duplicate guard; pass `-WatchNative` only when live Vite/Rust reload is intentionally needed.
+- Cleanup: removed generated Vite/Tauri/React scaffold assets with no remaining references, removed stale capsule capabilities, corrected Halo app metadata, and explicitly labelled the theme selector.
+- Current state: the changes are implemented in the working tree alongside the existing 2026-07-17 audit edits. The native dev process used for verification was stopped cleanly.
+- Commands/tests: `npm run build`, `cargo check`, `cargo test --lib` (4 passed), and scoped `git diff --check` passed. Native Tauri startup plus Brain/Voice authentication were observed.
+- Risk: `cargo fmt --check` could not run because the stable toolchain lacks the `rustfmt` component. The Windows capsule code compiled and the native app launched, but automated desktop capture was unavailable for a post-fix screenshot.
+
 - H.A.L.O.: local resident desktop AI companion — Tauri+React UI, Python/LangGraph Brain, Python/Pipecat Voice, per Halo-PRD.md.
 - Public repo: github.com/jagavaibhav2007-beep/H.A.L.O. — no secrets, standalone commit messages, small reviewable commits.
 - **Phase 0 (Skeleton & Contract) is COMPLETE** — all 8 steps built, independently verified, committed and pushed (commits `6e1e3c8`, `4c9048e`). Three processes spawn, authenticate over WS, and recover from Brain crashes via backoff+respawn.

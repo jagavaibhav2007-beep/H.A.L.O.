@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:stable": "npm run build && vite preview --port 1420 --strictPort",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -12,6 +12,7 @@ import { Chip } from "../components/Chip";
 import { useHaloStore, selectActivities } from "../state/store";
 import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
 import type { ActivityMsg } from "../ipc/contract";
+import { activitiesAfterBoundary } from "./activityBoundary";
 import "./ActivityFeed.css";
 
 type TierFilter = "all" | "1" | "2" | "3";
@@ -37,9 +38,9 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
 
   // Undo is a rule-3 surface: a click disables the button (pending) and only
   // resolves when the reversal `activity` (undoable:false, same task_id)
-  // arrives — never optimistically. `sinceLen` scopes the search to entries
-  // that arrive after the click so a pre-existing reversal can't false-resolve.
-  const [pending, setPending] = useState<Record<string, { taskId: string; sinceLen: number }>>({});
+  // arrives — never optimistically. The boundary id scopes the search to
+  // newer entries even when the capped ring buffer keeps a fixed length.
+  const [pending, setPending] = useState<Record<string, { taskId: string; boundaryId?: string }>>({});
   const [doneUndo, setDoneUndo] = useState<Set<string>>(new Set());
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -68,7 +69,8 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
   useEffect(() => {
     const resolved = Object.entries(pending)
       .filter(([, info]) =>
-        activities.slice(info.sinceLen).some((a) => a.task_id === info.taskId && !a.undoable),
+        activitiesAfterBoundary(activities, info.boundaryId)
+          .some((a) => a.task_id === info.taskId && !a.undoable),
       )
       .map(([token]) => token);
     if (resolved.length === 0) return;
@@ -87,7 +89,10 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
   function onUndo(token: string, taskId: string) {
     // No double-send (rule 3 / edge case): a token already pending is ignored.
     if (pending[token] || doneUndo.has(token)) return;
-    setPending((prev) => ({ ...prev, [token]: { taskId, sinceLen: activities.length } }));
+    setPending((prev) => ({
+      ...prev,
+      [token]: { taskId, boundaryId: activities[activities.length - 1]?.id },
+    }));
     sendUndo(token);
   }
 
@@ -102,16 +107,14 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
   // (where the newest lands). At the top, new rows simply appear — never yank
   // someone reading history back down (rule 6).
   const [hasNew, setHasNew] = useState(false);
-  const prevLenRef = useRef(activities.length);
+  const prevNewestIdRef = useRef(activities[activities.length - 1]?.id);
   useEffect(() => {
-    if (activities.length <= prevLenRef.current) {
-      prevLenRef.current = activities.length;
-      return;
-    }
-    prevLenRef.current = activities.length;
+    const newestId = activities[activities.length - 1]?.id;
+    if (newestId === prevNewestIdRef.current) return;
+    prevNewestIdRef.current = newestId;
     const el = scrollRef.current;
     if (el && el.scrollTop > 24) setHasNew(true);
-  }, [activities.length]);
+  }, [activities]);
 
   function scrollToNewest() {
     scrollRef.current?.scrollTo({ top: 0 });

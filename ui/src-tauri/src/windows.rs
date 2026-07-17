@@ -12,6 +12,8 @@ use tauri::menu::{ContextMenu, Menu, MenuBuilder, MenuEvent};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WindowEvent, Wry};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutEvent, ShortcutState};
+#[cfg(windows)]
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, HGDIOBJ, SetWindowRgn};
 
 const PRIMARY_HOTKEY: &str = "alt+space";
 const FALLBACK_HOTKEY: &str = "ctrl+alt+space";
@@ -139,6 +141,41 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
 /// If a restored window position (window-state plugin) lies outside every
 /// current monitor — e.g. the monitor it was on got unplugged — clamp it to
 /// the nearest visible monitor's edge instead of leaving it unreachable.
+fn clamp_axis(position: i32, monitor_start: i32, monitor_extent: u32, window_extent: u32) -> i32 {
+    let max = (monitor_start + monitor_extent as i32 - window_extent as i32).max(monitor_start);
+    position.clamp(monitor_start, max)
+}
+
+#[cfg(windows)]
+fn clip_window_to_capsule(window: &tauri::WebviewWindow<Wry>) {
+    let (Ok(hwnd), Ok(size)) = (window.hwnd(), window.outer_size()) else {
+        return;
+    };
+    let width = size.width.min(i32::MAX as u32) as i32;
+    let height = size.height.min(i32::MAX as u32) as i32;
+    let region = unsafe {
+        CreateRoundRectRgn(
+            0,
+            0,
+            width.saturating_add(1),
+            height.saturating_add(1),
+            height,
+            height,
+        )
+    };
+    if region.is_invalid() {
+        eprintln!("halo: failed to create the capsule window region");
+        return;
+    }
+    if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
+        eprintln!("halo: failed to apply the capsule window region");
+        let _ = unsafe { DeleteObject(HGDIOBJ(region.0)) };
+    }
+}
+
+#[cfg(not(windows))]
+fn clip_window_to_capsule(_window: &tauri::WebviewWindow<Wry>) {}
+
 fn clamp_offscreen(app: &AppHandle, label: &str) {
     let Some(window) = app.get_webview_window(label) else { return };
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else { return };
@@ -174,8 +211,8 @@ fn clamp_offscreen(app: &AppHandle, label: &str) {
 
     let mp = nearest.position();
     let ms = nearest.size();
-    let clamped_x = pos.x.clamp(mp.x, mp.x + ms.width as i32 - size.width as i32);
-    let clamped_y = pos.y.clamp(mp.y, mp.y + ms.height as i32 - size.height as i32);
+    let clamped_x = clamp_axis(pos.x, mp.x, ms.width, size.width);
+    let clamped_y = clamp_axis(pos.y, mp.y, ms.height, size.height);
     let _ = window.set_position(PhysicalPosition::new(clamped_x, clamped_y));
 }
 
@@ -191,6 +228,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     // the corrected size, self-healing the state file.
     if let Some(orb) = app.get_webview_window("orb") {
         let _ = orb.set_size(tauri::LogicalSize::new(360.0, 52.0));
+        clip_window_to_capsule(&orb);
+        let shaped_orb = orb.clone();
+        orb.on_window_event(move |event| {
+            if matches!(event, WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
+                clip_window_to_capsule(&shaped_orb);
+            }
+        });
     }
 
     clamp_offscreen(app, "orb");
@@ -231,4 +275,21 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 /// hotkey registration.
 pub fn teardown(app: &AppHandle) {
     let _ = app.global_shortcut().unregister_all();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_axis;
+
+    #[test]
+    fn oversized_window_clamps_to_monitor_origin_without_panicking() {
+        assert_eq!(clamp_axis(2_000, 0, 1_366, 3_000), 0);
+        assert_eq!(clamp_axis(-5_000, -1_920, 1_920, 2_500), -1_920);
+    }
+
+    #[test]
+    fn ordinary_offscreen_window_clamps_to_nearest_edge() {
+        assert_eq!(clamp_axis(2_000, 0, 1_920, 1_000), 920);
+        assert_eq!(clamp_axis(-2_000, -1_920, 1_920, 1_000), -1_920);
+    }
 }

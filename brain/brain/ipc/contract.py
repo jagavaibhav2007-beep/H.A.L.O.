@@ -239,7 +239,12 @@ _STRING_FIELDS = {
     "user_msg": ("text", "conversation_id", "source"),
     "interrupt": ("conversation_id",),
     "approval_response": ("reply_to", "decision"),
+    "memory_edit": ("belief_id", "op"),
+    "skill_op": ("skill_name", "op"),
+    "lane_pin": ("task_id",),
     "task_op": ("op",),
+    "mic": ("op",),
+    "settings_update": ("key",),
     "undo": ("undo_token",),
     "token": ("text", "conversation_id"),
     "done": ("conversation_id",),
@@ -249,7 +254,10 @@ _STRING_FIELDS = {
 _ENUM_FIELDS = {
     "user_msg": {"source": {"ui", "voice"}},
     "approval_response": {"decision": {"approve", "deny", "edit"}},
+    "memory_edit": {"op": {"edit", "delete", "restore"}},
+    "skill_op": {"op": {"trial", "disable", "restore", "delete"}},
     "task_op": {"op": {"pause", "resume", "stop"}},
+    "mic": {"op": {"mute", "unmute"}},
 }
 
 
@@ -291,6 +299,18 @@ def parse_ipc_message(raw: object) -> IpcMessage:
             raise IpcValidationError(
                 f'ipc: "{msg_type}" field "{field}" must be one of: {choices}'
             )
+    if msg_type == "hello" and "role" in raw and (
+        not isinstance(raw["role"], str) or raw["role"] not in {"ui", "voice"}
+    ):
+        raise IpcValidationError('ipc: "hello" field "role" must be one of: ui, voice')
+    if msg_type == "memory_edit" and "text" in raw and not isinstance(raw["text"], str):
+        raise IpcValidationError('ipc: "memory_edit" field "text" must be a string')
+    if msg_type == "lane_pin" and (
+        isinstance(raw["lane"], bool) or raw["lane"] not in (1, 2, 3)
+    ):
+        raise IpcValidationError('ipc: "lane_pin" field "lane" must be 1, 2, or 3')
+    if msg_type == "task_op" and "task_id" in raw and not isinstance(raw["task_id"], str):
+        raise IpcValidationError('ipc: "task_op" field "task_id" must be a string')
     if msg_type == "error" and not isinstance(raw["recoverable"], bool):
         raise IpcValidationError('ipc: "error" field "recoverable" must be a boolean')
     if msg_type == "error" and "conversation_id" in raw and not isinstance(raw["conversation_id"], str):
@@ -326,6 +346,17 @@ def _self_check() -> None:
         pass
     else:
         raise AssertionError("expected malformed frame (missing fields) to be rejected")
+
+    for lane in ([], {}):
+        try:
+            parse_ipc_message({
+                "type": "lane_pin", "id": "x", "ts": "x",
+                "task_id": "task", "lane": lane,
+            })
+        except IpcValidationError:
+            pass
+        else:
+            raise AssertionError("expected non-scalar lane to be rejected")
 
     print("[brain.ipc.contract] self-check OK")
 

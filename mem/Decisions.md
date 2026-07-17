@@ -1,6 +1,21 @@
 # Decisions
 _Architectural, structural, and system design choices._
 
+## Stable attached launcher by default; hot reload is opt-in - 2026-07-17
+**What:** `./dev.ps1` runs the UI in its own terminal instead of spawning a detached PowerShell. Its default stable path uses `ui/src-tauri/tauri.stable.conf.json`, `npm run dev:stable`, `vite preview`, and Tauri `--no-watch`; `-WatchNative` selects the original Vite dev server and native watcher. A named mutex rejects a second launcher before it starts any build or server.
+**Why:** automated workspace synchronization emits metadata-only writes across the dirty tree, which made both watchers repeatedly reload otherwise unchanged code. An attached process also gives Ctrl+C one ownership path for Tauri, Brain, Voice, and the frontend server.
+**Trade-off:** stable mode performs a frontend build at startup and does not live-reload edits. Developers intentionally editing UI/Rust can pass `-WatchNative`; agent-driven runs favor continuity and trustworthy logs.
+
+## Clip the Windows capsule at the HWND layer - 2026-07-17
+**What:** the orb/capsule window uses a target-specific Win32 GDI dependency and `SetWindowRgn` to make the native window itself a 360x52 pill. Tauri's transparent background remains enabled, with an explicit zero-alpha `backgroundColor`.
+**Why:** the existing CSS radius correctly shaped the DOM but could not alter the rectangular native window or its hit-test region. A native region is the smallest Windows-specific fix that makes painting and pointer bounds agree with the visual capsule.
+**Trade-off:** a small platform-specific unsafe block and one Windows-only crate feature. Non-Windows builds keep a no-op shaping function; resize and DPI events reapply the region so physical dimensions stay correct.
+
+## Remove conclusively unused generated scaffold assets - 2026-07-17
+**What:** removed the unused Vite, React, and Tauri placeholder SVG/PNG assets, removed the Vite favicon reference, and dropped stale `peek`/resize-drag capability entries left after the capsule redesign. The bundle icons still referenced by `tauri.conf.json` remain.
+**Why:** repository-wide reference searches found no consumers for the deleted assets or permissions; retaining them implied obsolete product surfaces and widened the capability manifest without a caller.
+**Trade-off:** if Windows Store tile assets or native resize dragging are introduced later, generate or add only the required files and permissions as part of that feature rather than preserving dead scaffolding now.
+
 ## Approval card: `interrupt` lives on the card as "Stop this task" — 2026-07-13
 **What:** Step 10's `ApprovalCard` has a "Stop this task" link that sends `interrupt(conversation_id)`, kept in the Step-10 file rather than the chat/status-strip. It is deliberately distinct from Deny: Deny answers *this one action* (`approval_response{deny}` → the task pauses gracefully), while Stop cancels *the whole conversation's pending work* (implicit deny + pause).
 **Why:** the "stale-card rule" (interrupt removes a pending card) is a Step-10 acceptance item, but nothing in the UI could send `interrupt` — the outbound union was `UserMsg|TaskOpMsg|UndoMsg`. `task_op` is not a substitute: `handle_task_op` only broadcasts a `task_state` and never resolves the mock's pending-approval future, and it defaults `task_id` to the seed. A real `sendInterrupt` was needed regardless; putting the affordance on the card makes the rule clickable/verifiable without touching Step-6/8 components. The card's *removal* was already automatic — the store's `resolveApprovalsForTask` fires on the `task_state:paused` that `handle_interrupt` broadcasts.

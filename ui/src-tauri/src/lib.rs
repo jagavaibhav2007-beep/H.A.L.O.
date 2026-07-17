@@ -48,8 +48,8 @@ pub fn run() {
         .setup({
             let sidecars = sidecars.clone();
             move |app| {
-                sidecars.start(app.handle().clone());
                 windows::setup(app.handle())?;
+                sidecars.start(app.handle().clone());
                 Ok(())
             }
         })

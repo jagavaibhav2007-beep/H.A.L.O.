@@ -1,5 +1,66 @@
 # Bugs
 
+## Workspace-sync events repeatedly reloaded the floating window - 2026-07-17
+**Severity:** High.
+**Symptom:** while Codex edited the dirty worktree, the capsule repeatedly disappeared and reopened; the terminal reported many Vite HMR updates and Tauri rebuilds for files whose contents had not changed. Repeated `./dev.ps1 -Mock` calls could also leave detached launchers competing for port 1420.
+**Root cause:** the workspace bridge rewrites timestamps for multiple dirty files during a patch. The default launcher combined Vite and Tauri file watchers with `Start-Process -NoExit`, so metadata-only events restarted both WebViews and `ui.exe`, while the detached parent made duplicate sessions easy to create.
+**Fix:** `./dev.ps1` now stays attached, holds the `Local\HaloDevLauncher` named mutex, and defaults to a stable one-time `vite build` served by `vite preview` plus `tauri dev --no-watch`. `-WatchNative` explicitly restores normal Vite and Rust hot reload.
+**Never do:** run watcher-heavy detached dev trees while an automated workspace bridge is rewriting a dirty worktree; use stable mode for agent-driven edits and opt into watchers only for interactive development.
+
+## Capsule CSS left the native floating window rectangular - 2026-07-17
+**Severity:** Medium.
+**Symptom:** the floating companion drew a correct pill border, but its desktop window retained visible rectangular corners and rectangular native hit bounds.
+**Root cause:** `.capsule { border-radius: 999px; overflow: hidden; }` clipped only DOM content; it did not change the Windows HWND region, and the WebView had no explicit zero-alpha background color.
+**Fix:** set the orb window `backgroundColor` to `#00000000`, apply a height-radius Win32 `SetWindowRgn`, and reapply the region after resize/DPI changes.
+**Never do:** treat CSS rounding as proof that a transparent, borderless native window has non-rectangular paint and hit-test bounds.
+
+## Repeated sidecar poll errors could abandon a live child - 2026-07-17
+**Severity:** High.
+**Symptom:** any `Child::try_wait()` error was treated as process completion, so supervision could clear its shared handle and spawn a replacement while the original process was still alive.
+**Root cause:** the poll loop collapsed `Ok(Some(status))` and `Err(error)` into the same `done` branch.
+**Fix:** reset an error counter after successful polls, retry transient failures, and after three consecutive failures kill and wait for the owned child before entering restart backoff. If termination fails, retain ownership and continue polling.
+**Never do:** interpret an inability to query process state as evidence that the process exited; preserve ownership until exit is observed or termination is confirmed.
+
+## Mock snapshot disconnect bypassed authenticated-client cleanup - 2026-07-17
+**Severity:** Medium.
+**Symptom:** a UI connection that closed while its mock reconnect snapshot was being sent could remain in the authenticated-client routing map.
+**Root cause:** `push_snapshot()` ran after registration but before the `try/finally` that removes the socket.
+**Fix:** move snapshot delivery inside the same `try/finally` as the receive loop so every post-registration exit removes the connection.
+**Never do:** register a connection before an awaited operation unless every subsequent await is inside the registration's cleanup scope.
+
+## Fallible window setup ran after sidecars started - 2026-07-17
+**Severity:** Medium.
+**Symptom:** if hotkey, tray, or other window setup failed, Tauri setup returned an error after Brain and Voice supervisor threads had already started, creating avoidable partial-startup ownership risk.
+**Root cause:** `sidecars.start()` preceded the fallible `windows::setup()` call.
+**Fix:** complete `windows::setup()` first and start sidecars only after it succeeds.
+**Never do:** start long-lived child processes before required fallible application initialization has completed.
+
+## Active Phase 1 controls again outgrew runtime IPC validation - 2026-07-17
+**Severity:** High.
+**Symptom:** malformed memory/skill identifiers crashed detached handlers, unknown operations were silently accepted, and an invalid mic operation was treated as unmute.
+**Root cause:** the typed contract gained executable `memory_edit`, `skill_op`, `lane_pin`, and `mic` handlers without extending both runtime validators beyond required-field presence.
+**Fix:** mirrored string/enum/optional-field validation in Python and TypeScript, including rejecting boolean lanes, with malformed-frame regressions.
+**Never do:** make an inbound control executable until every field it uses for lookup or branching is runtime-validated in both mirrors.
+
+## Activity rule-3 boundaries broke at the ring-buffer cap - 2026-07-17
+**Severity:** Medium.
+**Symptom:** at 10,000 activities an Undo could remain pending forever and the new-activity pill stopped appearing because the array length no longer increased.
+**Root cause:** both behaviors used array length as an arrival boundary even though the reducer drops the oldest item at the cap.
+**Fix:** track the newest activity message id and treat a missing boundary as evicted; a focused self-check covers retained and evicted boundaries.
+**Never do:** use collection length as a monotonic event cursor for a capped collection.
+
+## Non-primary pointer buttons could approve destructive actions - 2026-07-17
+**Severity:** High.
+**Symptom:** holding right-click or middle-click for 700 ms triggered the destructive approval callback.
+**Root cause:** the hold button started on every `pointerdown` without checking the primary pointer or button.
+**Fix:** only start the hold for the primary pointer's left button; keyboard hold behavior is unchanged.
+
+## Oversized restored windows could panic during off-screen clamping - 2026-07-17
+**Severity:** Medium.
+**Symptom:** an off-screen window larger than the selected monitor produced an invalid `Ord::clamp` range during startup.
+**Root cause:** the computed maximum coordinate could be less than the monitor-origin minimum.
+**Fix:** clamp each maximum to at least the monitor origin and cover oversized, negative-origin, and ordinary cases with Rust unit tests.
+
 ## Rule-3 "unlock on confirm" silently never fired in Tasks/Memory/Skills views - 2026-07-13
 **Severity:** High.
 **Symptom:** clicking Pause/Delete/Restore/etc. correctly locked a card's buttons, but the buttons stayed disabled forever even after the Brain's confirming frame landed — verified live only for Skills (Tasks/Memory had never actually been tested past the lock step, only the lock itself).

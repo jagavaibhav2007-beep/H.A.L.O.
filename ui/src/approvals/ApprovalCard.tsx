@@ -192,12 +192,18 @@ function HoldButton({ label, busyLabel, busy, disabled, onComplete }: HoldProps)
   const [progress, setProgress] = useState(0);
   const rafRef = useRef<number | null>(null);
   const firedRef = useRef(false);
+  const pointerIdRef = useRef<number | null>(null);
 
   const cancel = useCallback(() => {
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
+    pointerIdRef.current = null;
     if (!firedRef.current) setProgress(0);
   }, []);
+
+  const cancelPointer = useCallback((pointerId: number) => {
+    if (pointerIdRef.current === pointerId) cancel();
+  }, [cancel]);
 
   const start = useCallback(() => {
     if (disabled || busy || rafRef.current != null || firedRef.current) return;
@@ -225,12 +231,14 @@ function HoldButton({ label, busyLabel, busy, disabled, onComplete }: HoldProps)
       disabled={disabled}
       aria-label={label}
       onPointerDown={(e) => {
+        if (e.button !== 0 || !e.isPrimary) return;
+        pointerIdRef.current = e.pointerId;
         e.currentTarget.setPointerCapture(e.pointerId);
         start();
       }}
-      onPointerUp={cancel}
-      onPointerLeave={cancel}
-      onPointerCancel={cancel}
+      onPointerUp={(e) => cancelPointer(e.pointerId)}
+      onPointerLeave={(e) => cancelPointer(e.pointerId)}
+      onPointerCancel={(e) => cancelPointer(e.pointerId)}
       onKeyDown={(e) => {
         if ((e.key === "Enter" || e.key === " ") && !e.repeat) {
           e.preventDefault(); // stop the browser's synthetic click on keyup

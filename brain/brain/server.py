@@ -225,12 +225,12 @@ async def _connection_handler(
     authenticated[ws] = role
     logger.info("client authenticated (role=%s, mock=%s)", role, mock)
 
-    if mock and role == "ui":
-        # D6: snapshot goes only to the connecting UI client, right after
-        # hello_ack. Voice never gets it -- it's outside Voice's routing subset.
-        await mock_engine.push_snapshot(send_fn)
-
     try:
+        if mock and role == "ui":
+            # D6: snapshot goes only to the connecting UI client, right after
+            # hello_ack. Voice never gets it -- it's outside Voice's routing subset.
+            await mock_engine.push_snapshot(send_fn)
+
         async for raw in ws:
             try:
                 frame = json.loads(raw)

@@ -4013,6 +4013,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-notification",
  "tauri-plugin-window-state",
+ "windows",
 ]
 
 [[package]]

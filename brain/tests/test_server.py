@@ -139,7 +139,17 @@ async def check_malformed_frame_rejected(port: int, token: str) -> None:
             _frame("approval_response", reply_to=[], decision="approve"),
             _frame("interrupt", conversation_id=[]),
             _frame("undo", undo_token=[]),
+            _frame("memory_edit", belief_id=[], op="delete"),
+            _frame("memory_edit", belief_id="belief", op="erase"),
+            _frame("skill_op", skill_name=[], op="disable"),
+            _frame("skill_op", skill_name="skill", op="enable"),
+            _frame("lane_pin", task_id="task", lane=True),
+            _frame("lane_pin", task_id="task", lane=[]),
+            _frame("lane_pin", task_id="task", lane={}),
+            _frame("lane_pin", task_id="task", lane=4),
+            _frame("task_op", task_id=[], op="stop"),
             _frame("task_op", op="restart"),
+            _frame("mic", op="explode"),
         ]
         for frame in bad_frames:
             await ws.send(json.dumps(frame))

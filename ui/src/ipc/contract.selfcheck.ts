@@ -55,5 +55,37 @@ expectRejected(
   { type: "task_op", id: "x", ts: "x", op: "restart" },
   "invalid task operation",
 );
+expectRejected(
+  { type: "memory_edit", id: "x", ts: "x", belief_id: [], op: "delete" },
+  "invalid belief id",
+);
+expectRejected(
+  { type: "memory_edit", id: "x", ts: "x", belief_id: "belief", op: "erase" },
+  "invalid memory operation",
+);
+expectRejected(
+  { type: "skill_op", id: "x", ts: "x", skill_name: [], op: "disable" },
+  "invalid skill name",
+);
+expectRejected(
+  { type: "skill_op", id: "x", ts: "x", skill_name: "skill", op: "enable" },
+  "invalid skill operation",
+);
+expectRejected(
+  { type: "lane_pin", id: "x", ts: "x", task_id: "task", lane: 4 },
+  "invalid lane",
+);
+expectRejected(
+  { type: "lane_pin", id: "x", ts: "x", task_id: "task", lane: [] },
+  "invalid non-scalar lane",
+);
+expectRejected(
+  { type: "task_op", id: "x", ts: "x", task_id: [], op: "stop" },
+  "invalid optional task id",
+);
+expectRejected(
+  { type: "mic", id: "x", ts: "x", op: "explode" },
+  "invalid mic operation",
+);
 
 console.log("[contract.selfcheck.ts] self-check OK");

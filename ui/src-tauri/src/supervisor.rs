@@ -134,6 +134,7 @@ fn supervise(
             }
             emit_state(&app, name, "running");
             let start = Instant::now();
+            let mut wait_errors = 0;
 
             // Poll (not a blocking wait()) so we can also notice the shutdown
             // flag without racing the app-exit kill path over the same Child.
@@ -142,17 +143,48 @@ fn supervise(
                     return; // app exit handler owns killing it now
                 }
                 let mut guard = shared.lock().unwrap();
+                let mut killed = false;
                 let done = match guard.as_mut() {
-                    Some(c) => matches!(c.try_wait(), Ok(Some(_)) | Err(_)),
+                    Some(c) => match c.try_wait() {
+                        Ok(Some(_)) => true,
+                        Ok(None) => {
+                            wait_errors = 0;
+                            false
+                        }
+                        Err(error) => {
+                            wait_errors += 1;
+                            eprintln!("halo: failed to poll {name} (attempt {wait_errors}/3): {error}");
+                            if wait_errors < 3 {
+                                false
+                            } else {
+                                match c.kill() {
+                                    Ok(()) => {
+                                        killed = true;
+                                        true
+                                    }
+                                    Err(kill_error) => {
+                                        eprintln!("halo: failed to terminate {name}: {kill_error}");
+                                        wait_errors = 0;
+                                        false
+                                    }
+                                }
+                            }
+                        }
+                    },
                     None => return, // taken by the shutdown kill path
                 };
                 drop(guard);
                 if done {
+                    let child = shared.lock().unwrap().take();
+                    if killed {
+                        if let Some(mut child) = child {
+                            let _ = child.wait();
+                        }
+                    }
                     break;
                 }
                 thread::sleep(Duration::from_millis(200));
             }
-            *shared.lock().unwrap() = None;
 
             if start.elapsed() > HEALTHY_UPTIME {
                 attempt = 0;

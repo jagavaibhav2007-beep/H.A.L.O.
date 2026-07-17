@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ui",
+  "productName": "Halo",
   "version": "0.1.0",
   "identifier": "com.halo.app",
   "build": {
@@ -19,6 +19,7 @@
         "height": 52,
         "resizable": false,
         "transparent": true,
+        "backgroundColor": "#00000000",
         "decorations": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,

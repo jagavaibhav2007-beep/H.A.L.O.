@@ -252,7 +252,12 @@ const STRING_FIELDS: Partial<Record<MsgType, readonly string[]>> = {
   user_msg: ["text", "conversation_id", "source"],
   interrupt: ["conversation_id"],
   approval_response: ["reply_to", "decision"],
+  memory_edit: ["belief_id", "op"],
+  skill_op: ["skill_name", "op"],
+  lane_pin: ["task_id"],
   task_op: ["op"],
+  mic: ["op"],
+  settings_update: ["key"],
   undo: ["undo_token"],
   token: ["text", "conversation_id"],
   done: ["conversation_id"],
@@ -262,7 +267,10 @@ const STRING_FIELDS: Partial<Record<MsgType, readonly string[]>> = {
 const ENUM_FIELDS: Partial<Record<MsgType, Readonly<Record<string, readonly unknown[]>>>> = {
   user_msg: { source: ["ui", "voice"] },
   approval_response: { decision: ["approve", "deny", "edit"] },
+  memory_edit: { op: ["edit", "delete", "restore"] },
+  skill_op: { op: ["trial", "disable", "restore", "delete"] },
   task_op: { op: ["pause", "resume", "stop"] },
+  mic: { op: ["mute", "unmute"] },
 };
 
 /** Validate an arbitrary decoded-JSON frame against the contract. Throws on
@@ -294,6 +302,18 @@ export function parseIpcMessage(raw: unknown): IpcMessage {
     if (!allowed.includes(obj[field])) {
       throw new Error(`ipc: "${type}" field "${field}" has an invalid value`);
     }
+  }
+  if (type === "hello" && "role" in obj && !["ui", "voice"].includes(obj.role as string)) {
+    throw new Error('ipc: "hello" field "role" has an invalid value');
+  }
+  if (type === "memory_edit" && "text" in obj && typeof obj.text !== "string") {
+    throw new Error('ipc: "memory_edit" field "text" must be a string');
+  }
+  if (type === "lane_pin" && ![1, 2, 3].includes(obj.lane as number)) {
+    throw new Error('ipc: "lane_pin" field "lane" must be 1, 2, or 3');
+  }
+  if (type === "task_op" && "task_id" in obj && typeof obj.task_id !== "string") {
+    throw new Error('ipc: "task_op" field "task_id" must be a string');
   }
   if (type === "error" && typeof obj.recoverable !== "boolean") {
     throw new Error('ipc: "error" field "recoverable" must be a boolean');

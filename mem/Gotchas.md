@@ -1,6 +1,15 @@
 # Gotchas
 _Non-obvious traps, hidden constraints, things that bite._
 
+## CSS border radius does not shape a native Tauri window - 2026-07-17
+**Symptom:** the capsule DOM has the correct pill outline and `overflow:hidden`, but the desktop still shows rectangular corners around it. **Cause:** CSS clips WebView content only; the top-level Windows HWND remains rectangular, and a merely `transparent:true` window can still expose its backing surface. **Handling:** set the WebView background alpha to zero and apply a Win32 window region; reapply after physical size or DPI changes. Browser preview cannot verify HWND shape or native hit testing, so launch the Tauri app for final confirmation.
+
+## A live Tauri dev session can cause Rust test `LNK1104` - 2026-07-17
+`cargo test --lib` can fail to link because `npm run tauri dev` is holding a Windows target artifact. Stop the specific dev session and retry before treating it as a source failure. In the 2026-07-17 remediation run, all four Rust tests passed immediately after the dev process was stopped.
+
+## This machine's stable Rust toolchain lacks `rustfmt` - 2026-07-17
+`cargo check`, native Tauri builds, and Rust tests work, but `cargo fmt --check` reports that `cargo-fmt.exe` is not installed for `stable-x86_64-pc-windows-msvc`. Do not report formatting verification as passed unless the component is installed; use compiler/tests plus `git diff --check` and state the limitation.
+
 ## Brain respawns on a new ephemeral port every time — 2026-07-10
 The Brain binds port 0 (OS-assigned) and rewrites `%LOCALAPPDATA%\Halo\session.json` on every start, including supervised restarts. Any client (UI, Voice, smoke test) must re-read session.json fresh on *every* connect/reconnect attempt — never cache port/token from a prior connection, or reconnection silently dials a dead port forever.
 

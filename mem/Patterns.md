@@ -1,6 +1,12 @@
 # Patterns
 _Established code patterns and conventions for this project._
 
+## Event IDs, not lengths, are cursors for capped collections - 2026-07-17
+For a fixed-capacity collection such as the 10,000-entry activity ring buffer, capture the newest message `id` as the boundary for a pending operation or "new items" indicator. Find that ID on the next update and inspect only later entries; if it has been evicted, conservatively treat every retained entry as newer. Collection length is not monotonic once old entries are dropped. The pure helper and focused script are `ui/src/activity/activityBoundary.ts` and `activityBoundary.selfcheck.ts`.
+
+## Native Windows capsule: transparent WebView plus HWND region - 2026-07-17
+For a non-rectangular Tauri window on Windows, combine `transparent:true` and `backgroundColor:"#00000000"` with a native `SetWindowRgn` region. `ui/src-tauri/src/windows.rs::clip_window_to_capsule` creates a round-rect region whose corner ellipse equals the physical window height, applies it after enforcing the 360x52 logical size, and reapplies it on resize or DPI scale changes. Keep the `windows` crate dependency target-specific and enable only `Win32_Graphics_Gdi`.
+
 ## Single-source-of-truth IPC contract with a drift check — 2026-07-10
 `shared/ipc-contract.json` is the canonical schema (message types + required fields). `ui/src/ipc/contract.ts` and `brain/brain/ipc/contract.py` are hand-mirrored from it. `shared/check_contract_sync.py` fails the build if TS/Python/schema diverge. Run it after editing any of the three. Chosen over codegen for simplicity at this scale.
 

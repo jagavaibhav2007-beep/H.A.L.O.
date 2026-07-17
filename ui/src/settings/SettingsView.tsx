@@ -50,8 +50,8 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
             <span className="settings-value">{hotkey ?? (isTauri() ? "…" : "not available in browser preview")}</span>
           </div>
           <div className="settings-row">
-            <span className="settings-label">Theme</span>
-            <select className="halo-input settings-select" value={theme} onChange={(e) => onTheme(e.target.value as Theme)}>
+            <label className="settings-label" htmlFor="halo-theme">Theme</label>
+            <select id="halo-theme" className="halo-input settings-select" value={theme} onChange={(e) => onTheme(e.target.value as Theme)}>
               <option value="auto">Auto</option>
               <option value="light">Light</option>
               <option value="dark">Dark</option>
