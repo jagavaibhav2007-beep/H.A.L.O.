@@ -23,12 +23,15 @@ Three independent process trees (`ui/` Rust+Node, `brain/` Python, `voice/` Pyth
 
 **Run everything for local dev:**
 ```powershell
-./dev.ps1              # launches Tauri (UI parent spawns brain, voice sidecars)
+./dev.ps1              # launches Tauri (UI parent spawns brain, voice sidecars) — stable/attached by default
 ./dev.ps1 -Only ui      # just one of: ui | brain | voice (for standalone debugging)
 ./dev.ps1 -Mock         # full app, but Brain launches with --mock (HALO_MOCK) for scripted demo scenarios
 ./dev.ps1 -Smoke        # runs Phase 0 (shared/smoke_test.py) then Phase 1 (shared/phase1_check.py) protocol gates in-place (no windows)
+./dev.ps1 -WatchNative  # opt into normal Vite + Rust hot reload instead of the stable build (see below)
 ```
 The default `./dev.ps1` (no flags) spawns the plain Phase 0 echo Brain, which does not respond to `demo ...` triggers — use `-Mock` to drive any of the scripted scenarios in `brain/brain/mock.py`. After the automated gate passes, [VERIFY.md](VERIFY.md) is the manual native-app checklist (render matrix, keyboard/a11y, performance/recovery) — run it against `./dev.ps1 -Mock` for anything with a visual/runtime surface, since green scripts alone don't catch rendering or lifecycle bugs (see Architecture below).
+
+**Launcher runs attached and stable by default (since 2026-07-17).** `./dev.ps1` now runs in its own terminal (not a detached `Start-Process`), holds a named mutex (`Local\HaloDevLauncher`) so a second launcher refuses to start, and by default builds once (`tauri.stable.conf.json`, `npm run dev:stable`, `vite preview`, `tauri dev --no-watch`) instead of live-reloading. Pass `-WatchNative` to get the original Vite dev server + native Rust hot reload back. This exists because agent-driven edits that touch many files (metadata-only rewrites included) were triggering repeated HMR/Tauri rebuilds under the old default watcher setup — see Decisions.md "Stable attached launcher by default." If you're iterating interactively on UI/Rust code and want hot reload, use `-WatchNative`; leave the default alone for anything scripted/automated.
 
 **Mocked Brain for standalone UI development** (no Tauri, browser-only iteration):
 ```powershell
@@ -100,6 +103,8 @@ Both run together via `./dev.ps1 -Smoke`. No test framework is used anywhere in 
 
 **UI event store is split pure/impure on purpose.** `ui/src/state/reducer.ts` is a framework-free `applyFrame(state, frame) → state` projection of every IPC frame type (plus `deriveOrbState`, the priority selector `approval > error > task > voice`) — this is what `reducer.selfcheck.ts` replays canned frame logs against. `ui/src/state/store.ts` is the only impure piece: a thin zustand wrapper that calls the pure reducer inside `set()`, plus UI-only navigation state (`activeView`/`focusTarget`) that never came from a frame and so has no business being in the reducer. Each of the orb and workspace windows boots its **own** store instance (separate webviews, no shared JS heap) — both independently open a WS connection and independently project state from the same broadcast frames.
 
+**The companion window is a capsule, not a circle, and its shape is enforced at the native window layer.** Since the 2026-07-15 redesign, the floating companion is a horizontal 360×52 pill (`[lane · task] ((orb)) [approval · mic]`, Midnight Blue palette — dark glass surfaces, blue as a glow accent never a flat fill) rather than the original bare circle. CSS `border-radius` only shapes the DOM — on Windows the actual HWND stays rectangular unless clipped, so `ui/src-tauri` applies a Win32 `SetWindowRgn` (with an explicit zero-alpha `backgroundColor`) to make the native window's paint and hit-test bounds match the visual pill, reapplied on resize/DPI change. Non-Windows builds keep a no-op shaping function. See Decisions.md "Clip the Windows capsule at the HWND layer" and "Companion orb → capsule redesign."
+
 **"Lock on press, unlock only on confirm" (rule 3) governs every outbound action with a visible affordance** (approve/deny/edit, pause/resume/stop, lane-pin, memory edit/delete/restore, skill trial/disable/restore). The control disables immediately on click and clears only when a frame confirming that exact change arrives — never optimistically. Implement the "did it confirm" check by comparing object identity/timestamp of the relevant store slice, not by mutating a ref inside a `setState` functional updater — React 18 StrictMode double-invokes functional updaters in dev, and a side effect (ref mutation) inside one silently breaks the unlock path on the second invocation while looking correct on the first (see `mem/Bugs.md`, "Rule-3 unlock on confirm"). If you add a new confirmable action, exercise the unlock step live, not just the lock step — the failure mode is invisible until a real confirming frame lands.
 
 **Testing & verification — green tests are not sufficient.** Automated selfchecks and contract validators catch schema drift and logic errors in isolation. But several classes of bugs are *only* found by running the real stack end-to-end:
@@ -134,7 +139,7 @@ The UI still has no real Brain to talk to — Phase 2 hasn't started — so ever
 
 ## Picking a skill/plugin
 
-Before doing non-trivial work, check whether an available skill or agent already fits the task (e.g. planning → `ecc:plan`; docs sync → `ecc:update-docs`; UI/UX work → `ui-ux-pro-max`) rather than solving it from scratch — this workspace has skills disabled granularly in `.claude/settings.local.json`, so check there before assuming one is unavailable.
+Before doing non-trivial work, check whether an available skill or agent already fits the task (e.g. UI/UX work → `ui-ux-pro-max`; feature planning → `feature-dev`) rather than solving it from scratch — this workspace has skills disabled granularly in `.claude/settings.local.json` (mostly unrelated stacks — Django, Laravel, Spring Boot, etc. — turned off), so check there before assuming one is unavailable.
 
 ## Project memory & lessons learned
 
