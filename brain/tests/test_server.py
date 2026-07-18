@@ -19,7 +19,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import websockets
 
-from brain.server import BrainAlreadyRunning, single_instance_lock, start, write_session_file
+from brain.server import (
+    BrainAlreadyRunning,
+    _frame_visible_to,
+    single_instance_lock,
+    start,
+    write_session_file,
+)
 
 
 def _frame(msg_type: str, **payload) -> dict:
@@ -179,6 +185,24 @@ async def check_conversation_order(port: int, token: str) -> None:
     print("[check 5] two messages to one conversation handled in arrival order: OK")
 
 
+def check_frame_visible_to_routing() -> None:
+    """Full truth table for the Voice/UI routing rule (server.py). test_mock's
+    check 7 exercises token(yes)/done(no) over the wire, but never the subtlest
+    branch: `activity` reaches Voice ONLY when narrate is True. This pins it."""
+    # Voice sees only its subset.
+    assert _frame_visible_to("voice", "token", {}) is True
+    assert _frame_visible_to("voice", "approval_request", {}) is True
+    assert _frame_visible_to("voice", "activity", {"narrate": True}) is True
+    assert _frame_visible_to("voice", "activity", {"narrate": False}) is False
+    assert _frame_visible_to("voice", "activity", {}) is False  # missing narrate != narrated
+    assert _frame_visible_to("voice", "done", {}) is False
+    assert _frame_visible_to("voice", "task_state", {}) is False
+    # UI gets everything, regardless of narrate.
+    assert _frame_visible_to("ui", "done", {}) is True
+    assert _frame_visible_to("ui", "activity", {"narrate": False}) is True
+    print("[check 9] _frame_visible_to routing truth table (Voice narrated-only, UI all): OK")
+
+
 async def main() -> None:
     server, token = await start()
     port = server.sockets[0].getsockname()[1]
@@ -194,6 +218,7 @@ async def main() -> None:
     await check_idle_auth_times_out()
     check_session_file_is_atomic_and_private()
     check_second_brain_lock_is_rejected()
+    check_frame_visible_to_routing()
     print("[brain.server] self-check OK")
 
 

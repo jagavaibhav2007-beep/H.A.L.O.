@@ -296,6 +296,71 @@ async def check_mic_round_trip(port: int, token: str) -> None:
     print("[check 10] mic mute->muted, unmute->idle: OK")
 
 
+async def check_task_op_round_trip(port: int, token: str) -> None:
+    """Rule-3 confirmable task controls: pause/resume/stop each emit a
+    task_state confirming that exact change. Unhandled, the UI's Stop button
+    hangs forever waiting on a task_state that never comes (CLAUDE.md, the
+    'affordance hangs' bug class)."""
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        await _drain_snapshot(ws)
+        task_id = "task-seed-1"  # seeded running task; handle_task_op's own default
+        for op, state in (("pause", "paused"), ("resume", "running"), ("stop", "done")):
+            await ws.send(json.dumps(_frame("task_op", task_id=task_id, op=op)))
+            frame = await _recv(ws)
+            assert frame["type"] == "task_state" and frame["state"] == state, (op, frame)
+            assert frame["task_id"] == task_id, frame
+    finally:
+        await ws.close()
+    print("[check 11] task_op pause->paused, resume->running, stop->done: OK")
+
+
+async def check_lane_pin_round_trip(port: int, token: str) -> None:
+    """Rule-3 lane re-pin: emits a task_state carrying the new lane for that task."""
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        await _drain_snapshot(ws)
+        task_id = "task-seed-2"  # seeded lane-1 task
+        await ws.send(json.dumps(_frame("lane_pin", task_id=task_id, lane=3)))
+        frame = await _recv(ws)
+        assert frame["type"] == "task_state" and frame["lane"] == 3, frame
+        assert frame["task_id"] == task_id, frame
+    finally:
+        await ws.close()
+    print("[check 12] lane_pin -> task_state with the new lane: OK")
+
+
+async def check_memory_edit_round_trip(port: int, token: str) -> None:
+    """Rule-3 memory ops: edit supersedes the old belief and emits a new
+    user-stated one; delete archives; restore reactivates. The store never
+    mutates locally -- these confirming belief_state frames are the only truth."""
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        await _drain_snapshot(ws)
+        belief_id = "belief-editor"  # seeded active belief no scenario touches
+
+        await ws.send(json.dumps(_frame("memory_edit", belief_id=belief_id, op="edit", text="Prefers Neovim.")))
+        superseded = await _recv(ws)
+        assert superseded["type"] == "belief_state" and superseded["status"] == "superseded", superseded
+        new_belief = await _recv(ws)
+        assert new_belief["type"] == "belief_state" and new_belief["status"] == "active", new_belief
+        assert new_belief["provenance"] == "user" and new_belief["text"] == "Prefers Neovim.", new_belief
+
+        await ws.send(json.dumps(_frame("memory_edit", belief_id=belief_id, op="delete")))
+        archived = await _recv(ws)
+        assert archived["type"] == "belief_state" and archived["status"] == "archived", archived
+
+        await ws.send(json.dumps(_frame("memory_edit", belief_id=belief_id, op="restore")))
+        restored = await _recv(ws)
+        assert restored["type"] == "belief_state" and restored["status"] == "active", restored
+    finally:
+        await ws.close()
+    print("[check 13] memory_edit edit->supersede+new, delete->archived, restore->active: OK")
+
+
 async def main() -> None:
     server, token = await start(mock=True)
     port = server.sockets[0].getsockname()[1]
@@ -310,6 +375,9 @@ async def main() -> None:
         await check_same_conversation_is_serialized(port, token)
         await check_skill_op_round_trip(port, token)
         await check_mic_round_trip(port, token)
+        await check_task_op_round_trip(port, token)
+        await check_lane_pin_round_trip(port, token)
+        await check_memory_edit_round_trip(port, token)
     finally:
         server.close()
         await server.wait_closed()
