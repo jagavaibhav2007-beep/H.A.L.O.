@@ -1,6 +1,9 @@
 # Gotchas
 _Non-obvious traps, hidden constraints, things that bite._
 
+## Vitest+jsdom does NOT reproduce React StrictMode updater-ordering bugs - 2026-07-18
+**Symptom:** a `renderHook` test wrapped in `<StrictMode>` stays green even when you reintroduce the exact rule-3 "unlock on confirm" bug (mutating `ref.current` inside a `setState(prev => ...)` updater, mem/Bugs.md 2026-07-13). **Cause:** under vitest+jsdom the updater IS double-invoked (probed: `updaterCalls=2`) but the mount effect runs only ONCE (`effectRuns=1`) and React commits the FIRST invocation's result — whereas the real browser mount double-*runs* the effect and the stuck-lock manifests. So the harness can't see the ordering defect. **Handling:** the Vitest hook tests guard *functional* regressions only (inverted comparison, missing clear, broken dedup — those DO fail the test; confirmed by mutation). The StrictMode double-invoke class stays a live-only check: `./dev.ps1 -Mock`, click a real confirmable control (approve/pause/delete), confirm it unlocks when the confirming frame lands. Never claim a green hook test covers the StrictMode bug — verify any new confirmable action's unlock step live.
+
 ## CSS border radius does not shape a native Tauri window - 2026-07-17
 **Symptom:** the capsule DOM has the correct pill outline and `overflow:hidden`, but the desktop still shows rectangular corners around it. **Cause:** CSS clips WebView content only; the top-level Windows HWND remains rectangular, and a merely `transparent:true` window can still expose its backing surface. **Handling:** set the WebView background alpha to zero and apply a Win32 window region; reapply after physical size or DPI changes. Browser preview cannot verify HWND shape or native hit testing, so launch the Tauri app for final confirmation.
 
