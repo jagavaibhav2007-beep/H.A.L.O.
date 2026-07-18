@@ -4,7 +4,7 @@
 // panels land in Steps 8-14; every view mounts the same placeholder for now.
 // Spec: phase-1-plan.md Steps 5-6, ui_ux/02-workspace.md.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -24,8 +24,7 @@ import { MemoryView } from "../memory/MemoryView";
 import { SkillsView } from "../skills/SkillsView";
 import { SettingsView } from "../settings/SettingsView";
 import { ApprovalOverlay } from "../approvals/ApprovalCard";
-import { useHaloConnection } from "../ipc/useHaloConnection";
-import type { IpcMessage } from "../ipc/contract";
+import { useStoreConnection } from "../state/useStoreConnection";
 import { useHaloStore, selectActiveView, selectApprovals } from "../state/store";
 import type { ActiveView } from "../state/store";
 import "./WorkspaceRoot.css";
@@ -56,14 +55,11 @@ export function WorkspaceRoot() {
   const activeView = useHaloStore(selectActiveView);
   const setActiveView = useHaloStore((s) => s.setActiveView);
 
-  // The workspace window owns the live connection; it feeds every inbound
-  // frame straight into the event store (Step 4).
-  const onMessage = useCallback((frame: IpcMessage) => {
-    useHaloStore.getState().applyFrame(frame);
-  }, []);
+  // The workspace window owns its own live connection + store instance; the
+  // shared hook feeds inbound frames into the store and forwards the two
+  // Phase-0 connection signals. connState is still read below (status strip).
   const {
     connState,
-    sidecarError,
     sendTaskOp,
     sendUserMsg,
     sendUndo,
@@ -75,24 +71,7 @@ export function WorkspaceRoot() {
     sendSettingsUpdate,
     sendMic,
     conversationId,
-  } = useHaloConnection(onMessage);
-
-  // Forward the two Phase-0 signals into the store's connection slice,
-  // kept distinct per the "never conflate WS state and sidecar health" rule.
-  useEffect(() => {
-    const event =
-      connState === "connected"
-        ? ({ type: "authenticated" } as const)
-        : connState === "reconnecting"
-          ? ({ type: "ws_closed" } as const)
-          : ({ type: "ws_open" } as const);
-    useHaloStore.getState().applyConnectionEvent(event);
-  }, [connState]);
-
-  useEffect(() => {
-    if (!sidecarError) return;
-    useHaloStore.getState().applyConnectionEvent({ type: "sidecar_state", process: "brain", state: "error" });
-  }, [sidecarError]);
+  } = useStoreConnection();
 
   // Away flow (Step 10): a pending approval that arrives while this window is
   // hidden fires a Windows toast; clicking it opens the workspace (Rust

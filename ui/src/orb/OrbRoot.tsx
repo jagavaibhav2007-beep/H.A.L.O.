@@ -10,8 +10,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
 import { AlertTriangle, Mic, MicOff } from "lucide-react";
 import { Icon } from "../components/Icon";
-import { useHaloConnection } from "../ipc/useHaloConnection";
-import type { IpcMessage } from "../ipc/contract";
+import { useStoreConnection } from "../state/useStoreConnection";
 import {
   useHaloStore,
   selectBrainStatus,
@@ -40,29 +39,9 @@ interface DragState {
 export function OrbRoot() {
   const dragRef = useRef<DragState | null>(null);
 
-  // The orb window has no store of its own to read (each webview boots its
-  // own instance) -- it owns its own live connection, mirroring
-  // WorkspaceRoot's wiring verbatim so the capsule's state visuals react to
-  // the same frames the workspace does.
-  const onMessage = useCallback((frame: IpcMessage) => {
-    useHaloStore.getState().applyFrame(frame);
-  }, []);
-  const { connState, sidecarError } = useHaloConnection(onMessage);
-
-  useEffect(() => {
-    const event =
-      connState === "connected"
-        ? ({ type: "authenticated" } as const)
-        : connState === "reconnecting"
-          ? ({ type: "ws_closed" } as const)
-          : ({ type: "ws_open" } as const);
-    useHaloStore.getState().applyConnectionEvent(event);
-  }, [connState]);
-
-  useEffect(() => {
-    if (!sidecarError) return;
-    useHaloStore.getState().applyConnectionEvent({ type: "sidecar_state", process: "brain", state: "error" });
-  }, [sidecarError]);
+  // The orb window owns its own live connection + store instance, wired the
+  // same way the workspace is (each webview boots its own -- see store.ts).
+  useStoreConnection();
 
   // Narration renders inline beside the orb -- the capsule has room, unlike
   // the old 64px circle (ui_ux/01-companion-orb.md "Narration"). A local
