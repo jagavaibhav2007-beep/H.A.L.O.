@@ -17,6 +17,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Phase 2: the non-mock default handler is the real graph (brain/graph.py).
+# Run it against the deterministic offline LLM stub, with store/checkpoints
+# redirected to a temp dir so tests never touch %LOCALAPPDATA%\Halo.
+os.environ["HALO_LLM_STUB"] = "1"
+_TMP = tempfile.mkdtemp(prefix="halo-test-server-")
+os.environ["LOCALAPPDATA"] = _TMP
+
 import websockets
 
 from brain.server import (
@@ -47,23 +54,31 @@ async def _authenticate(ws, token: str) -> None:
     assert ack["type"] == "hello_ack", ack
 
 
+async def _read_turn(ws, conversation_id: str, timeout: float = 10) -> str:
+    """Read frames until `done` for this conversation; returns the joined
+    token text. Skips unrelated frames (e.g. spend_update)."""
+    parts: list[str] = []
+    while True:
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+        if frame["type"] == "token":
+            assert frame["conversation_id"] == conversation_id, frame
+            parts.append(frame["text"])
+        elif frame["type"] == "done":
+            assert frame["conversation_id"] == conversation_id, frame
+            return "".join(parts)
+
+
 async def check_good_token_echo(port: int, token: str) -> None:
     ws = await _connect(port)
     try:
         await _authenticate(ws, token)
         conversation_id = "conv-1"
         await ws.send(json.dumps(_frame("user_msg", text="hi", conversation_id=conversation_id, source="ui")))
-
-        got_token = json.loads(await ws.recv())
-        assert got_token["type"] == "token", got_token
-        assert got_token["conversation_id"] == conversation_id
-
-        got_done = json.loads(await ws.recv())
-        assert got_done["type"] == "done", got_done
-        assert got_done["conversation_id"] == conversation_id
+        reply = await _read_turn(ws, conversation_id)
+        assert "hi" in reply, reply  # stub reply echoes the user text
     finally:
         await ws.close()
-    print("[check 1] good token -> token+done with matching conversation_id: OK")
+    print("[check 1] good token -> token(s)+done with matching conversation_id: OK")
 
 
 async def check_bad_token_dropped(port: int) -> None:
@@ -174,12 +189,10 @@ async def check_conversation_order(port: int, token: str) -> None:
         await ws.send(json.dumps(_frame("user_msg", text="first", conversation_id=cid, source="ui")))
         await ws.send(json.dumps(_frame("user_msg", text="second", conversation_id=cid, source="ui")))
 
-        texts = []
-        for _ in range(4):  # token,done,token,done
-            frame = json.loads(await ws.recv())
-            if frame["type"] == "token":
-                texts.append(frame["text"])
-        assert texts == ["echo: first", "echo: second"], texts
+        reply_1 = await _read_turn(ws, cid)
+        reply_2 = await _read_turn(ws, cid)
+        assert "first" in reply_1 and "second" not in reply_1, reply_1
+        assert "second" in reply_2, reply_2
     finally:
         await ws.close()
     print("[check 5] two messages to one conversation handled in arrival order: OK")

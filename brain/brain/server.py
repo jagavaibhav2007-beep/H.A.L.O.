@@ -161,22 +161,6 @@ async def _handle_settings_update(msg: dict) -> None:
         await asyncio.to_thread(store.set_setting, key, value)
 
 
-async def _handle_user_msg(broadcast, msg: dict) -> None:
-    """Phase-0 stub echo turn. `broadcast` never raises ConnectionClosed (it
-    prunes dead clients internally), so a turn here can't crash on a client
-    that dropped mid-turn."""
-    conversation_id = msg["conversation_id"]
-    try:
-        await broadcast("token", {"text": f"echo: {msg['text']}", "conversation_id": conversation_id})
-        await broadcast("done", {"conversation_id": conversation_id})
-    except Exception as exc:  # noqa: BLE001 - turn must never drop silently
-        logger.exception("turn failed for conversation_id=%s", conversation_id)
-        await broadcast(
-            "error",
-            {"code": "turn_failed", "message": str(exc), "recoverable": True, "conversation_id": conversation_id},
-        )
-
-
 # Mock-only inbound types -> (mock_engine handler name, needs send_fn instead
 # of broadcast_fn). Keep in sync with mock.py's handle_* functions -- a type
 # handled here but not in mock.py (or vice versa) is the documented "affordance
@@ -209,7 +193,11 @@ async def _serialize_user_msg(msg: dict, locks: dict[str, asyncio.Lock], send, b
                     {"code": "turn_failed", "message": str(exc), "recoverable": True, "conversation_id": conversation_id},
                 )
         else:
-            await _handle_user_msg(broadcast, msg)
+            # Real Brain (Phase 2 Step 4). graph.run_turn owns every error
+            # frame for its turn (rule 2) -- no wrapper here, no double emit.
+            from brain import graph  # ponytail: lazy -- keeps mock/test imports light
+
+            await graph.run_turn(msg, broadcast)
 
 
 async def _auth(ws: ServerConnection, token: str, timeout: float) -> str | None:
@@ -281,6 +269,12 @@ async def _connection_handler(
                 asyncio.create_task(_serialize_user_msg(msg, locks, send_fn, broadcast_fn, mock))
             elif not mock and msg["type"] == "settings_update":
                 asyncio.create_task(_handle_settings_update(msg))
+            elif not mock and msg["type"] == "interrupt":
+                # Must NOT route through the conversation lock -- the live turn
+                # holds it; the interrupt just flips that turn's stop event.
+                from brain import graph
+
+                asyncio.create_task(graph.handle_interrupt(msg, broadcast_fn))
             elif mock and msg["type"] in _MOCK_DISPATCH:
                 handler_name, needs_send = _MOCK_DISPATCH[msg["type"]]
                 handler = getattr(mock_engine, handler_name)

@@ -43,9 +43,17 @@ Exit code is 0 iff all four criteria pass (non-zero otherwise, for CI).
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 from pathlib import Path
+
+# Phase 2: the non-mock Brain runs the real graph. Point it at the offline
+# deterministic LLM stub and a temp data dir so the smoke test stays
+# network-free and never touches %LOCALAPPDATA%\Halo. (test_server sets the
+# same env on import; set it here too so ordering never matters.)
+os.environ["HALO_LLM_STUB"] = "1"
+os.environ["LOCALAPPDATA"] = tempfile.mkdtemp(prefix="halo-smoke-")
 
 ROOT = Path(__file__).resolve().parents[1]
 # ponytail: brain/tests and voice/tests have no __init__.py (plain scripts,

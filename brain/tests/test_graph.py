@@ -1,0 +1,220 @@
+"""Runnable self-check for brain/graph.py (Phase 2 Step 4).
+
+No test framework -- plain asyncio + assert, matching test_server.py. Run with:
+    python brain/tests/test_graph.py
+
+Drives the real server in-process (server.start) as a fake UI client, with
+the LLM stub (HALO_LLM_STUB) and all data dirs redirected to a temp dir.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import tempfile
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+_TMP = tempfile.mkdtemp(prefix="halo-test-graph-")
+os.environ["HALO_LLM_STUB"] = "1"
+os.environ["LOCALAPPDATA"] = _TMP  # store (halo.db) + default checkpoint dir
+os.environ["HALO_CHECKPOINT_DB"] = str(Path(_TMP) / "checkpoints.db")
+os.environ["HALO_KEYRING_DIR"] = str(Path(_TMP) / "keys")  # empty -> no key
+
+import websockets
+
+from brain import graph, llm
+from brain.server import start
+
+
+def _frame(msg_type: str, **payload) -> dict:
+    return {
+        "type": msg_type,
+        "id": str(uuid.uuid4()),
+        "ts": datetime.now(timezone.utc).isoformat(),
+        **payload,
+    }
+
+
+async def _connect_auth(port: int, token: str):
+    ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+    await ws.send(json.dumps(_frame("hello", token=token)))
+    ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+    assert ack["type"] == "hello_ack", ack
+    return ws
+
+
+async def _send_msg(ws, cid: str, text: str) -> None:
+    await ws.send(json.dumps(_frame("user_msg", text=text, conversation_id=cid, source="ui")))
+
+
+async def _read_turn(ws, cid: str, timeout: float = 15) -> str:
+    """Frames until `done` for cid; returns joined token text (the stub yields
+    words without spaces, so joins read squashed -- assert by containment)."""
+    parts: list[str] = []
+    while True:
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+        if frame["type"] == "token" and frame["conversation_id"] == cid:
+            parts.append(frame["text"])
+        elif frame["type"] == "done" and frame["conversation_id"] == cid:
+            return "".join(parts)
+
+
+async def _history(cid: str) -> list[dict]:
+    g = await graph._ensure_graph()
+    snap = await g.aget_state({"configurable": {"thread_id": cid}})
+    return snap.values.get("messages", [])
+
+
+async def check_stream_and_spend(port: int, token: str) -> None:
+    ws = await _connect_auth(port, token)
+    try:
+        cid = "g-basic"
+        await _send_msg(ws, cid, "hello")
+        reply = await _read_turn(ws, cid)
+        assert reply.startswith("stub"), reply
+        assert "hello" in reply, reply
+        # spend_update follows done (stub cost 0.0 -- assert shape/arrival).
+        while True:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            if frame["type"] == "spend_update":
+                assert isinstance(frame["session_usd"], float), frame
+                assert isinstance(frame["month_usd"], float), frame
+                break
+    finally:
+        await ws.close()
+    print("[check 1] user_msg -> streamed stub tokens -> done -> spend_update: OK")
+
+
+async def check_interleave_and_serialize(port: int, token: str) -> None:
+    ws = await _connect_auth(port, token)
+    try:
+        # Two conversations interleave without cross-talk.
+        await _send_msg(ws, "g-a", "alpha")
+        await _send_msg(ws, "g-b", "bravo")
+        # One reading pass bucketing by cid -- the two streams interleave.
+        parts: dict[str, list[str]] = {"g-a": [], "g-b": []}
+        pending = {"g-a", "g-b"}
+        while pending:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
+            if frame["type"] == "token":
+                parts[frame["conversation_id"]].append(frame["text"])
+            elif frame["type"] == "done":
+                pending.discard(frame["conversation_id"])
+        replies = {cid: "".join(p) for cid, p in parts.items()}
+        assert "alpha" in replies["g-a"] and "bravo" not in replies["g-a"], replies
+        assert "bravo" in replies["g-b"] and "alpha" not in replies["g-b"], replies
+
+        # Two msgs to one conversation serialize, and history grows in the
+        # checkpoint (the stub only echoes the last user msg, so history is
+        # asserted directly on the graph state).
+        cid = "g-serial"
+        await _send_msg(ws, cid, "first")
+        await _send_msg(ws, cid, "second")
+        reply_1 = await _read_turn(ws, cid)
+        reply_2 = await _read_turn(ws, cid)
+        assert "first" in reply_1 and "second" in reply_2, (reply_1, reply_2)
+        msgs = await _history(cid)
+        assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"], msgs
+        assert msgs[0]["content"] == "first" and msgs[2]["content"] == "second", msgs
+    finally:
+        await ws.close()
+    print("[check 2] conversations interleave; same-conversation turns serialize with growing history: OK")
+
+
+async def check_restart_persistence(port: int, token: str) -> None:
+    cid = "g-serial"  # already has 4 messages from check 2
+    await graph.aclose()  # simulated Brain restart: checkpointer closed+reopened
+    ws = await _connect_auth(port, token)
+    try:
+        await _send_msg(ws, cid, "third")
+        reply = await _read_turn(ws, cid)
+        assert "third" in reply, reply
+    finally:
+        await ws.close()
+    msgs = await _history(cid)
+    assert len(msgs) == 6, [m["content"] for m in msgs]
+    assert msgs[0]["content"] == "first", msgs  # pre-restart history intact
+    print("[check 3] history persists across checkpointer close/reopen (simulated restart): OK")
+
+
+async def check_interrupt(port: int, token: str) -> None:
+    ws = await _connect_auth(port, token)
+    try:
+        cid = "g-stop"
+        long_text = " ".join(f"w{i}" for i in range(300))  # ~3s of stub stream
+        await _send_msg(ws, cid, long_text)
+        for _ in range(5):  # let a few tokens through
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            assert frame["type"] == "token", frame
+        await ws.send(json.dumps(_frame("interrupt", conversation_id=cid)))
+        # Stream must stop promptly and close with done.
+        deadline = asyncio.get_event_loop().time() + 2
+        done = False
+        while asyncio.get_event_loop().time() < deadline:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+            if frame["type"] == "done" and frame["conversation_id"] == cid:
+                done = True
+                break
+        assert done, "no done within 2s of interrupt"
+        # No more tokens after done (grace window).
+        try:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.3))
+            assert frame["type"] not in ("token",), f"token after interrupt+done: {frame}"
+        except asyncio.TimeoutError:
+            pass
+        # Next turn carries the sticky redirect note (stub echoes the user
+        # content, which run_turn prefixed with the note).
+        await _send_msg(ws, cid, "shorter please")
+        reply = await _read_turn(ws, cid)
+        assert "stopped" in reply, reply  # from the redirect note
+        assert "shorter" in reply, reply
+    finally:
+        await ws.close()
+    print("[check 4] interrupt mid-stream -> prompt stop + done; next turn carries redirect note: OK")
+
+
+async def check_no_api_key(port: int, token: str) -> None:
+    del os.environ["HALO_LLM_STUB"]  # real path; HALO_KEYRING_DIR is empty -> no key
+    ws = await _connect_auth(port, token)
+    try:
+        cid = "g-nokey"
+        await _send_msg(ws, cid, "hi")
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        assert frame["type"] == "error", frame
+        assert frame["code"] == "no_api_key", frame
+        assert frame["recoverable"] is True, frame
+        assert frame["conversation_id"] == cid, frame
+        # Connection stays usable: stub back on, a normal turn completes.
+        os.environ["HALO_LLM_STUB"] = "1"
+        await _send_msg(ws, cid, "again")
+        reply = await _read_turn(ws, cid)
+        assert "again" in reply, reply
+    finally:
+        await ws.close()
+    print("[check 5] missing key -> honest no_api_key error, connection stays usable: OK")
+
+
+async def main() -> None:
+    server, token = await start()
+    port = server.sockets[0].getsockname()[1]
+    try:
+        await check_stream_and_spend(port, token)
+        await check_interleave_and_serialize(port, token)
+        await check_restart_persistence(port, token)
+        await check_interrupt(port, token)
+        await check_no_api_key(port, token)
+    finally:
+        server.close()
+        await server.wait_closed()
+        await graph.aclose()
+    print("[brain.graph] self-check OK")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
