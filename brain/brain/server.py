@@ -143,6 +143,24 @@ def write_session_file(port: int, token: str, session_file: Path = SESSION_FILE)
     tmp.replace(session_file)
 
 
+async def _handle_settings_update(msg: dict) -> None:
+    """Real-mode settings_update (Phase 2 Step 2). openrouter_key goes to the
+    OS keystore (D8: the value is never logged or echoed back -- status only);
+    everything else persists to the store's settings table."""
+    from brain import secrets_store, store
+
+    key, value = msg["key"], msg.get("value")
+    if key == "openrouter_key":
+        if value:
+            await asyncio.to_thread(secrets_store.set_key, value)
+        else:
+            await asyncio.to_thread(secrets_store.delete_key)
+        logger.info("openrouter key status: %s", secrets_store.key_status())
+    else:
+        store.connect()
+        await asyncio.to_thread(store.set_setting, key, value)
+
+
 async def _handle_user_msg(broadcast, msg: dict) -> None:
     """Phase-0 stub echo turn. `broadcast` never raises ConnectionClosed (it
     prunes dead clients internally), so a turn here can't crash on a client
@@ -261,6 +279,8 @@ async def _connection_handler(
 
             if msg["type"] == "user_msg":
                 asyncio.create_task(_serialize_user_msg(msg, locks, send_fn, broadcast_fn, mock))
+            elif not mock and msg["type"] == "settings_update":
+                asyncio.create_task(_handle_settings_update(msg))
             elif mock and msg["type"] in _MOCK_DISPATCH:
                 handler_name, needs_send = _MOCK_DISPATCH[msg["type"]]
                 handler = getattr(mock_engine, handler_name)

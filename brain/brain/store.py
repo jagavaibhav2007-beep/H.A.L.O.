@@ -1,0 +1,448 @@
+"""SQLite store for Halo's Brain (Phase 2 Step 1, D3).
+
+One module, no ORM, raw SQL. Owns beliefs/actions/tasks/spend/settings.
+LangGraph's checkpointer gets its own file (checkpoints.db) -- not here.
+
+Callers (async code) must wrap calls in asyncio.to_thread; this module is
+plain sync sqlite3 with check_same_thread=False so a single thread-pool
+call can use the shared connection safely (writes serialize via `with conn:`).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 1
+EMBED_DIM = 384
+
+_conn: sqlite3.Connection | None = None
+_embedder = None  # lazy fastembed.TextEmbedding singleton
+_vec_ok = False  # whether belief_vec is usable this session
+_embed_failed = False  # memoize a failed embedder init so we don't retry every call mid-turn
+
+
+def _default_db_path() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    return base / "Halo" / "halo.db"
+
+
+def connect(db_path: Path | None = None) -> sqlite3.Connection:
+    """Idempotent per-path: returns the existing connection if already open."""
+    global _conn, _vec_ok
+    if _conn is not None:
+        return _conn
+
+    path = db_path or _default_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+
+    try:
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _vec_ok = True
+    except Exception:
+        logger.warning("sqlite-vec unavailable; belief search will fall back to recency", exc_info=True)
+        _vec_ok = False
+
+    _run_migrations(conn)
+    _conn = conn
+    return conn
+
+
+def close() -> None:
+    global _conn
+    if _conn is not None:
+        _conn.close()
+        _conn = None
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
+    with conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS belief (
+                belief_id TEXT PRIMARY KEY,
+                text TEXT NOT NULL,
+                kind TEXT,
+                provenance TEXT NOT NULL CHECK (provenance IN ('user','inferred')),
+                salience REAL NOT NULL DEFAULT 0.6,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived','superseded')),
+                superseded_by TEXT,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS belief_map (
+                rowid INTEGER PRIMARY KEY,
+                belief_id TEXT UNIQUE NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS action (
+                action_id TEXT PRIMARY KEY,
+                tool TEXT,
+                args_redacted TEXT,
+                tier INTEGER,
+                lane INTEGER,
+                result TEXT,
+                undoable INTEGER NOT NULL DEFAULT 0,
+                undo_token TEXT UNIQUE,
+                inverse_json TEXT,
+                consumed INTEGER NOT NULL DEFAULT 0,
+                task_id TEXT,
+                ts TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS task (
+                task_id TEXT PRIMARY KEY,
+                state TEXT,
+                lane INTEGER,
+                title TEXT,
+                step INTEGER,
+                steps_total INTEGER,
+                step_label TEXT,
+                reason TEXT,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS spend (
+                day TEXT PRIMARY KEY,
+                usd REAL NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            """
+        )
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    try:
+        with conn:
+            conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS belief_vec USING vec0(embedding float[{EMBED_DIM}])")
+    except Exception:
+        logger.warning("could not create belief_vec virtual table; search will fall back to recency", exc_info=True)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict:
+    return dict(row)
+
+
+def _embed(text: str) -> list[float] | None:
+    """Lazily init fastembed and embed one string. Returns None on any failure
+    (offline/first-download-fails) -- memory degrades, never breaks (rule 5)."""
+    global _embedder, _embed_failed
+    if not _vec_ok or _embed_failed:
+        return None
+    try:
+        if _embedder is None:
+            from fastembed import TextEmbedding
+
+            _embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        vec = next(iter(_embedder.embed([text])))
+        return [float(x) for x in vec]
+    except Exception:
+        # ponytail: memoize the failure so a mid-turn offline blip doesn't retry
+        # a slow download on every belief write -- next Brain start tries again.
+        _embed_failed = True
+        logger.warning("embedding unavailable; belief search will fall back to recency", exc_info=True)
+        return None
+
+
+def _index_embedding(conn: sqlite3.Connection, belief_id: str, text: str) -> None:
+    vec = _embed(text)
+    if vec is None:
+        return
+    import sqlite_vec
+
+    with conn:
+        # delete belief_vec first -- its subquery depends on belief_map still
+        # having the old row (deleting map first orphans the old vec row).
+        conn.execute(
+            "DELETE FROM belief_vec WHERE rowid IN (SELECT rowid FROM belief_map WHERE belief_id=?)", (belief_id,)
+        )
+        conn.execute("DELETE FROM belief_map WHERE belief_id=?", (belief_id,))
+        cur = conn.execute("INSERT INTO belief_map(belief_id) VALUES (?)", (belief_id,))
+        rowid = cur.lastrowid
+        conn.execute(
+            "INSERT INTO belief_vec(rowid, embedding) VALUES (?, ?)", (rowid, sqlite_vec.serialize_float32(vec))
+        )
+
+
+# ---------------------------------------------------------------- beliefs --
+
+
+def add_belief(text: str, kind: str, provenance: str, salience: float = 0.6) -> str:
+    conn = connect()
+    belief_id = str(uuid.uuid4())
+    now = _now()
+    with conn:
+        conn.execute(
+            "INSERT INTO belief(belief_id, text, kind, provenance, salience, status, created_at, last_used_at) "
+            "VALUES (?,?,?,?,?,'active',?,?)",
+            (belief_id, text, kind, provenance, salience, now, now),
+        )
+    _index_embedding(conn, belief_id, text)
+    return belief_id
+
+
+def get_belief(belief_id: str) -> dict | None:
+    conn = connect()
+    row = conn.execute("SELECT * FROM belief WHERE belief_id=?", (belief_id,)).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def list_beliefs(status: str | None = None) -> list[dict]:
+    conn = connect()
+    if status is None:
+        rows = conn.execute("SELECT * FROM belief ORDER BY created_at DESC").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM belief WHERE status=? ORDER BY created_at DESC", (status,)
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def update_belief(belief_id: str, text: str) -> None:
+    conn = connect()
+    with conn:
+        conn.execute("UPDATE belief SET text=? WHERE belief_id=?", (text, belief_id))
+    _index_embedding(conn, belief_id, text)
+
+
+def set_belief_status(belief_id: str, status: str) -> None:
+    conn = connect()
+    with conn:
+        conn.execute("UPDATE belief SET status=? WHERE belief_id=?", (status, belief_id))
+
+
+def supersede(old_id: str, new_id: str) -> None:
+    """Enforces the provenance rule (cross-cutting rule 6): a user-stated
+    belief can never be superseded by an inferred one."""
+    conn = connect()
+    old = get_belief(old_id)
+    new = get_belief(new_id)
+    if old is None or new is None:
+        raise ValueError("supersede: unknown belief_id")
+    if old["provenance"] == "user" and new["provenance"] == "inferred":
+        raise ValueError("user-stated beliefs can only be superseded by a newer user statement")
+    with conn:
+        conn.execute(
+            "UPDATE belief SET status='superseded', superseded_by=? WHERE belief_id=?", (new_id, old_id)
+        )
+
+
+def search_beliefs(query_text: str, k: int = 15) -> list[dict]:
+    """Vector similarity over active beliefs; falls back to recency if the
+    embedder/vec table is unavailable (memory degrades, never breaks)."""
+    conn = connect()
+    vec = _embed(query_text)
+    if vec is not None:
+        try:
+            import sqlite_vec
+
+            rows = conn.execute(
+                """
+                SELECT b.* FROM belief_vec v
+                JOIN belief_map m ON m.rowid = v.rowid
+                JOIN belief b ON b.belief_id = m.belief_id
+                WHERE v.embedding MATCH ? AND k = ? AND b.status='active'
+                ORDER BY distance
+                """,
+                (sqlite_vec.serialize_float32(vec), k),
+            ).fetchall()
+            return [_row_to_dict(r) for r in rows]
+        except Exception:
+            logger.warning("vector search failed; falling back to recency", exc_info=True)
+
+    rows = conn.execute(
+        "SELECT * FROM belief WHERE status='active' ORDER BY last_used_at DESC LIMIT ?", (k,)
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def bump_salience(belief_ids: list[str]) -> None:
+    conn = connect()
+    now = _now()
+    with conn:
+        for bid in belief_ids:
+            conn.execute(
+                "UPDATE belief SET salience=MIN(1.0, salience + 0.2), last_used_at=? WHERE belief_id=?",
+                (now, bid),
+            )
+
+
+def decay(half_life_days: float = 30, archive_below: float = 0.2, now: datetime | None = None) -> list[str]:
+    """salience *= 0.5 ** (days_unused / half_life); archives below threshold."""
+    conn = connect()
+    now = now or datetime.now(timezone.utc)
+    archived: list[str] = []
+    rows = conn.execute("SELECT * FROM belief WHERE status='active'").fetchall()
+    with conn:
+        for row in rows:
+            last_used = datetime.fromisoformat(row["last_used_at"])
+            days_unused = (now - last_used).total_seconds() / 86400
+            new_salience = row["salience"] * (0.5 ** (days_unused / half_life_days))
+            if new_salience < archive_below:
+                conn.execute(
+                    "UPDATE belief SET salience=?, status='archived' WHERE belief_id=?",
+                    (new_salience, row["belief_id"]),
+                )
+                archived.append(row["belief_id"])
+            else:
+                conn.execute(
+                    "UPDATE belief SET salience=? WHERE belief_id=?", (new_salience, row["belief_id"])
+                )
+    return archived
+
+
+# ----------------------------------------------------------------- actions --
+
+
+def record_action(
+    tool: str,
+    args_redacted: dict,
+    tier: int,
+    lane: int,
+    result: str,
+    undoable: bool,
+    inverse_json: dict | None = None,
+    task_id: str | None = None,
+) -> tuple[str, str | None]:
+    conn = connect()
+    action_id = str(uuid.uuid4())
+    undo_token = str(uuid.uuid4()) if undoable else None
+    with conn:
+        conn.execute(
+            "INSERT INTO action(action_id, tool, args_redacted, tier, lane, result, undoable, undo_token, "
+            "inverse_json, consumed, task_id, ts) VALUES (?,?,?,?,?,?,?,?,?,0,?,?)",
+            (
+                action_id,
+                tool,
+                json.dumps(args_redacted),
+                tier,
+                lane,
+                result,
+                int(undoable),
+                undo_token,
+                json.dumps(inverse_json) if inverse_json is not None else None,
+                task_id,
+                _now(),
+            ),
+        )
+    return action_id, undo_token
+
+
+def get_action_by_undo_token(token: str) -> dict | None:
+    conn = connect()
+    row = conn.execute("SELECT * FROM action WHERE undo_token=?", (token,)).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def consume_undo_token(token: str) -> bool:
+    """Idempotent: False if the token is missing or already consumed."""
+    conn = connect()
+    with conn:
+        cur = conn.execute(
+            "UPDATE action SET consumed=1 WHERE undo_token=? AND consumed=0", (token,)
+        )
+        return cur.rowcount > 0
+
+
+def recent_actions(limit: int = 100) -> list[dict]:
+    conn = connect()
+    rows = conn.execute("SELECT * FROM action ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+# ------------------------------------------------------------------- tasks --
+
+
+def upsert_task(task_id: str, **fields) -> None:
+    conn = connect()
+    fields = {**fields, "task_id": task_id, "updated_at": _now()}
+    cols = ", ".join(fields.keys())
+    placeholders = ", ".join("?" for _ in fields)
+    updates = ", ".join(f"{k}=excluded.{k}" for k in fields if k != "task_id")
+    with conn:
+        conn.execute(
+            f"INSERT INTO task({cols}) VALUES ({placeholders}) "
+            f"ON CONFLICT(task_id) DO UPDATE SET {updates}",
+            tuple(fields.values()),
+        )
+
+
+def list_tasks(states: list[str] | None = None) -> list[dict]:
+    conn = connect()
+    if not states:
+        rows = conn.execute("SELECT * FROM task ORDER BY updated_at DESC").fetchall()
+    else:
+        placeholders = ",".join("?" for _ in states)
+        rows = conn.execute(
+            f"SELECT * FROM task WHERE state IN ({placeholders}) ORDER BY updated_at DESC", tuple(states)
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+# ------------------------------------------------------------------- spend --
+
+
+def add_spend(usd: float) -> None:
+    conn = connect()
+    day = datetime.now(timezone.utc).date().isoformat()
+    with conn:
+        conn.execute(
+            "INSERT INTO spend(day, usd) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET usd = usd + excluded.usd",
+            (day, usd),
+        )
+
+
+def month_spend() -> float:
+    conn = connect()
+    month_prefix = datetime.now(timezone.utc).date().isoformat()[:7]
+    row = conn.execute(
+        "SELECT COALESCE(SUM(usd), 0) AS total FROM spend WHERE day LIKE ?", (f"{month_prefix}%",)
+    ).fetchone()
+    return float(row["total"])
+
+
+# ---------------------------------------------------------------- settings --
+
+
+def get_setting(key: str, default=None):
+    conn = connect()
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    if row is None:
+        return default
+    return json.loads(row["value"])
+
+
+def set_setting(key: str, value) -> None:
+    conn = connect()
+    with conn:
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, json.dumps(value)),
+        )

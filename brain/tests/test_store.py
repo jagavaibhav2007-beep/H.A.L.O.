@@ -1,0 +1,244 @@
+"""Runnable self-check for brain/store.py (Phase 2 Step 1).
+
+No test framework -- plain assert. Run with:
+    python brain/tests/test_store.py
+"""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from brain import store
+
+
+def check_fresh_connect_and_reconnect_no_redo_ddl(tmp: Path) -> None:
+    db_path = tmp / "halo.db"
+    conn = store.connect(db_path)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version == store.SCHEMA_VERSION, version
+
+    # same-process reconnect: idempotent, returns the live connection, no re-run
+    conn2 = store.connect(db_path)
+    assert conn2 is conn
+
+    # simulate a second Brain start against the same file: close, reconnect,
+    # and prove the DDL guard (user_version) skips re-running CREATE TABLE,
+    # and a previously-written row survives the restart.
+    bid = store.add_belief("survives restart", "fact", "user")
+    store.close()
+    conn3 = store.connect(db_path)
+    assert conn3 is not conn
+    assert conn3.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
+    assert store.get_belief(bid) is not None
+    print("[check 1] fresh connect creates schema; restart reuses DB without re-running DDL: OK")
+
+
+def check_belief_crud() -> None:
+    bid = store.add_belief("the sky is blue", "fact", "user")
+    got = store.get_belief(bid)
+    assert got is not None and got["text"] == "the sky is blue"
+    assert got["status"] == "active"
+    assert got["salience"] == 0.6
+
+    store.update_belief(bid, "the sky is often blue")
+    got = store.get_belief(bid)
+    assert got["text"] == "the sky is often blue"
+
+    store.set_belief_status(bid, "archived")
+    got = store.get_belief(bid)
+    assert got["status"] == "archived"
+
+    active = store.list_beliefs(status="active")
+    archived = store.list_beliefs(status="archived")
+    assert all(b["belief_id"] != bid for b in active)
+    assert any(b["belief_id"] == bid for b in archived)
+    print("[check 2] belief CRUD: OK")
+
+
+def check_supersede_provenance_matrix() -> None:
+    user1 = store.add_belief("user said A", "preference", "user")
+    user2 = store.add_belief("user said A2", "preference", "user")
+    store.supersede(user1, user2)  # user <- user: ok
+    assert store.get_belief(user1)["status"] == "superseded"
+    assert store.get_belief(user1)["superseded_by"] == user2
+
+    inf1 = store.add_belief("inferred B", "workflow", "inferred")
+    inf2 = store.add_belief("inferred B2", "workflow", "inferred")
+    store.supersede(inf1, inf2)  # inferred <- inferred: ok
+    assert store.get_belief(inf1)["status"] == "superseded"
+
+    user3 = store.add_belief("user said C", "decision", "user")
+    inf3 = store.add_belief("inferred C2", "decision", "inferred")
+    store.supersede(inf3, user3)  # inferred <- user: ok (user statement supersedes inference)
+    assert store.get_belief(inf3)["status"] == "superseded"
+
+    user4 = store.add_belief("user said D", "decision", "user")
+    inf4 = store.add_belief("inferred D2", "decision", "inferred")
+    try:
+        store.supersede(user4, inf4)  # user <- inferred: must RAISE
+        raise AssertionError("expected ValueError for user superseded by inferred")
+    except ValueError:
+        pass
+    assert store.get_belief(user4)["status"] == "active"
+    print("[check 3] supersede provenance matrix (user/inferred x4): OK")
+
+
+def check_vector_search_synthetic() -> None:
+    """Deterministic, offline: exercises the real vec0 KNN query (serialize_float32,
+    the MATCH ... AND k = ... AND status='active' ORDER BY distance shape) without
+    depending on a real embedding model download."""
+    if not store._vec_ok:
+        print("[check 4] vector search: SKIPPED (sqlite-vec extension unavailable)")
+        return
+
+    fake_vectors: dict[str, list[float]] = {}
+
+    def fake_embed(text: str) -> list[float]:
+        return fake_vectors[text]
+
+    orig_embed, orig_failed = store._embed, store._embed_failed
+    store._embed = fake_embed
+    store._embed_failed = False
+    try:
+        pnpm_vec = [0.0] * store.EMBED_DIM
+        pnpm_vec[0] = 1.0
+        friday_vec = [0.0] * store.EMBED_DIM
+        friday_vec[1] = 1.0
+        query_vec = [0.0] * store.EMBED_DIM
+        query_vec[0] = 0.9
+        query_vec[1] = 0.1
+
+        pnpm_text = "the user prefers pnpm over npm"
+        friday_text = "the deploy runs on fridays"
+        fake_vectors[pnpm_text] = pnpm_vec
+        fake_vectors[friday_text] = friday_vec
+        fake_vectors["which package manager"] = query_vec
+
+        pnpm_id = store.add_belief(pnpm_text, "preference", "user")
+        store.add_belief(friday_text, "workflow", "user")
+
+        results = store.search_beliefs("which package manager", k=5)
+        ids_in_order = [r["belief_id"] for r in results]
+        assert ids_in_order and ids_in_order[0] == pnpm_id, ids_in_order
+
+        # re-index on update must not orphan the old belief_vec row (the delete
+        # order bug: deleting belief_map before belief_vec left the subquery
+        # empty, so old vectors piled up under fresh rowids).
+        fake_vectors["pnpm updated"] = pnpm_vec
+        store.update_belief(pnpm_id, "pnpm updated")
+        conn = store.connect()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM belief_vec v JOIN belief_map m ON m.rowid=v.rowid WHERE m.belief_id=?",
+            (pnpm_id,),
+        ).fetchone()[0]
+        assert count == 1, f"expected exactly one belief_vec row after re-index, got {count}"
+    finally:
+        store._embed = orig_embed
+        store._embed_failed = orig_failed
+    print("[check 4] vector search (synthetic embeddings) runs the real vec0 KNN query and ranks correctly: OK")
+
+
+def check_bump_salience_caps_at_one() -> None:
+    bid = store.add_belief("something", "fact", "user", salience=0.9)
+    store.bump_salience([bid])
+    assert store.get_belief(bid)["salience"] == 1.0
+    store.bump_salience([bid])
+    assert store.get_belief(bid)["salience"] == 1.0
+    print("[check 5] bump_salience caps at 1.0: OK")
+
+
+def check_decay_archives_old_not_fresh() -> None:
+    now = datetime.now(timezone.utc)
+    old_id = store.add_belief("stale fact", "fact", "user", salience=0.6)
+    fresh_id = store.add_belief("fresh fact", "fact", "user", salience=0.6)
+
+    conn = store.connect()
+    old_ts = (now - timedelta(days=90)).isoformat()
+    with conn:
+        conn.execute("UPDATE belief SET last_used_at=?, created_at=? WHERE belief_id=?", (old_ts, old_ts, old_id))
+
+    archived = store.decay(half_life_days=30, archive_below=0.2, now=now)
+    assert old_id in archived, archived
+    assert fresh_id not in archived, archived
+    assert store.get_belief(old_id)["status"] == "archived"
+    assert store.get_belief(fresh_id)["status"] == "active"
+    print("[check 6] decay archives stale unused belief, spares fresh one: OK")
+
+
+def check_undo_token_record_consume() -> None:
+    action_id, token = store.record_action(
+        tool="file_move", args_redacted={}, tier=2, lane=1, result="ok", undoable=True,
+        inverse_json={"op": "move_back"},
+    )
+    assert token is not None
+    got = store.get_action_by_undo_token(token)
+    assert got is not None and got["action_id"] == action_id
+
+    assert store.consume_undo_token(token) is True
+    assert store.consume_undo_token(token) is False  # double-consume guarded
+
+    action_id2, no_token = store.record_action(
+        tool="file_read", args_redacted={}, tier=1, lane=1, result="ok", undoable=False,
+    )
+    assert no_token is None
+
+    recent = store.recent_actions(limit=10)
+    assert any(a["action_id"] == action_id for a in recent)
+    print("[check 7] undo token record/consume/double-consume + recent_actions: OK")
+
+
+def check_spend_accumulation() -> None:
+    store.add_spend(1.5)
+    store.add_spend(2.25)
+    total = store.month_spend()
+    assert total >= 3.75, total
+    print("[check 8] spend accumulates within the month: OK")
+
+
+def check_settings_roundtrip() -> None:
+    assert store.get_setting("does_not_exist", default="fallback") == "fallback"
+    store.set_setting("openrouter_model", {"light": "gemma", "heavy": "deepseek"})
+    assert store.get_setting("openrouter_model") == {"light": "gemma", "heavy": "deepseek"}
+    store.set_setting("openrouter_model", {"light": "gemma2"})
+    assert store.get_setting("openrouter_model") == {"light": "gemma2"}
+    print("[check 9] settings round-trip with JSON values: OK")
+
+
+def check_tasks() -> None:
+    store.upsert_task("t1", state="running", lane=1, title="organize downloads", step=1, steps_total=5)
+    store.upsert_task("t1", state="running", step=2)
+    tasks = store.list_tasks()
+    t1 = next(t for t in tasks if t["task_id"] == "t1")
+    assert t1["step"] == 2 and t1["title"] == "organize downloads"
+
+    store.upsert_task("t2", state="done", lane=1)
+    running = store.list_tasks(states=["running"])
+    assert any(t["task_id"] == "t1" for t in running)
+    assert all(t["task_id"] != "t2" for t in running)
+    print("[check 10] upsert_task merges fields, list_tasks filters by state: OK")
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        check_fresh_connect_and_reconnect_no_redo_ddl(tmp_path)
+        check_belief_crud()
+        check_supersede_provenance_matrix()
+        check_vector_search_synthetic()
+        check_bump_salience_caps_at_one()
+        check_decay_archives_old_not_fresh()
+        check_undo_token_record_consume()
+        check_spend_accumulation()
+        check_settings_roundtrip()
+        check_tasks()
+        store.close()
+    print("[brain.store] self-check OK")
+
+
+if __name__ == "__main__":
+    main()
