@@ -25,7 +25,7 @@ from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
-from brain import gate, llm, secrets_store, store
+from brain import gate, llm, memory, secrets_store, store
 import brain.tools.files  # noqa: F401 -- import registers the Lane-1 file tools into gate.TOOLS
 
 logger = logging.getLogger("brain.graph")
@@ -97,8 +97,10 @@ async def _respond_node(state: State, config) -> dict:
     update: dict = {}
     parts: list[str] = []
     try:
+        # Retrieved beliefs prepend at stream time only -- never into graph
+        # state, so they're recomputed per turn (no-double-injection rule).
         async for delta in llm.stream_chat(
-            state["messages"], state["model"], ctx["api_key"], ctx["usage"]
+            ctx.get("memory", []) + state["messages"], state["model"], ctx["api_key"], ctx["usage"]
         ):
             if ctx["stop"].is_set():
                 update["redirected"] = True
@@ -223,7 +225,20 @@ async def run_turn(msg: dict, broadcast) -> None:
         if prior.values.get("redirected"):
             content = _REDIRECT_NOTE + content
 
-        ctx = {"broadcast": broadcast, "stop": asyncio.Event(), "api_key": api_key, "usage": {}}
+        try:
+            beliefs = await asyncio.to_thread(memory.retrieve, msg["text"])
+        except Exception:  # noqa: BLE001 - memory degrades, never breaks the turn
+            logger.exception("belief retrieval failed; continuing without memory")
+            beliefs = []
+        mem_msgs = (
+            [{
+                "role": "system",
+                "content": "Things I remember about the user:\n" + "\n".join(f"- {b['text']}" for b in beliefs),
+            }]
+            if beliefs
+            else []
+        )
+        ctx = {"broadcast": broadcast, "stop": asyncio.Event(), "api_key": api_key, "usage": {}, "memory": mem_msgs}
         _turn_ctx[cid] = ctx
         try:
             result = await graph.ainvoke(
@@ -241,6 +256,11 @@ async def run_turn(msg: dict, broadcast) -> None:
 
         if await _finish_turn(result, cid, broadcast):
             return  # suspended on a Tier-3 approval: no done, lock releases
+
+        if not result.get("error"):
+            # Fire-and-forget: the turn already completed, extraction can't
+            # break it (memory.extract swallows its own failures, rule 5).
+            asyncio.create_task(memory.extract(cid, result.get("messages") or [], api_key, broadcast))
 
         cost = ctx["usage"].get("cost")
         if cost is not None:

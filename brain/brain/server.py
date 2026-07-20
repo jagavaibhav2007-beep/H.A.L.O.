@@ -41,6 +41,10 @@ class BrainAlreadyRunning(RuntimeError):
     pass
 
 
+# Module handle so the daily belief-decay task isn't GC'd (Step 8).
+_decay_task: asyncio.Task | None = None
+
+
 def _flock(handle, lock: bool) -> None:
     """Non-blocking exclusive lock (lock=True) or unlock (lock=False), per-platform."""
     if os.name == "nt":
@@ -287,6 +291,10 @@ async def _connection_handler(
             # import off-loop so this connect never freezes other clients.
             gate = await asyncio.to_thread(importlib.import_module, "brain.gate")
             await gate.push_activity_backlog(send_fn)
+            # Step 8: hydrate the memory panel with real beliefs.
+            from brain import memory
+
+            await memory.push_beliefs(send_fn)
 
         async for raw in ws:
             try:
@@ -314,6 +322,11 @@ async def _connection_handler(
                 from brain import graph
 
                 asyncio.create_task(graph.handle_approval_response(msg, send_fn, broadcast_fn, locks))
+            elif not mock and msg["type"] == "memory_edit":
+                # Step 8: memory panel round-trips against the real store.
+                from brain import memory
+
+                asyncio.create_task(memory.handle_memory_edit(msg, broadcast_fn))
             elif not mock and msg["type"] == "undo":
                 # Step 6: undo is a global feed action, not tied to a
                 # conversation -- no conversation lock; token consumption is
@@ -344,6 +357,19 @@ async def start(
         await _connection_handler(ws, token, locks, auth_timeout, authenticated, mock)
 
     server = await websockets.asyncio.server.serve(handler, "127.0.0.1", port)
+
+    if not mock:
+        # Step 8: belief decay -- once at start, then daily. Archive deltas
+        # broadcast to whoever is connected at the time (reconnect hydration
+        # replays current state anyway).
+        global _decay_task
+        from brain import memory
+
+        async def _broadcast_all(msg_type: str, payload: dict) -> None:
+            await _broadcast(authenticated, msg_type, payload)
+
+        _decay_task = asyncio.create_task(memory.decay_loop(_broadcast_all))
+
     return server, token
 
 

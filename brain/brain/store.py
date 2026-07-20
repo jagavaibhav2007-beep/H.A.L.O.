@@ -225,10 +225,15 @@ def list_beliefs(status: str | None = None) -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
-def update_belief(belief_id: str, text: str) -> None:
+def update_belief(belief_id: str, text: str, provenance: str | None = None) -> None:
     conn = connect()
     with conn:
-        conn.execute("UPDATE belief SET text=? WHERE belief_id=?", (text, belief_id))
+        if provenance is None:
+            conn.execute("UPDATE belief SET text=? WHERE belief_id=?", (text, belief_id))
+        else:
+            conn.execute(
+                "UPDATE belief SET text=?, provenance=? WHERE belief_id=?", (text, provenance, belief_id)
+            )
     _index_embedding(conn, belief_id, text)
 
 
@@ -265,7 +270,7 @@ def search_beliefs(query_text: str, k: int = 15) -> list[dict]:
 
             rows = conn.execute(
                 """
-                SELECT b.* FROM belief_vec v
+                SELECT b.*, v.distance AS distance FROM belief_vec v
                 JOIN belief_map m ON m.rowid = v.rowid
                 JOIN belief b ON b.belief_id = m.belief_id
                 WHERE v.embedding MATCH ? AND k = ? AND b.status='active'
