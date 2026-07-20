@@ -26,6 +26,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from brain import gate, llm, secrets_store, store
+import brain.tools.files  # noqa: F401 -- import registers the Lane-1 file tools into gate.TOOLS
 
 logger = logging.getLogger("brain.graph")
 

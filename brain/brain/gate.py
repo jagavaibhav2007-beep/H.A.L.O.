@@ -289,13 +289,12 @@ async def handle_undo(msg: dict, broadcast) -> None:
             f"I can't undo {row['tool']} — it's changed since, so I won't overwrite it.",
         )
         return
-    tier = classify(inverse["tool"], inverse["args"])
-    if tier == 3:
-        # ponytail: a gated Tier-3 undo would need a real graph turn (interrupt()
-        # only works inside one) -- revisit if a Tier-3 inverse ever appears;
-        # none of the Step-7 file tools produce one.
-        await fail("undo_needs_approval", "I can't auto-undo that — it needs approval.")
-        return
+    # Recorded inverses are pre-authorized: WE built them at execution time of
+    # an action that already went through the gate, and the precondition +
+    # token consumption guard staleness/replays. Re-classifying here would let
+    # arg shapes demote tiers for direct callers (a bypass) or block honest
+    # reversals of approved Tier-3 actions -- so trust the record, run Tier 2.
+    tier = 2
     # Consume BEFORE executing: the atomic False-on-second-call is what makes
     # a double-click run the inverse exactly once (idempotence, matches the
     # UI's rule-3 lock).
