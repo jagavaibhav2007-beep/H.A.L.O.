@@ -292,11 +292,19 @@ async def _connection_handler(
             elif not mock and msg["type"] == "settings_update":
                 asyncio.create_task(_handle_settings_update(msg, send_fn))
             elif not mock and msg["type"] == "interrupt":
-                # Must NOT route through the conversation lock -- the live turn
-                # holds it; the interrupt just flips that turn's stop event.
+                # Must NOT route through the conversation lock -- a live turn
+                # holds it and the interrupt just flips that turn's stop event.
+                # The suspended-on-approval case takes the lock itself (it is
+                # free then -- the turn ended at the interrupt()).
                 from brain import graph
 
-                asyncio.create_task(graph.handle_interrupt(msg, broadcast_fn))
+                asyncio.create_task(graph.handle_interrupt(msg, broadcast_fn, locks))
+            elif not mock and msg["type"] == "approval_response":
+                # Tier-3 resume (Phase 2 Step 5): re-acquires that approval's
+                # conversation lock inside the handler.
+                from brain import graph
+
+                asyncio.create_task(graph.handle_approval_response(msg, send_fn, broadcast_fn, locks))
             elif mock and msg["type"] in _MOCK_DISPATCH:
                 handler_name, needs_send = _MOCK_DISPATCH[msg["type"]]
                 handler = getattr(mock_engine, handler_name)
