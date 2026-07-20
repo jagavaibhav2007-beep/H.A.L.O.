@@ -275,9 +275,18 @@ async def _connection_handler(
             # settings key that exists so far: push the stored key's current
             # status (no network call here -- validation only happens on an
             # actual settings_update, not on every connect).
+            import importlib
+
             from brain import secrets_store
 
             await send_fn("settings_state", {"key": "openrouter_key", "status": secrets_store.key_status()})
+            # Step 6: hydrate the feed from the action log (the DB is the full
+            # log; the UI ring buffer is just a view). Unconsumed undo tokens
+            # ride along so the Undo button re-arms after reconnect.
+            # gate transitively imports langgraph (seconds on first load) --
+            # import off-loop so this connect never freezes other clients.
+            gate = await asyncio.to_thread(importlib.import_module, "brain.gate")
+            await gate.push_activity_backlog(send_fn)
 
         async for raw in ws:
             try:
@@ -305,6 +314,13 @@ async def _connection_handler(
                 from brain import graph
 
                 asyncio.create_task(graph.handle_approval_response(msg, send_fn, broadcast_fn, locks))
+            elif not mock and msg["type"] == "undo":
+                # Step 6: undo is a global feed action, not tied to a
+                # conversation -- no conversation lock; token consumption is
+                # the atomic guard against a double-fire.
+                from brain import gate
+
+                asyncio.create_task(gate.handle_undo(msg, broadcast_fn))
             elif mock and msg["type"] in _MOCK_DISPATCH:
                 handler_name, needs_send = _MOCK_DISPATCH[msg["type"]]
                 handler = getattr(mock_engine, handler_name)

@@ -13,8 +13,11 @@ call in a broad except (see graph.py C2 note).
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import uuid
+from pathlib import Path
 
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
@@ -23,11 +26,15 @@ from brain import store
 
 logger = logging.getLogger("brain.gate")
 
-# Tool registry: name -> {fn, tier, destructive, redact, summary}.
+# Tool registry: name -> {fn, tier, destructive, redact, summary, inverse}.
 # tier: int or callable(args)->int (arg-predicate rules; real file rules
 # arrive with the Step 7 tools). destructive: bool or callable(args)->bool.
 # redact: callable(args)->dict producing args_redacted (rule 3 -- applied
 # before anything leaves the gate). summary: str template or callable(args).
+# inverse: callable(args, result) -> {tool, args, precondition?} | None --
+# built AT EXECUTION TIME (D7); precondition is {"path", "sha256"?} data the
+# undo re-checks ("still safe to reverse?"). No inverse (or builder returns
+# None) => genuinely non-reversible, undoable:false up front.
 TOOLS: dict[str, dict] = {}
 
 # Pending Tier-3 approvals: approval_id -> {conversation_id, task_id, payload}
@@ -39,8 +46,11 @@ _pending: dict[str, dict] = {}
 _by_conversation: dict[str, str] = {}
 
 
-def register(name: str, fn, *, tier=3, destructive=False, redact=None, summary=None) -> None:
-    TOOLS[name] = {"fn": fn, "tier": tier, "destructive": destructive, "redact": redact, "summary": summary}
+def register(name: str, fn, *, tier=3, destructive=False, redact=None, summary=None, inverse=None) -> None:
+    TOOLS[name] = {
+        "fn": fn, "tier": tier, "destructive": destructive, "redact": redact,
+        "summary": summary, "inverse": inverse,
+    }
 
 
 def classify(tool: str, args: dict) -> int:
@@ -123,11 +133,14 @@ def pending_for_conversation(conversation_id: str) -> str | None:
 # ----------------------------------------------------------------- the gate
 
 
-def _record(tool: str, args_redacted: dict, tier: int, result: str, task_id: str | None) -> None:
+def _record(
+    tool: str, args_redacted: dict, tier: int, result: str, task_id: str | None,
+    undoable: bool = False, inverse: dict | None = None,
+) -> str | None:
+    """Write the action row; returns the undo_token iff undoable."""
     store.connect()
-    # ponytail: undoable=False / inverse_json=None for every action until
-    # Step 6 records real inverses at execution time.
-    store.record_action(tool, args_redacted, tier, 1, result, False, None, task_id)
+    _, undo_token = store.record_action(tool, args_redacted, tier, 1, result, undoable, inverse, task_id)
+    return undo_token
 
 
 async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id: str | None, broadcast) -> dict:
@@ -155,7 +168,7 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
         decision = interrupt(payload)  # C2: never inside a try/except
         d = decision.get("decision")
         if d in ("deny", "cancelled"):
-            await asyncio.to_thread(_record, tool, redact(tool, args), tier, "denied", task_id)
+            await asyncio.to_thread(_record, tool, redact(tool, args), tier, "denied", frame_task)
             note = "you denied it" if d == "deny" else "you stopped me"
             update = {
                 "pending_tool_intent": None,
@@ -173,8 +186,17 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
             continue
         break  # approve
 
+    return await _execute_tail(tool, args, tier, frame_task, broadcast)
+
+
+async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broadcast) -> dict:
+    """Non-interrupting execution tail: run fn + record (with inverse, D7) +
+    emit activity. Shared by gated_execute and handle_undo -- C-UNDO: undo
+    runs OUTSIDE any graph thread, so it must never reach interrupt(); this
+    helper contains no interrupt() by construction."""
     entry = TOOLS.get(tool)
     args_redacted = redact(tool, args)
+    inverse: dict | None = None
     if entry is None:
         result = "error: unknown tool"
         content = f"I couldn't run {tool} — I don't have that tool."
@@ -185,27 +207,125 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
                 out = await out
             result = "ok"
             content = f"I ran {tool}."
+            builder = entry.get("inverse")
+            if builder is not None:
+                try:
+                    # ponytail: inverse args stored as built -- no current tool's
+                    # redactor hides a value its inverse needs; if one ever does,
+                    # its builder must store a redacted-safe form here.
+                    inverse = builder(args, out)
+                except Exception:  # noqa: BLE001 - a broken builder just means non-undoable
+                    logger.exception("inverse builder failed for tool=%s", tool)
         except GraphInterrupt:
             raise  # C2: a tool must never swallow the suspension signal
         except Exception as exc:  # noqa: BLE001 - rule 2: turn continues honestly
             logger.exception("tool %s failed", tool)
             result = f"error: {exc}"
             content = f"I tried to run {tool} but it failed: {exc}"
-    await asyncio.to_thread(_record, tool, args_redacted, tier, result, task_id)
+    undo_token = await asyncio.to_thread(
+        _record, tool, args_redacted, tier, result, frame_task, inverse is not None, inverse
+    )
     if tier >= 2:
-        await broadcast(
-            "activity",
-            {
-                "text": summarize(tool, args),
-                "narrate": False,
-                "task_id": frame_task,
-                "undoable": False,
-                "tier": tier,
-                "lane": 1,
-            },
-        )
+        payload = {
+            "text": summarize(tool, args),
+            "narrate": False,
+            "task_id": frame_task,
+            "undoable": undo_token is not None,
+            "tier": tier,
+            "lane": 1,
+        }
+        if undo_token is not None:
+            payload["undo_token"] = undo_token
+        await broadcast("activity", payload)
     return {
         "pending_tool_intent": None,
         "pending_tool_result": {"tool": tool, "status": result},
         "messages": [{"role": "assistant", "content": content}],
     }
+
+
+# -------------------------------------------------------------------- undo
+
+
+def _precondition_ok(pre: dict | None) -> bool:
+    """Precondition shape: {"path": p, "sha256"?: hex} -- the reversal target
+    still exists (and is byte-identical if hashed), so undo won't clobber
+    anything that changed since."""
+    if not pre:
+        return True
+    p = Path(pre["path"])
+    if not p.is_file():
+        return False
+    want = pre.get("sha256")
+    if want:
+        return hashlib.sha256(p.read_bytes()).hexdigest() == want
+    return True
+
+
+async def handle_undo(msg: dict, broadcast) -> None:
+    """The feed's Undo button (D7). Looks up the recorded inverse, re-checks
+    its precondition, consumes the token (atomic -- a double-fire loses the
+    UPDATE race and errors), then runs the inverse through the shared
+    execution tail so the reversal is itself logged with its own activity,
+    referencing the SAME task_id as the original."""
+
+    async def fail(code: str, message: str) -> None:
+        await broadcast("error", {"code": code, "message": message, "recoverable": True})
+
+    token = msg["undo_token"]
+    store.connect()
+    row = await asyncio.to_thread(store.get_action_by_undo_token, token)
+    if row is None:
+        await fail("undo_unknown", "I couldn't find that action to undo.")
+        return
+    if row["consumed"]:
+        await fail("undo_already_done", f"I can't undo {row['tool']} again — it's already undone.")
+        return
+    inverse = json.loads(row["inverse_json"])
+    pre_ok = await asyncio.to_thread(_precondition_ok, inverse.get("precondition"))
+    if not pre_ok:
+        await fail(
+            "undo_precondition_failed",
+            f"I can't undo {row['tool']} — it's changed since, so I won't overwrite it.",
+        )
+        return
+    tier = classify(inverse["tool"], inverse["args"])
+    if tier == 3:
+        # ponytail: a gated Tier-3 undo would need a real graph turn (interrupt()
+        # only works inside one) -- revisit if a Tier-3 inverse ever appears;
+        # none of the Step-7 file tools produce one.
+        await fail("undo_needs_approval", "I can't auto-undo that — it needs approval.")
+        return
+    # Consume BEFORE executing: the atomic False-on-second-call is what makes
+    # a double-click run the inverse exactly once (idempotence, matches the
+    # UI's rule-3 lock).
+    if not await asyncio.to_thread(store.consume_undo_token, token):
+        await fail("undo_already_done", f"I can't undo {row['tool']} again — it's already undone.")
+        return
+    # The reversal is just an action: if its tool has an inverse builder it
+    # gets its own token (undo-of-an-undo comes free), otherwise it's honestly
+    # non-undoable.
+    await _execute_tail(inverse["tool"], inverse["args"], tier, row["task_id"] or "history", broadcast)
+
+
+async def push_activity_backlog(send, limit: int = 100) -> None:
+    """Connect-time feed hydration (Step 6): replay recent action rows as
+    activity frames, oldest first (the feed appends, newest lands last). A
+    still-unconsumed undo_token rides along so the Undo button re-arms after
+    reconnect; consumed/non-undoable rows replay undoable:false."""
+    store.connect()
+    rows = await asyncio.to_thread(store.recent_actions, limit)
+    for row in reversed(rows):
+        args = json.loads(row["args_redacted"] or "{}")
+        undoable = bool(row["undoable"]) and not row["consumed"]
+        payload = {
+            "text": summarize(row["tool"], args),
+            "narrate": False,
+            "task_id": row["task_id"] or "history",
+            "undoable": undoable,
+            "tier": row["tier"],
+            "lane": row["lane"],
+        }
+        if undoable:
+            payload["undo_token"] = row["undo_token"]
+        await send("activity", payload)

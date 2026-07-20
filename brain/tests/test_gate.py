@@ -77,6 +77,14 @@ async def _connect_auth(port: int, token: str):
     assert ack["type"] == "hello_ack", ack
     settings = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
     assert settings["type"] == "settings_state", settings
+    # Step 6: the server replays the action-log backlog as activity frames
+    # right after settings_state -- drain exactly that many (deterministic:
+    # this test shares the store in-process, and backlog is sent before the
+    # server reads anything we send).
+    store.connect()
+    for _ in range(len(store.recent_actions(100))):
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        assert frame["type"] == "activity", frame
     return ws
 
 
