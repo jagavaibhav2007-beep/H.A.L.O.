@@ -5,10 +5,11 @@
 // backend (launch-at-startup, key entry, advanced knobs) renders disabled
 // with an honest note instead of pretending to work.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getTheme, setTheme, type Theme } from "../styles/theme";
-import { useHaloStore, selectSpend } from "../state/store";
+import { Button } from "../components/Button";
+import { useHaloStore, selectOpenrouterKeyStatus, selectSpend } from "../state/store";
 import "./SettingsView.css";
 
 interface SettingsViewProps {
@@ -20,12 +21,39 @@ interface SettingsViewProps {
 // real Brain choosing models. This stays a static, honestly-labeled list.
 const MOCK_MODELS = ["Chat: halo-mock-1", "Vision: halo-mock-vision-1"];
 
+// Copy per status - plain, no jargon (design language rule 10).
+const KEY_STATUS_COPY: Record<string, string> = {
+  set: "connected",
+  missing: "not set",
+  invalid: "key rejected — check it and try again",
+  unverified: "saved — will check on first use",
+};
+
 export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   const spend = useHaloStore(selectSpend);
+  const keyStatus = useHaloStore(selectOpenrouterKeyStatus);
   const [theme, setThemeState] = useState<Theme>(getTheme());
   const [hotkey, setHotkey] = useState<string | null>(null);
   const [wakeWord, setWakeWord] = useState(true);
   const [pushToTalk, setPushToTalk] = useState(false);
+  const [keyInput, setKeyInput] = useState("");
+  // Rule 3 (lock on press, unlock only on confirm): pending clears when
+  // keyStatus actually changes to a new value, never optimistically.
+  const [pending, setPending] = useState(false);
+  const lastStatus = useRef(keyStatus);
+  useEffect(() => {
+    if (keyStatus !== lastStatus.current) {
+      lastStatus.current = keyStatus;
+      setPending(false);
+    }
+  }, [keyStatus]);
+
+  function saveKey() {
+    if (pending || !keyInput) return;
+    setPending(true);
+    sendSettingsUpdate("openrouter_key", keyInput);
+    setKeyInput(""); // never lingers in the DOM once sent
+  }
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -112,13 +140,27 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
 
         <section className="settings-group">
           <h3 className="halo-group-title settings-group-title">Keys &amp; connections</h3>
-          {["OpenAI", "Anthropic", "Google"].map((name) => (
-            <div className="settings-row" key={name} data-disabled>
-              <span className="settings-label">{name}</span>
-              <span className="settings-dots" aria-label="not configured">●●●</span>
-            </div>
-          ))}
-          <p className="settings-note">Key entry lands in Phase 2 with real secret storage.</p>
+          <div className="settings-row">
+            <label className="settings-label" htmlFor="halo-openrouter-key">OpenRouter</label>
+            <input
+              id="halo-openrouter-key"
+              className="halo-input"
+              type="password"
+              placeholder="sk-or-..."
+              autoComplete="off"
+              value={keyInput}
+              disabled={pending}
+              onChange={(e) => setKeyInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && saveKey()}
+            />
+            <Button variant="ghost" onClick={saveKey} disabled={pending || !keyInput}>
+              {pending ? "Checking…" : "Save"}
+            </Button>
+          </div>
+          <div className="settings-row">
+            <span className="settings-value">{pending ? "checking…" : (keyStatus ? KEY_STATUS_COPY[keyStatus] : KEY_STATUS_COPY.missing)}</span>
+          </div>
+          <p className="settings-note">Only OpenRouter is used — one key covers every model.</p>
         </section>
 
         <details className="settings-advanced">

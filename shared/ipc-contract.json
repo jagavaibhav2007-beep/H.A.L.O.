@@ -25,6 +25,7 @@
     "voice_state": { "direction": "outbound", "required": ["state"] },
     "transcript": { "direction": "outbound", "required": ["text", "final", "conversation_id"] },
     "spend_update": { "direction": "outbound", "required": ["session_usd", "month_usd"] },
+    "settings_state": { "direction": "outbound", "required": ["key", "status"] },
     "belief_state": { "direction": "outbound", "required": ["belief_id", "text", "kind", "provenance", "salience", "status"] },
     "skill_state": { "direction": "outbound", "required": ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"] }
   }

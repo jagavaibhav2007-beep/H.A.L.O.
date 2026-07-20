@@ -143,22 +143,35 @@ def write_session_file(port: int, token: str, session_file: Path = SESSION_FILE)
     tmp.replace(session_file)
 
 
-async def _handle_settings_update(msg: dict) -> None:
+async def _handle_settings_update(msg: dict, send_fn) -> None:
     """Real-mode settings_update (Phase 2 Step 2). openrouter_key goes to the
     OS keystore (D8: the value is never logged or echoed back -- status only);
-    everything else persists to the store's settings table."""
-    from brain import secrets_store, store
+    everything else persists to the store's settings table. Reports a
+    settings_state back to the sender only -- this is per-client Settings
+    feedback, not a global event (11-ipc-contract.md)."""
+    from brain import llm, secrets_store, store
 
     key, value = msg["key"], msg.get("value")
-    if key == "openrouter_key":
-        if value:
-            await asyncio.to_thread(secrets_store.set_key, value)
-        else:
-            await asyncio.to_thread(secrets_store.delete_key)
-        logger.info("openrouter key status: %s", secrets_store.key_status())
-    else:
+    if key != "openrouter_key":
         store.connect()
         await asyncio.to_thread(store.set_setting, key, value)
+        return
+
+    if not value:
+        await asyncio.to_thread(secrets_store.delete_key)
+        await send_fn("settings_state", {"key": key, "status": "missing"})
+        return
+
+    await asyncio.to_thread(secrets_store.set_key, value)
+    try:
+        ok = await llm.validate_key(value)
+    except Exception:  # noqa: BLE001 - any transport error -> stored but unconfirmed
+        logger.exception("openrouter key validation failed")
+        status = "unverified"
+    else:
+        status = "set" if ok else "invalid"
+    logger.info("openrouter key status: %s", status)
+    await send_fn("settings_state", {"key": key, "status": status})
 
 
 # Mock-only inbound types -> (mock_engine handler name, needs send_fn instead
@@ -174,6 +187,7 @@ _MOCK_DISPATCH: dict[str, tuple[str, bool]] = {
     "memory_edit": ("handle_memory_edit", False),
     "skill_op": ("handle_skill_op", False),
     "mic": ("handle_mic", False),
+    "settings_update": ("handle_settings_update", True),
 }
 
 
@@ -256,6 +270,14 @@ async def _connection_handler(
             # D6: snapshot goes only to the connecting UI client, right after
             # hello_ack. Voice never gets it -- it's outside Voice's routing subset.
             await mock_engine.push_snapshot(send_fn)
+        elif not mock and role == "ui":
+            # Real-mode mirror of the mock snapshot, scoped to just the one
+            # settings key that exists so far: push the stored key's current
+            # status (no network call here -- validation only happens on an
+            # actual settings_update, not on every connect).
+            from brain import secrets_store
+
+            await send_fn("settings_state", {"key": "openrouter_key", "status": secrets_store.key_status()})
 
         async for raw in ws:
             try:
@@ -268,7 +290,7 @@ async def _connection_handler(
             if msg["type"] == "user_msg":
                 asyncio.create_task(_serialize_user_msg(msg, locks, send_fn, broadcast_fn, mock))
             elif not mock and msg["type"] == "settings_update":
-                asyncio.create_task(_handle_settings_update(msg))
+                asyncio.create_task(_handle_settings_update(msg, send_fn))
             elif not mock and msg["type"] == "interrupt":
                 # Must NOT route through the conversation lock -- the live turn
                 # holds it; the interrupt just flips that turn's stop event.

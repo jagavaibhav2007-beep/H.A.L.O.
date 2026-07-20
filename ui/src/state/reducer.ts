@@ -68,6 +68,10 @@ export interface SpendState {
   monthUsd: number;
 }
 
+// Keyed by settings key (only "openrouter_key" exists so far) so the reducer
+// stays total if Settings grows more server-confirmed keys later.
+export type SettingsState = Record<string, "set" | "missing" | "invalid" | "unverified">;
+
 export interface HaloState {
   connection: ConnectionState;
   conversations: Record<string, ConversationState>;
@@ -79,6 +83,7 @@ export interface HaloState {
   skills: Record<string, SkillStateMsg>; // keyed by skill_name
   voice: VoiceState;
   spend: SpendState;
+  settings: SettingsState;
 }
 
 export const ACTIVITY_CAP = 10_000;
@@ -94,6 +99,7 @@ export const initialState: HaloState = {
   skills: {},
   voice: { state: "idle", transcript: null },
   spend: { sessionUsd: 0, monthUsd: 0 },
+  settings: {},
 };
 
 // ---- Helpers ----
@@ -229,6 +235,9 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
 
     case "spend_update":
       return { ...state, spend: { sessionUsd: frame.session_usd, monthUsd: frame.month_usd } };
+
+    case "settings_state":
+      return { ...state, settings: upsert(state.settings, frame.key, frame.status) };
 
     case "voice_state":
       return { ...state, voice: { ...state.voice, state: frame.state } };

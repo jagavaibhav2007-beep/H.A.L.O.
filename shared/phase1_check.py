@@ -23,7 +23,7 @@ from brain.ipc.contract import parse_ipc_message  # noqa: E402
 from brain.server import start  # noqa: E402
 
 SNAPSHOT_TYPES = {
-    "belief_state", "skill_state", "task_state", "approval_request", "spend_update"
+    "belief_state", "skill_state", "task_state", "approval_request", "settings_state", "spend_update"
 }
 
 

@@ -52,6 +52,7 @@ export const selectBeliefs = (s: HaloStore) => s.beliefs;
 export const selectSkills = (s: HaloStore) => s.skills;
 export const selectVoice = (s: HaloStore) => s.voice;
 export const selectSpend = (s: HaloStore) => s.spend;
+export const selectOpenrouterKeyStatus = (s: HaloStore) => s.settings.openrouter_key;
 export const selectActiveView = (s: HaloStore) => s.activeView;
 export const selectBrainStatus = (s: HaloStore) => s.connection.brainStatus;
 export const selectPendingApprovalCount = (s: HaloStore) => Object.keys(s.approvals).length;

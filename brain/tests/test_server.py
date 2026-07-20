@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["HALO_LLM_STUB"] = "1"
 _TMP = tempfile.mkdtemp(prefix="halo-test-server-")
 os.environ["LOCALAPPDATA"] = _TMP
+os.environ["HALO_KEYRING_DIR"] = str(Path(_TMP) / "keys")  # secrets_store test seam -- never touch real keyring
 
 import websockets
 
@@ -153,6 +154,11 @@ async def check_malformed_frame_rejected(port: int, token: str) -> None:
     ws = await _connect(port)
     try:
         await _authenticate(ws, token)
+        # A fresh non-mock UI connection gets one settings_state push right
+        # after hello_ack (server.py) -- drain it before asserting the
+        # malformed-frame error sequence below.
+        settings = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+        assert settings["type"] == "settings_state", settings
         bad_frames = [
             {"type": "not_a_real_type", "id": "x", "ts": "x"},
             _frame("user_msg", text="hi", conversation_id=[], source="ui"),
@@ -198,6 +204,29 @@ async def check_conversation_order(port: int, token: str) -> None:
     print("[check 5] two messages to one conversation handled in arrival order: OK")
 
 
+async def check_settings_update_round_trip(port: int, token: str) -> None:
+    """settings_update for openrouter_key -> a settings_state reply to the
+    sender only (not broadcast), reporting "set" (HALO_LLM_STUB makes
+    validate_key an instant True) then "missing" after an empty value."""
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        initial = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+        assert initial["type"] == "settings_state" and initial["status"] == "missing", initial
+
+        await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="sk-or-test")))
+        saved = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        assert saved["type"] == "settings_state" and saved["key"] == "openrouter_key", saved
+        assert saved["status"] == "set", saved  # HALO_LLM_STUB -> validate_key() is instant True
+
+        await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="")))
+        cleared = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        assert cleared["type"] == "settings_state" and cleared["status"] == "missing", cleared
+    finally:
+        await ws.close()
+    print("[check 10] settings_update -> settings_state reply (set, then missing on clear): OK")
+
+
 def check_frame_visible_to_routing() -> None:
     """Full truth table for the Voice/UI routing rule (server.py). test_mock's
     check 7 exercises token(yes)/done(no) over the wire, but never the subtlest
@@ -225,6 +254,7 @@ async def main() -> None:
         await check_missing_hello_dropped(port)
         await check_malformed_frame_rejected(port, token)
         await check_conversation_order(port, token)
+        await check_settings_update_round_trip(port, token)
     finally:
         server.close()
         await server.wait_closed()

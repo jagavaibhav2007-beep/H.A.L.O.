@@ -156,6 +156,11 @@ class SpendUpdateMsg(IpcEnvelope):
     month_usd: float
 
 
+class SettingsStateMsg(IpcEnvelope):
+    key: str
+    status: Literal["set", "missing", "invalid", "unverified"]
+
+
 class BeliefStateMsg(IpcEnvelope):
     belief_id: str
     text: str
@@ -201,6 +206,7 @@ IpcMessage = Union[
     VoiceStateMsg,
     TranscriptMsg,
     SpendUpdateMsg,
+    SettingsStateMsg,
     BeliefStateMsg,
     SkillStateMsg,
 ]
@@ -230,6 +236,7 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "voice_state": ("state",),
     "transcript": ("text", "final", "conversation_id"),
     "spend_update": ("session_usd", "month_usd"),
+    "settings_state": ("key", "status"),
     "belief_state": ("belief_id", "text", "kind", "provenance", "salience", "status"),
     "skill_state": ("skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"),
 }
@@ -249,6 +256,7 @@ _STRING_FIELDS = {
     "token": ("text", "conversation_id"),
     "done": ("conversation_id",),
     "error": ("code", "message"),
+    "settings_state": ("key",),
 }
 
 _ENUM_FIELDS = {
@@ -258,6 +266,7 @@ _ENUM_FIELDS = {
     "skill_op": {"op": {"trial", "disable", "restore", "delete"}},
     "task_op": {"op": {"pause", "resume", "stop"}},
     "mic": {"op": {"mute", "unmute"}},
+    "settings_state": {"status": {"set", "missing", "invalid", "unverified"}},
 }
 
 

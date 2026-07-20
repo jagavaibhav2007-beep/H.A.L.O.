@@ -40,6 +40,7 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and 
 | `voice_state` | `state:"idle"\|"wake"\|"listening"\|"thinking"\|"speaking"\|"muted"` | originates in the Voice worker, relayed by Brain → UI; drives the orb's state language |
 | `transcript` | `text, final:bool, conversation_id` | STT partials for live ghost-text; `final:true` coincides with the `user_msg` the Voice worker submits |
 | `spend_update` | `session_usd, month_usd` | Brain accumulates per-call cost (OpenRouter usage fields) into SQLite; feeds the Settings spend view |
+| `settings_state` | `key, status:"set"\|"missing"\|"invalid"\|"unverified"` | per-client reply to `settings_update` (sent only to the client that changed it) and pushed once on a fresh non-mock UI connection with the key's current status; `"unverified"` = stored but not yet confirmed against the provider (e.g. offline at save time) |
 | `belief_state` | `belief_id, text, kind:"preference"\|"project"\|"workflow"\|"decision"\|"lesson", provenance:"user"\|"inferred", salience, status:"active"\|"archived"\|"superseded", superseded_by?, used_at?` | memory panel cards; pushed as snapshot-on-connect + delta-on-change (same pattern as `task_state`) |
 | `skill_state` | `skill_name, origin:"auto"\|"user", kind:"skill"\|"playbook", uses, success_rate, status:"active"\|"paused"\|"retired", born_at, reason?` | skills panel cards; same snapshot+delta pattern |
 

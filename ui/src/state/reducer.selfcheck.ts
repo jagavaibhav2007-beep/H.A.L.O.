@@ -260,4 +260,16 @@ function token(text: string, conversation_id: string): TokenMsg {
   assert(turn.role === "user" && turn.viaVoice === true, "voice: the solidified turn is flagged as spoken");
 }
 
+// ---- Scenario 10: settings_state upserts by key ----
+{
+  let state: HaloState = initialState;
+  assert(state.settings.openrouter_key === undefined, "settings: no status before any frame");
+
+  state = applyFrame(state, { type: "settings_state", ...envelope(), key: "openrouter_key", status: "missing" });
+  assert(state.settings.openrouter_key === "missing", "settings: missing after fresh-connect push");
+
+  state = applyFrame(state, { type: "settings_state", ...envelope(), key: "openrouter_key", status: "set" });
+  assert(state.settings.openrouter_key === "set", "settings: set after a confirmed save");
+}
+
 console.log("[reducer.selfcheck] OK");

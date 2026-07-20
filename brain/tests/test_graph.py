@@ -46,6 +46,11 @@ async def _connect_auth(port: int, token: str):
     await ws.send(json.dumps(_frame("hello", token=token)))
     ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
     assert ack["type"] == "hello_ack", ack
+    # A fresh non-mock UI connection also gets one settings_state push right
+    # after hello_ack (server.py) -- drain it so callers' next recv() sees
+    # whatever they actually triggered.
+    settings = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+    assert settings["type"] == "settings_state", settings
     return ws
 
 

@@ -165,6 +165,12 @@ export interface SpendUpdateMsg extends IpcEnvelope {
   month_usd: number;
 }
 
+export interface SettingsStateMsg extends IpcEnvelope {
+  type: "settings_state";
+  key: string;
+  status: "set" | "missing" | "invalid" | "unverified";
+}
+
 export interface BeliefStateMsg extends IpcEnvelope {
   type: "belief_state";
   belief_id: string;
@@ -212,6 +218,7 @@ export type IpcMessage =
   | VoiceStateMsg
   | TranscriptMsg
   | SpendUpdateMsg
+  | SettingsStateMsg
   | BeliefStateMsg
   | SkillStateMsg;
 
@@ -242,6 +249,7 @@ export const REQUIRED_FIELDS: Record<MsgType, readonly string[]> = {
   voice_state: ["state"],
   transcript: ["text", "final", "conversation_id"],
   spend_update: ["session_usd", "month_usd"],
+  settings_state: ["key", "status"],
   belief_state: ["belief_id", "text", "kind", "provenance", "salience", "status"],
   skill_state: ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"],
 };
@@ -262,6 +270,7 @@ const STRING_FIELDS: Partial<Record<MsgType, readonly string[]>> = {
   token: ["text", "conversation_id"],
   done: ["conversation_id"],
   error: ["code", "message"],
+  settings_state: ["key"],
 };
 
 const ENUM_FIELDS: Partial<Record<MsgType, Readonly<Record<string, readonly unknown[]>>>> = {
@@ -271,6 +280,7 @@ const ENUM_FIELDS: Partial<Record<MsgType, Readonly<Record<string, readonly unkn
   skill_op: { op: ["trial", "disable", "restore", "delete"] },
   task_op: { op: ["pause", "resume", "stop"] },
   mic: { op: ["mute", "unmute"] },
+  settings_state: { status: ["set", "missing", "invalid", "unverified"] },
 };
 
 /** Validate an arbitrary decoded-JSON frame against the contract. Throws on

@@ -24,7 +24,7 @@ _frame = test_server._frame
 _connect = test_server._connect
 _authenticate = test_server._authenticate
 
-SNAPSHOT_TYPES = {"belief_state", "skill_state", "task_state", "approval_request", "spend_update"}
+SNAPSHOT_TYPES = {"belief_state", "skill_state", "task_state", "approval_request", "settings_state", "spend_update"}
 
 
 async def _recv(ws) -> dict:
@@ -361,6 +361,26 @@ async def check_memory_edit_round_trip(port: int, token: str) -> None:
     print("[check 13] memory_edit edit->supersede+new, delete->archived, restore->active: OK")
 
 
+async def check_settings_update_round_trip(port: int, token: str) -> None:
+    """Mock must handle settings_update too, or the Settings Save button hangs
+    forever waiting on a settings_state that never comes -- the exact 'mock
+    handler completeness' bug class CLAUDE.md warns about."""
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        await _drain_snapshot(ws)
+        await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="sk-or-mock")))
+        saved = await _recv(ws)
+        assert saved["type"] == "settings_state" and saved["status"] == "set", saved
+
+        await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="")))
+        cleared = await _recv(ws)
+        assert cleared["type"] == "settings_state" and cleared["status"] == "missing", cleared
+    finally:
+        await ws.close()
+    print("[check 14] mock settings_update -> settings_state reply (set, then missing on clear): OK")
+
+
 async def main() -> None:
     server, token = await start(mock=True)
     port = server.sockets[0].getsockname()[1]
@@ -378,6 +398,7 @@ async def main() -> None:
         await check_task_op_round_trip(port, token)
         await check_lane_pin_round_trip(port, token)
         await check_memory_edit_round_trip(port, token)
+        await check_settings_update_round_trip(port, token)
     finally:
         server.close()
         await server.wait_closed()
