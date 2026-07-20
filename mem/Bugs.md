@@ -203,3 +203,10 @@
 **Root cause:** child creation and publication were not coordinated with the mutex used by `kill_all()`.
 **Fix:** `publish_child` checks shutdown and stores the child while holding that mutex, or kills and waits for it immediately; a Rust regression test covers the shutdown-won path.
 **Never do:** never publish a supervised child handle without coordinating with the shutdown path's lock and flag.
+
+## Arg-shaped tier demotion in the gate (caught pre-commit) — 2026-07-20
+**Severity:** High (would have shipped a permission bypass). Caught by orchestrator review of subagent code, before commit.
+**Symptom:** none visible — all tests green. `file_delete` classified Tier 2 when args carried `expected_sha256`, intended "only for undo-of-create's inverse".
+**Root cause:** the classifier trusted an arg value to prove *who* was calling. Args come from the LLM: it could `file_read` (Tier 1) a file, hash it, and issue a hash-carrying delete — an unapproved Tier-2 delete. Intent can't live in arg shapes; anything the classifier keys on is attacker-controllable by whoever authors tool calls.
+**Fix:** deletes are Tier 3 for everyone; `gate.handle_undo` instead *trusts recorded inverses* (Brain-authored at execution time of an already-gated action, guarded by precondition + atomic token consumption) and runs them at Tier 2 without re-classifying. Same review also closed `dir > file` (cmd.exe honors redirection in joined args) and `git log --output=x` (write flag on an allowlisted "read-only" command).
+**Never do:** never let arg *contents* lower a tier — classification may only ever raise on arg predicates, never demote. Privileged execution paths (undo) get trust from *where the record came from*, not from what the args look like. And an allowlisted command is only read-only if its flags and shell metacharacters are too.
