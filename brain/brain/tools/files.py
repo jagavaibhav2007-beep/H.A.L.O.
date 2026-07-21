@@ -272,17 +272,54 @@ def _path_tier(key: str, inside: int):
     return tier
 
 
+def _schema(description: str, props: dict, required: list[str]) -> dict:
+    return {
+        "description": description,
+        "parameters": {"type": "object", "properties": props, "required": required},
+    }
+
+
+_PATH = {"type": "string", "description": "Absolute path, or one starting with ~."}
+
+# Descriptions are written for the model's benefit, not the user's: they say
+# what the tool does, what it costs, and when NOT to reach for it. The gate
+# still decides whether a call runs -- these only shape which tool gets asked
+# for. ponytail: hand-written strings, not derived from the fns; if they drift
+# the fix is to write them here, no codegen.
+
 gate.register(
     "file_read", _file_read, tier=_path_tier("path", 1),
     summary=lambda a: f"I want to read {a['path']}.",
+    schema=_schema(
+        "Read a text file and return its contents (truncated at 64KB). Use this "
+        "before editing a file so you know its exact current text.",
+        {"path": _PATH}, ["path"],
+    ),
 )
 gate.register(
     "dir_list", _dir_list, tier=_path_tier("path", 1),
     summary=lambda a: f"I want to list {a['path']}.",
+    schema=_schema(
+        "List the immediate contents of a directory (names + whether each is a "
+        "directory), up to 500 entries. Not recursive -- use file_search for that.",
+        {"path": _PATH}, ["path"],
+    ),
 )
 gate.register(
     "file_search", _file_search, tier=_path_tier("path", 1),
     summary=lambda a: f"I want to search {a['path']} for {a['pattern']}.",
+    schema=_schema(
+        "Find files by glob pattern under a directory. Matches names/paths, not "
+        "file contents. Returns up to 200 paths relative to the search root.",
+        {
+            "path": _PATH,
+            "pattern": {
+                "type": "string",
+                "description": "Glob relative to path, e.g. '*.pdf' or '**/*.py' to recurse.",
+            },
+        },
+        ["path", "pattern"],
+    ),
 )
 gate.register(
     "file_create", _file_create,
@@ -290,6 +327,16 @@ gate.register(
     redact=lambda a: {"path": a["path"], "content": f"<{len(a.get('content', ''))} chars>"},
     summary=lambda a: f"I want to create {a['path']}.",
     inverse=_create_inverse,
+    schema=_schema(
+        "Write a new text file, creating parent directories as needed. If the "
+        "path already exists this OVERWRITES it in full -- to change part of an "
+        "existing file use file_edit instead.",
+        {
+            "path": _PATH,
+            "content": {"type": "string", "description": "Full UTF-8 text of the file."},
+        },
+        ["path", "content"],
+    ),
 )
 gate.register(
     "file_edit", _file_edit, tier=_path_tier("path", 2),
@@ -300,26 +347,84 @@ gate.register(
     },
     summary=lambda a: f"I want to edit {a['path']}.",
     inverse=_edit_inverse,
+    schema=_schema(
+        "Replace one exact snippet of text in an existing file. 'old' must appear "
+        "EXACTLY ONCE -- zero or multiple matches fail without changing anything, "
+        "so read the file first and include enough surrounding text to be unique.",
+        {
+            "path": _PATH,
+            "old": {"type": "string", "description": "Exact text to replace; must match once."},
+            "new": {"type": "string", "description": "Replacement text."},
+        },
+        ["path", "old", "new"],
+    ),
 )
 gate.register(
     "file_move", _file_move,
     tier=lambda a: 3 if _move_risky(a) else 2, destructive=_move_risky,
     summary=lambda a: f"I want to move {a['src']} to {a['dst']}.",
     inverse=_move_inverse,
+    schema=_schema(
+        "Move or rename a single file or directory. If the destination is taken, "
+        "the name is suffixed ' (2)' rather than overwriting. For several files "
+        "at once, prefer dir_organize.",
+        {
+            "src": {"type": "string", "description": "Existing path to move."},
+            "dst": {"type": "string", "description": "Destination path, including the new filename."},
+        },
+        ["src", "dst"],
+    ),
 )
 gate.register(
     "file_delete", _file_delete, tier=3, destructive=True,
     redact=lambda a: {"path": a["path"]},  # drops expected_sha256/_prior noise
     summary=lambda a: f"I want to delete {a['path']}.",
     inverse=_delete_inverse,
+    schema=_schema(
+        "PERMANENTLY delete a single file. It does not go to the Recycle Bin. "
+        "Small text files can be restored via undo; large or binary ones cannot. "
+        "Always requires the user's explicit approval, so only call it when they "
+        "actually asked for a deletion.",
+        {"path": _PATH}, ["path"],
+    ),
 )
 gate.register(
     "dir_organize", _dir_organize,
     tier=lambda a: 3 if _organize_risky(a) else 2, destructive=_organize_risky,
     summary=lambda a: f"I want to organize {len(a['moves'])} files in {a['path']}.",
     inverse=_organize_inverse,
+    schema=_schema(
+        "Move many files in one batch (max 200). You must supply the EXPLICIT list "
+        "of moves -- this tool sorts nothing by itself. List the directory first, "
+        "decide the destinations yourself, then pass them here. Sources that have "
+        "vanished are skipped, not errors.",
+        {
+            "path": _PATH,
+            "moves": {
+                "type": "array",
+                "description": "Each entry moves one file.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "src": {"type": "string", "description": "Existing file path."},
+                        "dst": {"type": "string", "description": "Destination path including filename."},
+                    },
+                    "required": ["src", "dst"],
+                },
+            },
+        },
+        ["path", "moves"],
+    ),
 )
 gate.register(
     "run_readonly_cmd", _run_cmd, tier=1,
     summary=lambda a: f"I want to run `{a['cmd']}`.",
+    schema=_schema(
+        "Run one read-only shell command and return its exit code, stdout and "
+        "stderr. ONLY 'git status', 'git log', 'git diff', 'dir' and 'ls' are "
+        "permitted; anything else, plus redirection (> | & ) and --output, is "
+        "refused. This is not a general shell.",
+        {"cmd": {"type": "string", "description": "e.g. 'git status' or 'ls /path'."}},
+        ["cmd"],
+    ),
 )

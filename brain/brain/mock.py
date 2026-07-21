@@ -263,6 +263,12 @@ async def push_snapshot(send: SendFn) -> None:
         await send("task_state", task)
     for payload in list(_pending_approval_payloads.values()):
         await send("approval_request", payload)
+    # The key's status comes from the real keystore, not the in-memory dict:
+    # a mock relaunch reporting "missing" for a key that IS stored is exactly
+    # the lie that cost a user a key rotation (see handle_settings_update).
+    from brain import secrets_store
+
+    _settings["openrouter_key"] = await asyncio.to_thread(secrets_store.key_status)
     for key, status in _settings.items():
         await send("settings_state", {"key": key, "status": status})
     await send("spend_update", _seed_spend())
@@ -447,13 +453,33 @@ async def handle_mic(msg: dict, broadcast: BroadcastFn) -> None:
 
 @_swallow_closed
 async def handle_settings_update(msg: dict, send: SendFn) -> None:
-    """Mock round-trip for the Settings key-entry row: no real network
-    validation here (this is the scripted engine, not the real Brain) --
-    just track set/missing and echo it back to the sender only, matching
-    the real server's per-client (not broadcast) settings_state reply."""
+    """Mock round-trip for the Settings rows, with ONE deliberate exception:
+    the API key is stored for real.
+
+    The mock exists to script conversations, not to fake the user's
+    credentials. It used to keep key status in the in-memory `_settings` dict
+    and never write the value anywhere -- so pasting a real key here reported
+    "connected" and then silently lost it on the next launch, which cost a
+    real user a real key rotation (see mem/Bugs.md). A credential the user
+    deliberately typed is not mock data, so openrouter_key goes to the same
+    keystore the real Brain reads.
+    """
     key = msg["key"]
     value = msg.get("value")
-    _settings[key] = "set" if value else "missing"
+    if key == "openrouter_key":
+        from brain import secrets_store
+
+        if value:
+            await asyncio.to_thread(secrets_store.set_key, value)
+        else:
+            await asyncio.to_thread(secrets_store.delete_key)
+        # ponytail: no validate_key() call here -- the mock never touches the
+        # network, so an unverified-but-stored key is the honest answer; the
+        # real Brain verifies on first use.
+        status = await asyncio.to_thread(secrets_store.key_status)
+        _settings[key] = "unverified" if status == "set" else status
+    else:
+        _settings[key] = "set" if value else "missing"
     await send("settings_state", {"key": key, "status": _settings[key]})
 
 

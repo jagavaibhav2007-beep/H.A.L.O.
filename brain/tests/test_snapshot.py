@@ -167,9 +167,9 @@ async def check_summarization() -> None:
     seen: list[list[dict]] = []
     real_stream = llm.stream_chat
 
-    def spy(messages, model, api_key, usage_out=None):
+    def spy(messages, model, api_key, usage_out=None, **kw):
         seen.append(list(messages))
-        return real_stream(messages, model, api_key, usage_out)
+        return real_stream(messages, model, api_key, usage_out, **kw)
 
     llm.stream_chat = spy
     try:
@@ -193,9 +193,9 @@ async def check_summarization() -> None:
         def boom(*a, **k):
             raise RuntimeError("summarizer down")
 
-        llm.stream_chat = lambda messages, model, api_key, usage_out=None: (
+        llm.stream_chat = lambda messages, model, api_key, usage_out=None, **kw: (
             boom() if any("Condense this conversation" in (m.get("content") or "") for m in messages)
-            else real_stream(messages, model, api_key, usage_out)
+            else real_stream(messages, model, api_key, usage_out, **kw)
         )
         await graph.run_turn(
             {"conversation_id": cid, "text": "after the failure " + "more padding " * 8, "source": "ui"},

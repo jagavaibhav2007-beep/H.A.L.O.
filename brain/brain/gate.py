@@ -46,11 +46,27 @@ _pending: dict[str, dict] = {}
 _by_conversation: dict[str, str] = {}
 
 
-def register(name: str, fn, *, tier=3, destructive=False, redact=None, summary=None, inverse=None) -> None:
+def register(
+    name: str, fn, *, tier=3, destructive=False, redact=None, summary=None, inverse=None, schema=None
+) -> None:
+    """schema: the OpenAI function body sans name -- {"description": str,
+    "parameters": <JSON Schema>}. Only tools WITH one are advertised to the
+    model (tool_specs); schema-less tools stay internal-only."""
     TOOLS[name] = {
         "fn": fn, "tier": tier, "destructive": destructive, "redact": redact,
-        "summary": summary, "inverse": inverse,
+        "summary": summary, "inverse": inverse, "schema": schema,
     }
+
+
+def tool_specs() -> list[dict]:
+    """What the model is offered. Tier is NOT expressed here on purpose: the
+    model asks for whatever it wants and the gate decides -- advertising tiers
+    would invite the model to shop for a cheaper one."""
+    return [
+        {"type": "function", "function": {"name": name, **entry["schema"]}}
+        for name, entry in TOOLS.items()
+        if entry.get("schema")
+    ]
 
 
 def classify(tool: str, args: dict) -> int:

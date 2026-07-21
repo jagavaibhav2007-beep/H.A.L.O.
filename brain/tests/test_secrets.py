@@ -7,7 +7,7 @@ import tempfile
 # Add brain to path so we can import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from brain.secrets_store import get_key, set_key, delete_key, key_status
+from brain.secrets_store import get_key, set_key, delete_key, key_status, keystore_available
 
 
 def test_missing_key():
@@ -105,6 +105,28 @@ def test_double_delete_doesnt_raise():
             del os.environ["HALO_KEYRING_DIR"]
 
 
+def test_broken_keystore_is_not_reported_as_missing():
+    """A keystore we can't reach must NOT read as "no key stored".
+
+    Those are different facts with different fixes, and rendering the first as
+    the second is what makes someone rotate a key that was never lost (see
+    mem/Bugs.md). Runs against the real keyring path -- the file seam can't
+    fail the way a vault can -- with the backend patched to blow up.
+    """
+    import unittest.mock
+
+    saved = os.environ.pop("HALO_KEYRING_DIR", None)  # force the production path
+    try:
+        with unittest.mock.patch("keyring.get_password", side_effect=RuntimeError("vault unavailable")):
+            assert not keystore_available(), "a raising backend must not report itself available"
+            status = key_status()
+            assert status == "invalid", f"broken keystore reported as {status!r}, must be 'invalid'"
+            assert get_key() is None, "get_key must still degrade to None for value callers"
+    finally:
+        if saved is not None:
+            os.environ["HALO_KEYRING_DIR"] = saved
+
+
 if __name__ == "__main__":
     test_missing_key()
     test_set_and_get_roundtrip()
@@ -112,4 +134,5 @@ if __name__ == "__main__":
     test_set_empty_raises_valueerror()
     test_delete_key()
     test_double_delete_doesnt_raise()
+    test_broken_keystore_is_not_reported_as_missing()
     print("[brain.secrets_store] self-check OK")

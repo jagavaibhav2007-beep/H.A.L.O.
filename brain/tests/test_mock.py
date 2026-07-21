@@ -9,11 +9,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# The mock now stores a real openrouter_key in the real keystore (see
+# mock.handle_settings_update), so this MUST point somewhere disposable before
+# anything touches secrets_store -- otherwise check 14 would overwrite the
+# developer's actual API key with "sk-or-mock". test_server sets the same seam
+# and we inherit it by import, but relying on another module's import side
+# effect to protect a real credential is not a safety margin worth having.
+os.environ.setdefault("HALO_KEYRING_DIR", str(Path(tempfile.mkdtemp(prefix="halo-test-mock-")) / "keys"))
 
 from brain.ipc.contract import parse_ipc_message
 from brain.server import start
@@ -369,16 +379,41 @@ async def check_settings_update_round_trip(port: int, token: str) -> None:
     try:
         await _authenticate(ws, token)
         await _drain_snapshot(ws)
+        from brain import secrets_store
+
         await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="sk-or-mock")))
         saved = await _recv(ws)
-        assert saved["type"] == "settings_state" and saved["status"] == "set", saved
+        # "unverified", not "set": the mock never calls the network, so it
+        # honestly reports stored-but-unchecked rather than claiming connected.
+        assert saved["type"] == "settings_state" and saved["status"] == "unverified", saved
+        # THE POINT: the key was actually PERSISTED, not just echoed. The mock
+        # used to flip an in-memory string and drop the value on the floor,
+        # reporting "connected" while losing a real user's real key.
+        assert secrets_store.get_key() == "sk-or-mock", "mock discarded the key instead of storing it"
+
+        # And a reconnect must report the stored key, not a fresh in-memory
+        # default -- the "relaunch forgot my key" symptom.
+        ws2 = await _connect(port)
+        try:
+            await _authenticate(ws2, token)
+            key_frames = []
+            while True:  # _drain_snapshot returns None, so collect inline
+                f = await _recv(ws2)
+                if f["type"] == "settings_state" and f["key"] == "openrouter_key":
+                    key_frames.append(f)
+                if f["type"] == "spend_update":
+                    break
+            assert key_frames and key_frames[-1]["status"] == "set", key_frames
+        finally:
+            await ws2.close()
 
         await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="")))
         cleared = await _recv(ws)
         assert cleared["type"] == "settings_state" and cleared["status"] == "missing", cleared
+        assert secrets_store.get_key() is None, "clearing the key left it in the keystore"
     finally:
         await ws.close()
-    print("[check 14] mock settings_update -> settings_state reply (set, then missing on clear): OK")
+    print("[check 14] mock settings_update: key is really stored, survives reconnect, and clears: OK")
 
 
 async def main() -> None:

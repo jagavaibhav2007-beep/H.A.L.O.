@@ -190,7 +190,15 @@ async def check_no_api_key(port: int, token: str) -> None:
     try:
         cid = "g-nokey"
         await _send_msg(ws, cid, "hi")
-        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        # Skip spend_update noise (test_gate's _recv_type idiom): the PREVIOUS
+        # check's turn broadcasts its spend_update asynchronously, and if it
+        # lands mid-snapshot on this fresh connection it ends _connect_auth's
+        # drain early, leaving the snapshot's own spend_update queued here.
+        # Reading the first frame blind made this a timing-dependent flake.
+        while True:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            if frame["type"] != "spend_update":
+                break
         assert frame["type"] == "error", frame
         assert frame["code"] == "no_api_key", frame
         assert frame["recoverable"] is True, frame

@@ -8,10 +8,12 @@ Test seam: if HALO_KEYRING_DIR env var is set, bypass keyring and store the key 
 a plain file under that directory (test-only, no real app uses this).
 """
 
+import logging
 import os
 import keyring
 import keyring.errors
 
+logger = logging.getLogger("brain.secrets")
 
 SERVICE = "halo"
 KEY_NAME = "openrouter"
@@ -40,8 +42,25 @@ def get_key() -> str | None:
     try:
         return keyring.get_password(SERVICE, KEY_NAME)
     except Exception:
-        # Swallow keyring backend exceptions (rare: disabled Credential Manager, etc.)
+        # A backend failure is NOT the same as "no key stored" -- see
+        # keystore_available(). Callers that only need the value still get
+        # None, but key_status() reports the difference so the UI can't tell
+        # the user "not set" when the truth is "I couldn't ask".
+        logger.exception("keyring read failed (backend unavailable?)")
         return None
+
+
+def keystore_available() -> bool:
+    """Can we actually reach the keystore? Distinguishes 'no key stored' from
+    'the vault itself is broken' -- conflating those is what makes a user go
+    buy a replacement key they didn't need."""
+    if os.environ.get("HALO_KEYRING_DIR"):
+        return True
+    try:
+        keyring.get_password(SERVICE, KEY_NAME)
+        return True
+    except Exception:
+        return False
 
 
 def set_key(value: str) -> None:
@@ -96,10 +115,15 @@ def delete_key() -> None:
 
 
 def key_status() -> str:
-    """Return the status of the stored key.
+    """Status only -- the key value itself never leaves this module (D8).
 
-    Returns:
-        "set" if a key exists, "missing" if not.
-        The actual key value is never included in the status.
+    "set"     a key is stored
+    "missing" no key is stored (and the keystore answered, so this is the truth)
+    "invalid" the keystore is unreachable, so we genuinely don't know
+
+    The third case used to be reported as "missing", which reads as "your key
+    is gone" and sends people off to rotate a key that was never lost.
     """
-    return "set" if get_key() else "missing"
+    if get_key():
+        return "set"
+    return "missing" if keystore_available() else "invalid"

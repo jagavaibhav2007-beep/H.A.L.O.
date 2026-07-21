@@ -25,7 +25,10 @@ const MOCK_MODELS = ["Chat: halo-mock-1", "Vision: halo-mock-vision-1"];
 const KEY_STATUS_COPY: Record<string, string> = {
   set: "connected",
   missing: "not set",
-  invalid: "key rejected — check it and try again",
+  // "invalid" covers both a rejected key and an unreachable keystore. Never
+  // word it as "not set": a user who reads "not set" for a key that IS stored
+  // goes and rotates a key they never lost (see mem/Bugs.md).
+  invalid: "couldn't verify — the key was rejected, or Windows Credential Manager is unavailable",
   unverified: "saved — will check on first use",
 };
 
@@ -53,6 +56,15 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
     setPending(true);
     sendSettingsUpdate("openrouter_key", keyInput);
     setKeyInput(""); // never lingers in the DOM once sent
+  }
+
+  // Explicit removal, so "replace my key" doesn't mean "guess whether the old
+  // one is still in there". Confirmed first — it's not recoverable from here.
+  function removeKey() {
+    if (pending) return;
+    if (!window.confirm("Remove the stored OpenRouter key? You'll need to paste it again to use Halo.")) return;
+    setPending(true);
+    sendSettingsUpdate("openrouter_key", "");
   }
 
   useEffect(() => {
@@ -158,9 +170,19 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
             </Button>
           </div>
           <div className="settings-row">
-            <span className="settings-value">{pending ? "checking…" : (keyStatus ? KEY_STATUS_COPY[keyStatus] : KEY_STATUS_COPY.missing)}</span>
+            <span className="settings-value" data-key-status={keyStatus ?? "missing"}>
+              {pending ? "checking…" : (keyStatus ? KEY_STATUS_COPY[keyStatus] : KEY_STATUS_COPY.missing)}
+            </span>
+            {keyStatus === "set" && (
+              <Button variant="ghost" onClick={removeKey} disabled={pending}>
+                Remove key
+              </Button>
+            )}
           </div>
-          <p className="settings-note">Only OpenRouter is used — one key covers every model.</p>
+          <p className="settings-note">
+            Only OpenRouter is used — one key covers every model. It's stored in Windows Credential
+            Manager, never on disk in this app and never sent anywhere but OpenRouter.
+          </p>
         </section>
 
         <details className="settings-advanced">

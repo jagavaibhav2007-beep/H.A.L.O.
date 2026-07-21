@@ -32,6 +32,38 @@ logger = logging.getLogger("brain.graph")
 
 _REDIRECT_NOTE = "(the user stopped your previous answer midway; adjust course) "
 
+_MAX_TOOL_ROUNDS = 8
+
+# Sent at stream time (never checkpointed), so it can change without
+# rewriting history. Without this the model has no idea the app gates its
+# actions, so it "helpfully" asks for permission in prose and never calls the
+# tool -- which silently bypasses the entire approval UI. Observed live: asked
+# to delete a file, it replied "please confirm" and raised no approval card.
+_SYSTEM_MSG = {
+    "role": "system",
+    "content": (
+        "You are Halo, a desktop companion running locally on the user's Windows machine. "
+        "You have real tools that act on their real files.\n\n"
+        "Use your tools instead of describing what you would do. When a request needs a file "
+        "read, listed, searched, created, edited, moved, organized, or deleted, call the "
+        "matching tool.\n\n"
+        "Do NOT ask the user for permission in your reply. Halo shows its own approval card "
+        "for anything risky or destructive, and the user approves or denies it there. If an "
+        "action needs consent, calling the tool IS how you ask -- writing 'please confirm' "
+        "instead just stalls, because it never reaches the approval step. A denial comes back "
+        "to you as a tool result; accept it and move on.\n\n"
+        "Never claim you lack permission or access before actually trying the tool. If a tool "
+        "returns an error, report what it actually said."
+    ),
+}
+# ponytail: two layers, on purpose. _MAX_TOOL_ROUNDS is the SOFT cap -- at it we
+# still answer, tools-free. _RECURSION_LIMIT is the hard net LangGraph enforces
+# over super-steps (route + respond*(rounds+1) + gate*total_calls), which the
+# soft cap alone can't bound because one round may return several calls. Sized
+# well clear of 8 single-call rounds (~18 steps); hitting it means something
+# pathological and surfaces as a normal turn_failed error.
+_RECURSION_LIMIT = 60
+
 
 class State(TypedDict, total=False):
     messages: Annotated[list[dict], add]  # role/content dicts; reducer appends
@@ -43,6 +75,14 @@ class State(TypedDict, total=False):
     pending_tool_intent: dict | None
     pending_tool_result: dict | None
     task_id: str | None
+    # Step 10 tool-calling loop. `pending_tool_calls` is a QUEUE: the gate node
+    # pops exactly one per visit, so a Tier-3 suspension partway through a
+    # multi-call round re-runs only the call it suspended on (an interrupting
+    # node commits no state, so anything already executed is never repeated).
+    # `tool_rounds` counts respond->gate hops: 0 means the legacy CALL_TOOL
+    # sentinel drove this (single-shot, gate -> END), >0 means the model did.
+    pending_tool_calls: list[dict] | None
+    tool_rounds: int
     # Step 9 history summarization. `messages` has an append-only `add`
     # reducer, so an old span can't be replaced in place; instead the span
     # messages[:dropped_before] is represented by `summary` and simply not
@@ -61,6 +101,12 @@ _session_usd = 0.0  # per-process accumulator; resets on Brain restart by design
 _turn_ctx: dict[str, dict] = {}
 
 
+def _after_gate(state: State) -> str:
+    if state.get("pending_tool_calls"):
+        return "gate"  # more calls in this round; drain them one at a time
+    return "respond" if state.get("tool_rounds") else END
+
+
 def _checkpoint_path() -> Path:
     override = os.environ.get("HALO_CHECKPOINT_DB")
     if override:
@@ -71,32 +117,51 @@ def _checkpoint_path() -> Path:
 
 def _route_node(state: State, config) -> dict:
     text = state["messages"][-1]["content"]
-    # ponytail: Step-5 test seam -- under the LLM stub, a "CALL_TOOL <name>
-    # <json-args>" sentinel becomes a deterministic tool intent. Step 7
-    # replaces this with real LLM tool-calling; real mode never tool-calls yet.
+    # ponytail: Step-5 test seam kept alive -- under the LLM stub a message
+    # STARTING with "CALL_TOOL <name> <json-args>" runs that tool single-shot
+    # (route -> gate -> END, tool_rounds stays 0), which is what the gate/undo
+    # suites assert. The same sentinel anywhere ELSE in the text falls through
+    # to respond, where the stub emits it as a real model tool call and the
+    # full loop runs. Real mode never takes this branch.
     if os.environ.get("HALO_LLM_STUB") and text.startswith("CALL_TOOL "):
         import json as _json
 
         name, _, rest = text[len("CALL_TOOL "):].partition(" ")
         args = _json.loads(rest) if rest.strip() else {}
-        return {"pending_tool_intent": {"tool": name, "args": args}}
+        return {"pending_tool_calls": [{"id": "sentinel", "name": name, "args": args, "error": None}]}
     return {"model": llm.route(text, state.get("escalated", False))}
 
 
 async def _gate_node(state: State, config) -> dict:
-    """Every tool call goes through gate.gated_execute -- Tier 3 raises
-    GraphInterrupt from interrupt(), which MUST propagate to the checkpointer
-    (no try/except here; see gate.py)."""
+    """Runs the HEAD of the pending-tool-call queue through gate.gated_execute
+    -- Tier 3 raises GraphInterrupt from interrupt(), which MUST propagate to
+    the checkpointer (no try/except here; see gate.py). One call per visit: the
+    conditional edge sends us straight back here while the queue is non-empty."""
     cid = config["configurable"]["thread_id"]
     ctx = _turn_ctx[cid]
-    intent = state["pending_tool_intent"]
-    return await gate.gated_execute(
-        intent["tool"],
-        intent["args"],
-        conversation_id=cid,
-        task_id=state.get("task_id"),
-        broadcast=ctx["broadcast"],
-    )
+    queue = list(state.get("pending_tool_calls") or [])
+    call = queue.pop(0)
+    if call.get("error"):
+        # Malformed arguments from the model: report it, never guess. The
+        # result goes back as a tool message so it can correct itself.
+        update: dict = {"pending_tool_result": {"tool": call["name"], "status": "error: bad arguments"}}
+        content = f"I couldn't run {call['name']} — {call['error']}"
+    else:
+        update = await gate.gated_execute(
+            call["name"],
+            call["args"],
+            conversation_id=cid,
+            task_id=state.get("task_id"),
+            broadcast=ctx["broadcast"],
+        )
+        content = (update.get("messages") or [{}])[0].get("content") or ""
+    if state.get("tool_rounds"):
+        # Model-driven: the result must come back as a `tool` message keyed to
+        # the call id, or the provider rejects the assistant tool_calls message
+        # it answers. The legacy sentinel path keeps gate's plain assistant text.
+        update["messages"] = [{"role": "tool", "tool_call_id": call["id"], "content": content}]
+    update["pending_tool_calls"] = queue or None
+    return update
 
 
 _KEEP_VERBATIM = 6  # most recent messages never summarized
@@ -131,6 +196,11 @@ async def _maybe_summarize(state: State, ctx: dict) -> dict:
         return {}
     old_cut = state.get("dropped_before") or 0
     new_cut = len(state["messages"]) - _KEEP_VERBATIM
+    # Never cut between an assistant tool_calls message and its `tool` replies
+    # -- an orphan tool message is a hard provider error. Walk the cut back
+    # onto the assistant that owns them.
+    while new_cut > old_cut and state["messages"][new_cut].get("role") == "tool":
+        new_cut -= 1
     if new_cut <= old_cut:
         return {}  # nothing older than the verbatim tail; a single huge turn
     span = state["messages"][old_cut:new_cut]
@@ -171,11 +241,23 @@ async def _respond_node(state: State, config) -> dict:
     update: dict = await _maybe_summarize(state, ctx)
     history = _prompt_messages({**state, **update})
     parts: list[str] = []
+    calls: list[dict] = []
+    rounds = state.get("tool_rounds") or 0
+    # ponytail: soft cap. At the cap we make one more call with NO tools, so the
+    # user gets a real answer grounded in every tool result so far instead of a
+    # truncated turn. 8 is a guess at "a model that isn't converging"; raise it
+    # if real multi-step tasks legitimately need more.
+    tools = gate.tool_specs() if rounds < _MAX_TOOL_ROUNDS else None
     try:
         # Retrieved beliefs prepend at stream time only -- never into graph
         # state, so they're recomputed per turn (no-double-injection rule).
         async for delta in llm.stream_chat(
-            ctx.get("memory", []) + history, state["model"], ctx["api_key"], ctx["usage"]
+            [_SYSTEM_MSG] + ctx.get("memory", []) + history,
+            state["model"],
+            ctx["api_key"],
+            ctx["usage"],
+            tools=tools,
+            tool_calls_out=calls,
         ):
             if ctx["stop"].is_set():
                 update["redirected"] = True
@@ -193,7 +275,20 @@ async def _respond_node(state: State, config) -> dict:
             # ponytail: any mid-LIGHT-stream exception escalates the next turn
             # to HEAVY -- a quality/parse-failure heuristic can refine this later.
             update["escalated"] = True
-    if parts:
+    if calls and not ctx["stop"].is_set():
+        # The assistant message MUST carry its tool_calls verbatim -- it's what
+        # the following `tool` messages answer.
+        update["messages"] = [{
+            "role": "assistant",
+            "content": "".join(parts),
+            "tool_calls": [{"id": c["id"], "type": c["type"], "function": c["function"]} for c in calls],
+        }]
+        update["pending_tool_calls"] = [
+            {"id": c["id"], "name": c["function"]["name"], "args": c["args"], "error": c["error"]}
+            for c in calls
+        ]
+        update["tool_rounds"] = rounds + 1
+    elif parts:
         # ponytail: deltas joined verbatim; the stub yields words without
         # spaces so stub history reads squashed -- cosmetic, tests account for it.
         update["messages"] = [{"role": "assistant", "content": "".join(parts)}]
@@ -221,11 +316,23 @@ async def _ensure_graph():
     builder.add_edge(START, "route")
     builder.add_conditional_edges(
         "route",
-        lambda s: "gate" if s.get("pending_tool_intent") else "respond",
+        lambda s: "gate" if s.get("pending_tool_calls") else "respond",
         {"gate": "gate", "respond": "respond"},
     )
-    builder.add_edge("respond", END)
-    builder.add_edge("gate", END)
+    # START -> route -> respond <=> gate -> END. respond loops out to gate while
+    # it keeps asking for tools; gate drains its queue one call per visit and
+    # hands control back for the next round (or ends, on the legacy sentinel
+    # path where nothing asked for a follow-up answer).
+    builder.add_conditional_edges(
+        "respond",
+        lambda s: "gate" if s.get("pending_tool_calls") else END,
+        {"gate": "gate", END: END},
+    )
+    builder.add_conditional_edges(
+        "gate",
+        _after_gate,
+        {"gate": "gate", "respond": "respond", END: END},
+    )
     _graph = builder.compile(checkpointer=AsyncSqliteSaver(_saver_conn))
     return _graph
 
@@ -365,7 +472,7 @@ async def run_turn(msg: dict, broadcast) -> None:
             )
             return
 
-        config = {"configurable": {"thread_id": cid}}
+        config = {"configurable": {"thread_id": cid}, "recursion_limit": _RECURSION_LIMIT}
         prior = await graph.aget_state(config)
         content = msg["text"]
         if prior.values.get("redirected"):
@@ -394,6 +501,8 @@ async def run_turn(msg: dict, broadcast) -> None:
                     "redirected": False,
                     "pending_tool_intent": None,
                     "pending_tool_result": None,
+                    "pending_tool_calls": None,
+                    "tool_rounds": 0,  # per-turn: the cap is not cumulative
                 },
                 config,
             )
@@ -427,6 +536,7 @@ async def resume_turn(approval_id: str, decision: str, edited_args: dict | None,
     handled (first response wins). Re-establishes _turn_ctx before ainvoke --
     run_turn popped it on suspend, and the resumed run may stream tokens and
     emit the confirming activity."""
+    global _session_usd
     entry = gate.pop_pending(approval_id)
     if entry is None:
         return False
@@ -441,10 +551,27 @@ async def resume_turn(approval_id: str, decision: str, edited_args: dict | None,
         ctx = {"broadcast": broadcast, "stop": asyncio.Event(), "api_key": api_key or "", "usage": {}}
         _turn_ctx[cid] = ctx
         try:
-            result = await graph.ainvoke(Command(resume=resume_val), {"configurable": {"thread_id": cid}})
+            result = await graph.ainvoke(
+                Command(resume=resume_val),
+                {"configurable": {"thread_id": cid}, "recursion_limit": _RECURSION_LIMIT},
+            )
         finally:
             _turn_ctx.pop(cid, None)
-        await _finish_turn(result, cid, broadcast)
+        if await _finish_turn(result, cid, broadcast):
+            return True  # re-suspended (an edit raised the tier, or a later
+            # round hit another Tier 3): nothing to bill or extract yet.
+        # Since the tool-calling loop landed, a resumed invoke is no longer just
+        # `gate -> END` -- it continues `gate -> respond -> ...`, which streams a
+        # real (billable) final answer. So the resumed half of the turn owes the
+        # same tail run_turn's does, or every approved-tool turn would silently
+        # undercount spend and skip memory extraction.
+        if api_key and not result.get("error"):
+            asyncio.create_task(memory.extract(cid, result.get("messages") or [], api_key, broadcast))
+        cost = ctx["usage"].get("cost")
+        if cost is not None:
+            _session_usd += cost
+            month = await asyncio.to_thread(_spend_sync, cost)
+            await broadcast("spend_update", {"session_usd": _session_usd, "month_usd": month})
     except Exception as exc:  # noqa: BLE001 - rule 2: never a silent drop
         logger.exception("resume failed for approval_id=%s", approval_id)
         await broadcast(
