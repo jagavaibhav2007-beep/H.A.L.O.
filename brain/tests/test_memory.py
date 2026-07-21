@@ -77,6 +77,9 @@ async def check_extraction_e2e(port: int, token: str) -> None:
     assert ack["type"] == "hello_ack", ack
     settings = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
     assert settings["type"] == "settings_state", settings
+    # Step 9: the rest of the connect snapshot, ending in its spend_update.
+    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
+        pass
     try:
         # Trivial turn first (also proves retrieval on an empty store is a no-op).
         await ws.send(json.dumps(_frame("user_msg", text="hi", conversation_id="c1", source="ui")))

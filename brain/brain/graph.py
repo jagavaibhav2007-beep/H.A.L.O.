@@ -43,6 +43,14 @@ class State(TypedDict, total=False):
     pending_tool_intent: dict | None
     pending_tool_result: dict | None
     task_id: str | None
+    # Step 9 history summarization. `messages` has an append-only `add`
+    # reducer, so an old span can't be replaced in place; instead the span
+    # messages[:dropped_before] is represented by `summary` and simply not
+    # sent to the model (the chat doc's no-double-injection rule).
+    # ponytail: RemoveMessage-style surgery would shrink the checkpoint too;
+    # this keeps the full transcript on disk and only bounds the prompt.
+    summary: str | None
+    dropped_before: int
 
 
 _graph = None
@@ -91,16 +99,83 @@ async def _gate_node(state: State, config) -> dict:
     )
 
 
+_KEEP_VERBATIM = 6  # most recent messages never summarized
+_SUMMARY_SYSTEM = (
+    "Condense this conversation excerpt into a compact third-person summary. "
+    "Keep facts, decisions, names, and open threads; drop pleasantries. No preamble."
+)
+
+
+def _prompt_messages(state: State) -> list[dict]:
+    """The bounded history actually sent to the model: the running summary
+    stands in for messages[:dropped_before]."""
+    live = state["messages"][state.get("dropped_before") or 0:]
+    summary = state.get("summary")
+    if not summary:
+        return live
+    return [{"role": "system", "content": f"Summary of earlier conversation:\n{summary}"}, *live]
+
+
+def _tokens(messages: list[dict]) -> int:
+    # ponytail: chars//4 estimate, no tokenizer dependency -- swap in the real
+    # count if the threshold ever needs to be tight rather than a safety net.
+    return sum(len(m.get("content") or "") for m in messages) // 4
+
+
+async def _maybe_summarize(state: State, ctx: dict) -> dict:
+    """Past the token budget, distill the oldest not-yet-summarized span into
+    the running summary and advance `dropped_before`. Returns a state update,
+    or {} to keep full history. Failure is never data loss: on any error we
+    return {} and the same span is retried next turn."""
+    if _tokens(_prompt_messages(state)) <= await asyncio.to_thread(_history_budget):
+        return {}
+    old_cut = state.get("dropped_before") or 0
+    new_cut = len(state["messages"]) - _KEEP_VERBATIM
+    if new_cut <= old_cut:
+        return {}  # nothing older than the verbatim tail; a single huge turn
+    span = state["messages"][old_cut:new_cut]
+    prior = state.get("summary")
+    excerpt = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in span)
+    if prior:
+        # Fold the previous summary back in -- it stands for everything before
+        # old_cut, and overwriting without it would silently drop that history.
+        excerpt = f"Summary so far:\n{prior}\n\n{excerpt}"
+    try:
+        parts: list[str] = []
+        async for delta in llm.stream_chat(
+            [{"role": "system", "content": _SUMMARY_SYSTEM}, {"role": "user", "content": excerpt}],
+            llm.LIGHT,
+            ctx["api_key"],
+        ):
+            parts.append(delta)
+        summary = "".join(parts).strip()
+    except GraphInterrupt:
+        raise  # C2: never swallow the suspension signal (guard, not a live path)
+    except Exception:  # noqa: BLE001 - keep full history this turn, retry next
+        logger.exception("history summarization failed; keeping full history")
+        return {}
+    if not summary:
+        return {}
+    logger.info("summarized %d messages; history now %d messages + summary", len(span), _KEEP_VERBATIM)
+    return {"summary": summary, "dropped_before": new_cut}
+
+
+def _history_budget() -> int:
+    store.connect()
+    return int(store.get_setting("history_token_budget", 6000))
+
+
 async def _respond_node(state: State, config) -> dict:
     cid = config["configurable"]["thread_id"]
     ctx = _turn_ctx[cid]
-    update: dict = {}
+    update: dict = await _maybe_summarize(state, ctx)
+    history = _prompt_messages({**state, **update})
     parts: list[str] = []
     try:
         # Retrieved beliefs prepend at stream time only -- never into graph
         # state, so they're recomputed per turn (no-double-injection rule).
         async for delta in llm.stream_chat(
-            ctx.get("memory", []) + state["messages"], state["model"], ctx["api_key"], ctx["usage"]
+            ctx.get("memory", []) + history, state["model"], ctx["api_key"], ctx["usage"]
         ):
             if ctx["stop"].is_set():
                 update["redirected"] = True
@@ -197,6 +272,77 @@ async def _finish_turn(result: dict, cid: str, broadcast) -> bool:
     else:
         await broadcast("done", {"conversation_id": cid})
     return False
+
+
+async def rehydrate_pending() -> None:
+    """Rebuild gate's approval_id -> conversation_id map from the checkpoints
+    after a Brain restart. Without this a Tier-3 approval that was open when
+    the process died is either invisible (task stuck forever) or shown but
+    unresumable -- both dishonest.
+
+    Source of truth is the checkpoint itself, so nothing can drift out of sync
+    with it. Idempotent: safe to call on every connect (two windows do), and a
+    live entry is never clobbered."""
+    graph = await _ensure_graph()
+    saver = graph.checkpointer
+    await saver.setup()
+    # ponytail: one row per suspended thread via a direct DISTINCT query --
+    # alist(None) would deserialize every checkpoint in the file just to read
+    # thread ids. Personal-scale table; add an index if it ever gets big.
+    async with saver.lock, saver.conn.execute("SELECT DISTINCT thread_id FROM checkpoints") as cur:
+        thread_ids = [row[0] async for row in cur]
+    for cid in thread_ids:
+        snap = await graph.aget_state({"configurable": {"thread_id": cid}})
+        for intr in snap.interrupts:
+            payload = intr.value
+            if not isinstance(payload, dict) or "approval_id" not in payload:
+                continue
+            if gate.peek_conversation(payload["approval_id"]) is not None:
+                continue  # already registered (live, or a prior rehydrate)
+            logger.info("rehydrated pending approval %s for %s", payload["approval_id"], cid)
+            gate.register_pending(payload, cid)
+
+
+_SNAPSHOT_TASK_STATES = ["running", "paused", "waiting_approval"]
+
+
+def _task_frame(row: dict) -> dict:
+    frame = {"task_id": row["task_id"], "state": row["state"], "lane": row["lane"]}
+    for key in ("title", "step", "steps_total", "step_label", "reason"):
+        if row.get(key) is not None:
+            frame[key] = row[key]
+    return frame
+
+
+async def snapshot(send) -> None:
+    """Real snapshot-on-connect (D6): everything the reconnecting UI needs to
+    render truthfully, to that ONE client -- never broadcast, or a second
+    window's reconnect would spam the first. Id-keyed frames and one frame per
+    entity, so reconnecting converges instead of duplicating.
+
+    `spend_update` is always last -- the same "snapshot done" sentinel the mock
+    established, which tests drain against."""
+    await send("settings_state", {"key": "openrouter_key", "status": secrets_store.key_status()})
+
+    store.connect()
+    tasks = await asyncio.to_thread(store.list_tasks, _SNAPSHOT_TASK_STATES)
+    for row in tasks:
+        await send("task_state", _task_frame(row))
+
+    try:
+        await rehydrate_pending()
+    except Exception:  # noqa: BLE001 - a broken rehydrate must not block the
+        # rest of the snapshot; the UI still gets tasks/beliefs/activity.
+        logger.exception("pending-approval rehydration failed")
+    for payload in gate.pending_payloads():
+        await send("approval_request", payload)
+
+    await gate.push_activity_backlog(send)
+    await memory.push_beliefs(send)
+    await send(
+        "spend_update",
+        {"session_usd": _session_usd, "month_usd": await asyncio.to_thread(store.month_spend)},
+    )
 
 
 async def run_turn(msg: dict, broadcast) -> None:

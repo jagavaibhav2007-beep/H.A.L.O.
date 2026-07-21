@@ -100,10 +100,9 @@ async def _connect_auth(port: int, token: str, drain_backlog: bool = True):
     settings = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
     assert settings["type"] == "settings_state", settings
     if drain_backlog:
-        store.connect()
-        for _ in range(len(store.recent_actions(100))):
-            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
-            assert frame["type"] == "activity", frame
+        # Step 9: drain the rest of the snapshot via its `spend_update` sentinel.
+        while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
+            pass
     return ws
 
 

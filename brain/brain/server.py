@@ -275,26 +275,15 @@ async def _connection_handler(
             # hello_ack. Voice never gets it -- it's outside Voice's routing subset.
             await mock_engine.push_snapshot(send_fn)
         elif not mock and role == "ui":
-            # Real-mode mirror of the mock snapshot, scoped to just the one
-            # settings key that exists so far: push the stored key's current
-            # status (no network call here -- validation only happens on an
-            # actual settings_update, not on every connect).
+            # Step 9: real mirror of the mock snapshot -- settings, live
+            # tasks, rehydrated pending approvals, activity backlog, beliefs,
+            # spend. Sent to this client only (see graph.snapshot).
+            # graph transitively imports langgraph (seconds on first load) --
+            # import off-loop so this connect never freezes other clients.
             import importlib
 
-            from brain import secrets_store
-
-            await send_fn("settings_state", {"key": "openrouter_key", "status": secrets_store.key_status()})
-            # Step 6: hydrate the feed from the action log (the DB is the full
-            # log; the UI ring buffer is just a view). Unconsumed undo tokens
-            # ride along so the Undo button re-arms after reconnect.
-            # gate transitively imports langgraph (seconds on first load) --
-            # import off-loop so this connect never freezes other clients.
-            gate = await asyncio.to_thread(importlib.import_module, "brain.gate")
-            await gate.push_activity_backlog(send_fn)
-            # Step 8: hydrate the memory panel with real beliefs.
-            from brain import memory
-
-            await memory.push_beliefs(send_fn)
+            graph_mod = await asyncio.to_thread(importlib.import_module, "brain.graph")
+            await graph_mod.snapshot(send_fn)
 
         async for raw in ws:
             try:

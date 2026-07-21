@@ -39,9 +39,9 @@ TOOLS: dict[str, dict] = {}
 
 # Pending Tier-3 approvals: approval_id -> {conversation_id, task_id, payload}
 # plus the reverse map for interrupt's implicit-deny rule.
-# ponytail: in-memory only -- restart rehydration of this map is Step 9 (the
-# LangGraph checkpoint itself already survives restart; only the routing map
-# needs rebuilding there).
+# ponytail: in-memory only -- rebuilt after a restart from the LangGraph
+# checkpoints themselves (graph.rehydrate_pending, Step 9), which are the one
+# source of truth; nothing about this map is separately persisted.
 _pending: dict[str, dict] = {}
 _by_conversation: dict[str, str] = {}
 
@@ -112,6 +112,13 @@ def register_pending(payload: dict, conversation_id: str) -> None:
     aid = payload["approval_id"]
     _pending[aid] = {"conversation_id": conversation_id, "task_id": payload["task_id"], "payload": payload}
     _by_conversation[conversation_id] = aid
+
+
+def pending_payloads() -> list[dict]:
+    """Every still-open approval's card payload -- what snapshot-on-connect
+    re-emits. Read from the live map (not from a rehydration delta), so a
+    second window connecting to an already-rehydrated Brain still sees it."""
+    return [entry["payload"] for entry in _pending.values()]
 
 
 def peek_conversation(approval_id: str) -> str | None:

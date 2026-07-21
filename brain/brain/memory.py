@@ -77,8 +77,14 @@ async def _llm_candidates(messages: list[dict], api_key: str) -> list[dict]:
     convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in messages[-10:])
     prompt = [{"role": "system", "content": _EXTRACT_SYSTEM}, {"role": "user", "content": convo}]
     parts: list[str] = []
-    async for delta in llm.stream_chat(prompt, llm.LIGHT, api_key):
+    usage: dict = {}
+    async for delta in llm.stream_chat(prompt, llm.LIGHT, api_key, usage):
         parts.append(delta)
+    if usage.get("cost"):
+        # ponytail: month rollup only -- extraction runs fire-and-forget after
+        # the turn closed, so there's no broadcast to ride and the session
+        # counter belongs to graph. The next turn's spend_update includes it.
+        await asyncio.to_thread(store.add_spend, usage["cost"])
     text = "".join(parts)
     start, end = text.find("["), text.rfind("]")
     if start < 0 or end <= start:
