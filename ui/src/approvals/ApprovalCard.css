@@ -39,6 +39,19 @@
   align-items: center;
   gap: 8px;
 }
+/* Shown only when the card belongs to a conversation other than the one on
+   screen — approving work you can't see is exactly the wrong default. */
+.approval-elsewhere {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--tier-3);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  cursor: pointer;
+}
 .approval-tool {
   font-family: var(--font-mono);
   font-size: var(--text-xs);

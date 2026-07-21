@@ -272,4 +272,35 @@ function token(text: string, conversation_id: string): TokenMsg {
   assert(state.settings.openrouter_key === "set", "settings: set after a confirmed save");
 }
 
+// ---- Scenario 11: two conversations project independently ----
+// The whole basis of the multi-chat tab strip: one thread's stream must never
+// bleed into another's. The Brain keys LangGraph threads by conversation_id;
+// this asserts the UI projection honours the same boundary.
+{
+  let state: HaloState = initialState;
+  state = appendUserTurn(state, "cA", "how do I deploy?", "uA");
+  state = appendUserTurn(state, "cB", "unrelated question", "uB");
+
+  state = applyFrame(state, token("deploy ", "cA"));
+  state = applyFrame(state, token("hello from B", "cB"));
+  state = applyFrame(state, token("with ./dev.ps1", "cA"));
+
+  const a = state.conversations["cA"];
+  const b = state.conversations["cB"];
+  assert(a.turns.length === 2 && b.turns.length === 2, "multi: each conversation has its own turns");
+  assert(assistantTurn(a.turns[1], "multi: A streamed").text === "deploy with ./dev.ps1", "multi: A's tokens concatenate without B's");
+  assert(assistantTurn(b.turns[1], "multi: B streamed").text === "hello from B", "multi: B is untouched by A's tokens");
+
+  // done/error land only in the addressed conversation.
+  state = applyFrame(state, { type: "done", ...envelope(), conversation_id: "cA", task_id: "tA" });
+  assert(assistantTurn(state.conversations["cA"].turns[1], "multi: A closed").status === "done", "multi: done closes only A's turn");
+  assert(assistantTurn(state.conversations["cB"].turns[1], "multi: B open").status === "streaming", "multi: B stays streaming");
+
+  state = applyFrame(state, {
+    type: "error", ...envelope(), code: "turn_failed", message: "nope", recoverable: true, conversation_id: "cB",
+  });
+  assert(state.conversations["cB"].needsInputRestore === true, "multi: error flags input restore on B");
+  assert(state.conversations["cA"].needsInputRestore === false, "multi: A's input is not disturbed by B's error");
+}
+
 console.log("[reducer.selfcheck] OK");

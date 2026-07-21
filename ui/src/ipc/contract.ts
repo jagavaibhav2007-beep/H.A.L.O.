@@ -112,6 +112,13 @@ export interface ApprovalRequestMsg extends IpcEnvelope {
   task_id: string;
   summary?: string;
   destructive?: boolean;
+  // Which conversation is suspended on this card. Optional (older frames and
+  // some mock paths omit it) but load-bearing once more than one conversation
+  // can be open: "Stop this task" sends `interrupt`, which is keyed by
+  // conversation_id — without this the UI would interrupt whichever thread the
+  // user happens to be VIEWING, not the one that asked. Approve/deny don't
+  // need it (the Brain resolves those by approval_id).
+  conversation_id?: string;
 }
 
 export interface DoneMsg extends IpcEnvelope {
@@ -313,22 +320,29 @@ export function parseIpcMessage(raw: unknown): IpcMessage {
       throw new Error(`ipc: "${type}" field "${field}" has an invalid value`);
     }
   }
-  if (type === "hello" && "role" in obj && !["ui", "voice"].includes(obj.role as string)) {
+  // NOTE: these optional-field checks test `obj.field !== undefined`, not
+  // `"field" in obj` — a sender built via object-literal spread of an unset
+  // function param (e.g. `{ ..., belief_id, op, text }` with `text`
+  // undefined) leaves `text` as an *own property* equal to undefined, so
+  // `"text" in obj` is true even though nothing was actually supplied. That
+  // false positive rejected every real delete/restore memory_edit outbound
+  // (see mem/Bugs.md, "Delete gets stuck on Deleting... forever").
+  if (type === "hello" && obj.role !== undefined && !["ui", "voice"].includes(obj.role as string)) {
     throw new Error('ipc: "hello" field "role" has an invalid value');
   }
-  if (type === "memory_edit" && "text" in obj && typeof obj.text !== "string") {
+  if (type === "memory_edit" && obj.text !== undefined && typeof obj.text !== "string") {
     throw new Error('ipc: "memory_edit" field "text" must be a string');
   }
   if (type === "lane_pin" && ![1, 2, 3].includes(obj.lane as number)) {
     throw new Error('ipc: "lane_pin" field "lane" must be 1, 2, or 3');
   }
-  if (type === "task_op" && "task_id" in obj && typeof obj.task_id !== "string") {
+  if (type === "task_op" && obj.task_id !== undefined && typeof obj.task_id !== "string") {
     throw new Error('ipc: "task_op" field "task_id" must be a string');
   }
   if (type === "error" && typeof obj.recoverable !== "boolean") {
     throw new Error('ipc: "error" field "recoverable" must be a boolean');
   }
-  if (type === "error" && "conversation_id" in obj && typeof obj.conversation_id !== "string") {
+  if (type === "error" && obj.conversation_id !== undefined && typeof obj.conversation_id !== "string") {
     throw new Error('ipc: "error" field "conversation_id" must be a string');
   }
   return obj as unknown as IpcMessage;

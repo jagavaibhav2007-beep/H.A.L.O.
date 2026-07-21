@@ -26,6 +26,8 @@ import "./ApprovalCard.css";
 const HOLD_MS = 700;
 
 interface OverlayProps {
+  /** The conversation on screen — used ONLY as a fallback when a card carries
+   * no conversation_id of its own (older frames). */
   conversationId: string;
   sendApprovalResponse: (reply_to: string, decision: ApprovalResponseMsg["decision"], edited_args?: unknown) => void;
   sendInterrupt: (conversationId: string) => void;
@@ -60,6 +62,19 @@ interface CardProps {
 
 function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInterrupt }: CardProps) {
   const { approval_id, tool, args_redacted, summary, destructive } = approval;
+  const setActiveConversation = useHaloStore((s) => s.setActiveConversation);
+  // Interrupt is keyed by conversation. With several threads open, a card
+  // raised by a background thread must stop THAT thread, not whichever one is
+  // on screen — so route by the card's own conversation_id and fall back to
+  // the visible one only when the frame predates that field.
+  const targetConversation = approval.conversation_id ?? conversationId;
+  const background = Boolean(approval.conversation_id) && approval.conversation_id !== conversationId;
+
+  // Deciding on a background thread's card means deciding about work you can't
+  // see — switch to it so the context is on screen.
+  const reveal = useCallback(() => {
+    if (background) setActiveConversation(targetConversation);
+  }, [background, setActiveConversation, targetConversation]);
   // Once the user commits a decision the buttons lock and show a spinner; the
   // card stays until the store removes it on the confirming frame (rule 3).
   const [pending, setPending] = useState<"idle" | "approving" | "denying" | "editing-send" | "stopping">("idle");
@@ -71,17 +86,19 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
   const approve = useCallback(
     (edited_args?: unknown) => {
       if (busy) return;
+      reveal();
       setPending(edited_args === undefined ? "approving" : "editing-send");
       sendApprovalResponse(approval_id, edited_args === undefined ? "approve" : "edit", edited_args);
     },
-    [busy, approval_id, sendApprovalResponse],
+    [busy, reveal, approval_id, sendApprovalResponse],
   );
 
   const deny = useCallback(() => {
     if (busy) return;
+    reveal();
     setPending("denying");
     sendApprovalResponse(approval_id, "deny");
-  }, [busy, approval_id, sendApprovalResponse]);
+  }, [busy, reveal, approval_id, sendApprovalResponse]);
 
   const saveEdit = useCallback(() => {
     approve(parseArgs(argsText));
@@ -89,9 +106,10 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
 
   const stopTask = useCallback(() => {
     if (busy) return;
+    reveal();
     setPending("stopping");
-    sendInterrupt(conversationId); // implicit-deny + pause; distinct from Deny
-  }, [busy, conversationId, sendInterrupt]);
+    sendInterrupt(targetConversation); // implicit-deny + pause; distinct from Deny
+  }, [busy, reveal, targetConversation, sendInterrupt]);
 
   return (
     <GlassPanel
@@ -108,6 +126,11 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
           tone={destructive ? "destructive" : "tier3"}
         />
         <code className="approval-tool">{tool}</code>
+        {background && (
+          <button type="button" className="approval-elsewhere" onClick={reveal}>
+            from another conversation — open it
+          </button>
+        )}
       </div>
 
       <p className="approval-summary">{summary ?? `Halo wants to run ${tool}.`}</p>

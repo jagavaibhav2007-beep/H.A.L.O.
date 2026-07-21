@@ -1,0 +1,186 @@
+/* Conversation tab strip. All values reference tokens.css (no raw hex/ms
+   literals). Active tab is marked by colour PLUS an underline bar — never
+   colour alone (same rule the sidebar's left indicator follows). */
+
+.chat-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  padding: 6px 12px 0;
+  border-bottom: 1px solid var(--border);
+  min-height: var(--hit-min);
+}
+
+.chat-tabs-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-tab-wrap {
+  display: flex;
+  align-items: center;
+  max-width: 220px;
+  border-radius: 8px 8px 0 0;
+  border-bottom: 2px solid transparent;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.chat-tab-wrap:hover {
+  background: var(--surface);
+}
+.chat-tab-wrap[data-active] {
+  background: var(--surface);
+  border-bottom-color: var(--primary);
+}
+
+.chat-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: var(--hit-min);
+  padding: 0 4px 0 10px;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.chat-tab-wrap[data-active] .chat-tab {
+  color: var(--text);
+}
+
+.chat-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Unread = a reply landed while you were elsewhere. Approval = a Tier-3
+   decision is blocked on you, so it borrows the tier-3 tone (same signal the
+   sidebar badge uses) and is visibly louder. Both also emit sr-only text —
+   a dot alone is not an accessible signal. */
+.chat-tab-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+.chat-tab-dot[data-kind="approval"] {
+  width: 9px;
+  height: 9px;
+  background: var(--tier-3);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tier-3) 28%, transparent);
+}
+
+.chat-tab-close,
+.chat-tabs-menu-del {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.chat-tab-close:hover,
+.chat-tabs-menu-del:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.chat-tab-rename {
+  width: 160px;
+  min-height: var(--hit-min);
+  padding: 0 8px;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+}
+
+/* ---- New / Recent ---- */
+
+.chat-tabs-new {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.chat-tab-add,
+.chat-tab-more {
+  display: grid;
+  place-items: center;
+  min-width: var(--hit-min);
+  min-height: var(--hit-min);
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.chat-tab-add:hover,
+.chat-tab-more:not(:disabled):hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.chat-tab-more:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.chat-tabs-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: var(--z-card);
+  min-width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.chat-tabs-menu-row {
+  display: flex;
+  align-items: center;
+}
+
+.chat-tabs-menu-open {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--hit-min);
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chat-tabs-menu-open:hover {
+  background: var(--surface);
+}

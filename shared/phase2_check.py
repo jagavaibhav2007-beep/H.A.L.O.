@@ -164,8 +164,12 @@ async def check_tier_behaviors(port: int, token: str) -> None:
     try:
         # Tier 1: runs silently -- no approval, no activity, just an action row.
         await _call_tool(ws, "p2-t1", "p2_t1", {"path": "x"})
-        frame = await _recv(ws)
-        assert frame["type"] == "done" and frame["conversation_id"] == "p2-t1", frame
+        # _recv_type (not raw _recv): a previous check's turn finishes as a
+        # background task and its spend_update is a GLOBAL broadcast that
+        # correctly reaches this connection too. Skip it rather than reading it
+        # as this turn's frame.
+        frame = await _recv_type(ws, "done")
+        assert frame["conversation_id"] == "p2-t1", frame
         assert ("p2_t1", {"path": "x"}) in EXECUTED
         rows = [a for a in store.recent_actions(200) if a["tool"] == "p2_t1"]
         assert rows and rows[0]["tier"] == 1 and rows[0]["result"] == "ok", rows

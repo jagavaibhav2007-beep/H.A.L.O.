@@ -294,6 +294,7 @@ async def _await_approval(
         "task_id": task_id,
         "summary": summary,
         "destructive": destructive,
+        "conversation_id": conversation_id,  # UI routes "Stop this task" by it
     }
     _pending_approval_payloads[approval_id] = payload
     await _emit_task(broadcast, {"task_id": task_id, "state": "waiting_approval", "lane": lane})

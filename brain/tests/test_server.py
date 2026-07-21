@@ -183,7 +183,15 @@ async def check_malformed_frame_rejected(port: int, token: str) -> None:
         ]
         for frame in bad_frames:
             await ws.send(json.dumps(frame))
-            reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+            # An earlier check's turn runs as a background task, and its
+            # spend_update is a GLOBAL broadcast (session/month totals) that
+            # correctly reaches every connected client -- including one opened
+            # after that turn started. Skip such unsolicited frames rather than
+            # mistaking them for this connection's reply.
+            while True:
+                reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                if reply["type"] != "spend_update":
+                    break
             assert reply["type"] == "error", reply
     finally:
         await ws.close()

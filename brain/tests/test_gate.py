@@ -251,6 +251,10 @@ async def check_destructive(port: int, token: str) -> None:
         await _call_tool(ws, "gate-boom", "t3_boom", {"count": 12})
         req = await _recv_type(ws, "approval_request")
         assert req["destructive"] is True, req
+        # The card names its own thread: the UI routes "Stop this task" (an
+        # interrupt, keyed by conversation) by this, so with several
+        # conversations open it stops the one that asked, not the one on screen.
+        assert req["conversation_id"] == "gate-boom", req
         await _respond(ws, req["approval_id"], "deny")
         await _recv_type(ws, "done")
         assert not any(t == "t3_boom" for t, _ in EXECUTED)

@@ -51,7 +51,9 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
-  const conversationIdRef = useRef(crypto.randomUUID()); // ponytail: one conversation_id per session; multi-conversation UI is a later phase.
+  // No conversation identity lives here: which thread a message belongs to is
+  // a UI decision (store.ts's conversation registry), and this hook is
+  // transport-only. Callers pass the id in.
 
   useEffect(() => {
     let torndown = false;
@@ -169,8 +171,8 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const env = () => ({ id: crypto.randomUUID(), ts: new Date().toISOString() });
 
   const sendUserMsg = useCallback(
-    (text: string) =>
-      dispatch({ type: "user_msg", ...env(), text, conversation_id: conversationIdRef.current, source: "ui" }),
+    (conversation_id: string, text: string) =>
+      dispatch({ type: "user_msg", ...env(), text, conversation_id, source: "ui" }),
     [dispatch],
   );
   const sendTaskOp = useCallback(
@@ -246,6 +248,5 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     sendSkillOp,
     sendSettingsUpdate,
     sendMic,
-    conversationId: conversationIdRef.current,
   };
 }

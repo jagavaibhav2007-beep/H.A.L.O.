@@ -9,11 +9,13 @@ import { Mic, MicOff, Wrench, ChevronDown, ChevronRight } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Markdown } from "./Markdown";
 import type { ConnState } from "../ipc/useHaloConnection";
+import { ChatTabs } from "./ChatTabs";
 import {
   useHaloStore,
   selectConversation,
   selectActivities,
   selectVoice,
+  selectChats,
 } from "../state/store";
 import type { AssistantTurn, Turn } from "../state/reducer";
 import type { ActivityMsg } from "../ipc/contract";
@@ -24,7 +26,7 @@ const EXAMPLE_CHIPS = ["demo everything", "demo task", "demo voice"];
 interface ChatViewProps {
   conversationId: string;
   connState: ConnState;
-  sendUserMsg: (text: string) => void;
+  sendUserMsg: (conversationId: string, text: string) => void;
   sendMic: (op: "mute" | "unmute") => void;
   /** Kept on the real textarea so the workspace's Ctrl+K focus still lands. */
   inputId: string;
@@ -36,6 +38,8 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   const voice = useHaloStore(selectVoice);
   const appendUserTurn = useHaloStore((s) => s.appendUserTurn);
   const acknowledgeInputRestore = useHaloStore((s) => s.acknowledgeInputRestore);
+  const titleFromMessage = useHaloStore((s) => s.titleFromMessage);
+  const chats = useHaloStore(selectChats);
 
   const [input, setInput] = useState("");
   const lastSentRef = useRef("");
@@ -55,10 +59,11 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
       if (!trimmed) return;
       lastSentRef.current = trimmed;
       appendUserTurn(conversationId, trimmed, crypto.randomUUID());
-      sendUserMsg(trimmed);
+      titleFromMessage(conversationId, trimmed); // no-ops unless still untitled
+      sendUserMsg(conversationId, trimmed);
       setInput("");
     },
-    [appendUserTurn, conversationId, sendUserMsg],
+    [appendUserTurn, titleFromMessage, conversationId, sendUserMsg],
   );
 
   // rule 8: on error/disconnect the user's text is restored to the box so a
@@ -92,20 +97,35 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   }
 
   const empty = turns.length === 0 && !ghost;
+  // A thread restored from a previous session: the Brain still has its history
+  // (LangGraph checkpoints are keyed by conversation_id, so the next message
+  // continues with full context) but the UI store starts empty and nothing
+  // replays past turns on connect. Say so plainly rather than render a blank
+  // panel that reads as data loss.
+  const restored = empty && chats.all.find((c) => c.id === conversationId)?.restored;
 
   return (
     <div className="chat-view">
+      <ChatTabs />
       <div className="halo-scroll chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {empty ? (
           <div className="chat-empty">
-            <p className="chat-empty-line">Ask me anything, or just say "Halo".</p>
-            <div className="chat-empty-chips">
-              {EXAMPLE_CHIPS.map((c) => (
-                <button key={c} type="button" className="chat-chip" onClick={() => send(c)}>
-                  {c}
-                </button>
-              ))}
-            </div>
+            {restored ? (
+              <p className="chat-empty-line">
+                Earlier messages in this thread are on the Brain — send a message to pick it up where you left off.
+              </p>
+            ) : (
+              <>
+                <p className="chat-empty-line">Ask me anything, or just say "Halo".</p>
+                <div className="chat-empty-chips">
+                  {EXAMPLE_CHIPS.map((c) => (
+                    <button key={c} type="button" className="chat-chip" onClick={() => send(c)}>
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <div className="chat-turns">

@@ -88,4 +88,34 @@ expectRejected(
   "invalid mic operation",
 );
 
+function expectAccepted(raw: unknown, why: string) {
+  try {
+    parseIpcMessage(raw);
+  } catch (e) {
+    throw new Error(`expected acceptance (${why}): ${e}`);
+  }
+}
+
+// Regression: useHaloConnection.ts builds outbound messages via object-literal
+// spread of an optional param, e.g. `{ ..., belief_id, op, text }` where `text`
+// is an unpassed function argument. That leaves an *own property* `text:
+// undefined` on the object — `"text" in obj` is true for it even though no
+// caller supplied a value, so a naive `"text" in obj && typeof obj.text !==
+// "string"` check rejects a perfectly valid delete/restore memory_edit (and
+// would do the same to task_op's optional task_id). This is the exact bug
+// behind "Delete gets stuck on Deleting... forever" — the message never left
+// the client, so no confirming belief_state ever arrived.
+expectAccepted(
+  { type: "memory_edit", id: "x", ts: "x", belief_id: "belief-1", op: "delete", text: undefined },
+  "memory_edit delete with an explicit-but-undefined text key",
+);
+expectAccepted(
+  { type: "memory_edit", id: "x", ts: "x", belief_id: "belief-1", op: "restore", text: undefined },
+  "memory_edit restore with an explicit-but-undefined text key",
+);
+expectAccepted(
+  { type: "task_op", id: "x", ts: "x", op: "stop", task_id: undefined },
+  "task_op with an explicit-but-undefined task_id key",
+);
+
 console.log("[contract.selfcheck.ts] self-check OK");

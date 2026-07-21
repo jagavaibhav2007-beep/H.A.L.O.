@@ -171,6 +171,14 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
             "task_id": frame_task,
             "summary": summarize(tool, args),
             "destructive": is_destructive(tool, args),
+            # Optional in the contract, but it's what lets the UI route this
+            # card's "Stop this task" (an `interrupt`, keyed by conversation)
+            # to the right thread when several are open. Set here so it rides
+            # along everywhere the payload does: the live broadcast, the
+            # _pending map, and snapshot's pending_payloads() replay -- and
+            # since it's inside the interrupt() value, the checkpoint keeps it
+            # across a restart for rehydrate_pending too.
+            "conversation_id": conversation_id,
         }
         decision = interrupt(payload)  # C2: never inside a try/except
         d = decision.get("decision")

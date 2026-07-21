@@ -25,7 +25,7 @@ import { SkillsView } from "../skills/SkillsView";
 import { SettingsView } from "../settings/SettingsView";
 import { ApprovalOverlay } from "../approvals/ApprovalCard";
 import { useStoreConnection } from "../state/useStoreConnection";
-import { useHaloStore, selectActiveView, selectApprovals } from "../state/store";
+import { useHaloStore, selectActiveView, selectApprovals, selectActiveConversationId } from "../state/store";
 import type { ActiveView } from "../state/store";
 import "./WorkspaceRoot.css";
 
@@ -70,8 +70,11 @@ export function WorkspaceRoot() {
     sendSkillOp,
     sendSettingsUpdate,
     sendMic,
-    conversationId,
   } = useStoreConnection();
+
+  // Which conversation the chat view and any conversation-scoped send targets.
+  // Owned by the store (UI decision), never by the transport hook.
+  const conversationId = useHaloStore(selectActiveConversationId);
 
   // Away flow (Step 10): a pending approval that arrives while this window is
   // hidden fires a Windows toast; clicking it opens the workspace (Rust
@@ -123,6 +126,37 @@ export function WorkspaceRoot() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [setActiveView]);
+
+  // Conversation tab shortcuts (browser conventions): Ctrl+T new, Ctrl+W close
+  // the current one, Ctrl+Tab / Ctrl+Shift+Tab cycle. All require Ctrl, so
+  // they never swallow a keystroke while the user is typing, and none collide
+  // with the existing Ctrl+K (focus input) or bare Escape (collapse) handlers.
+  // ponytail: preventDefault is enough in the Tauri webview; in the D9 browser
+  // fallback Chrome still owns Ctrl+T/Ctrl+W at the OS level and will win —
+  // acceptable, the native window is the real target.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (!e.ctrlKey) return;
+      const store = useHaloStore.getState();
+      const { open, activeId } = store.chats;
+      const key = e.key.toLowerCase();
+      if (key === "t") {
+        e.preventDefault();
+        store.setActiveView("chat");
+        store.newConversation();
+      } else if (key === "w") {
+        e.preventDefault();
+        store.closeConversation(activeId);
+      } else if (e.key === "Tab" && open.length > 1) {
+        e.preventDefault();
+        const i = open.indexOf(activeId);
+        store.setActiveView("chat");
+        store.setActiveConversation(open[(i + (e.shiftKey ? -1 : 1) + open.length) % open.length]);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // Rust emits `workspace-anchor` (the orb's screen position) right before
   // showing this window — anchor the scale+fade transform-origin there for
