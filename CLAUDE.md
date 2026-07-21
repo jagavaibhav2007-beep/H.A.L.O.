@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-**H.A.L.O.** — a local, resident desktop AI companion: Tauri+React UI, Python/LangGraph brain, Python/Pipecat voice worker, talking over an authenticated local-loopback WebSocket. **Phase 0 (skeleton & contract) is complete and hardened** — three real processes spawn, authenticate, and recover from crashes with proper shutdown ordering. **Phase 1 (front-end shell) is complete** — the full premium UI (chat, activity, memory, tasks, skills, settings, orb+workspace windows) renders and animates against a scripted mock Brain; the automated gate (`./dev.ps1 -Smoke`) and the native checklist ([VERIFY.md](VERIFY.md)) are both green. **Phase 2 (backend spine) has not started yet** — the real Brain (LangGraph loop, permission gate, memory, model router) still needs to be built behind the same mock-proven contract. See [phases.md](phases.md) for the roadmap; [phase-1-plan.md](phase-1-plan.md) for how Phase 1 was built (reference for the mocked-Brain pattern, not open work).
+**H.A.L.O.** — a local, resident desktop AI companion: Tauri+React UI, Python/LangGraph brain, Python/Pipecat voice worker, talking over an authenticated local-loopback WebSocket. **Phase 0 (skeleton & contract) is complete and hardened** — three real processes spawn, authenticate, and recover from crashes with proper shutdown ordering. **Phase 1 (front-end shell) is complete** — the full premium UI (chat, activity, memory, tasks, skills, settings, orb+workspace windows) renders and animates against a scripted mock Brain; the automated gate (`./dev.ps1 -Smoke`) and the native checklist ([VERIFY.md](VERIFY.md)) are both green. **Phase 2 (backend spine) is complete as of 2026-07-21** — the real Brain is now the default (non-`--mock`) handler: SQLite store, keystore secrets, OpenRouter client + rule-based router, LangGraph control loop with SqliteSaver checkpointing, the permission gate + tool registry, real activity log + undo, Lane-1 file tools, real memory, and a real snapshot-on-connect. The contract stayed frozen throughout (25 types, zero drift). Its automated gate (`shared/phase2_check.py`, in `-Smoke`) is green; **its native checklist in VERIFY.md still needs a human run with a real OpenRouter key.** **Phase 3 (heavy systems) has not started.** See [phases.md](phases.md) for the roadmap; [phase-2-plan.md](phase-2-plan.md) for how Phase 2 was built and its D1–D9 decisions.
 
 The repo has two layers: design docs (source of truth for *behavior* and *architecture*) and the code that implements them.
 
@@ -83,7 +83,11 @@ python shared/smoke_test.py
 ```powershell
 python shared/phase1_check.py
 ```
-Both run together via `./dev.ps1 -Smoke`. No test framework is used anywhere in this repo (plain `asyncio` + `assert` scripts) — don't introduce pytest/jest without a real reason.
+**Phase 2 exit-criteria check** (fake UI client against the **real** Brain over a real WS, offline+deterministic via the `HALO_LLM_STUB`/`HALO_EXTRACT_STUB` seams — no paid API calls; asserts real chat streaming, all three tier behaviors + approve/deny/edit + implicit-deny-on-interrupt, a file op + undo round-trip on disk, memory surviving a Brain restart with provenance rejection, a pending approval surviving a kill and still resuming, snapshot idempotence, and key-missing honesty):
+```powershell
+python shared/phase2_check.py
+```
+All three run together via `./dev.ps1 -Smoke`. No test framework is used anywhere in this repo (plain `asyncio` + `assert` scripts) — don't introduce pytest/jest without a real reason.
 
 ## Architecture
 

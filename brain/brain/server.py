@@ -110,6 +110,15 @@ def _frame_visible_to(role: str, msg_type: str, payload: dict) -> bool:
     return msg_type == "activity" and payload.get("narrate") is True
 
 
+# Clients still receiving their snapshot: broadcasts aimed at them are held
+# here and flushed, in order, once the snapshot finishes. A client is added to
+# `authenticated` BEFORE its snapshot so no event is missed, but a broadcast
+# landing mid-snapshot would otherwise interleave into it -- breaking the
+# "spend_update is the snapshot's last frame" sentinel every drain relies on,
+# and showing the UI a live delta before the state it applies to.
+_deferred: dict[ServerConnection, list[str]] = {}
+
+
 async def _broadcast(authenticated: dict[ServerConnection, str], msg_type: str, payload: dict) -> None:
     """Send one contract-validated frame to every authenticated client whose
     role should receive it (D4 -- "the UI gets everything", and reply-to-sender
@@ -119,6 +128,10 @@ async def _broadcast(authenticated: dict[ServerConnection, str], msg_type: str, 
     raw = json.dumps(_envelope(msg_type, payload))
     for client, role in list(authenticated.items()):
         if not _frame_visible_to(role, msg_type, payload):
+            continue
+        held = _deferred.get(client)
+        if held is not None:
+            held.append(raw)
             continue
         try:
             await asyncio.wait_for(client.send(raw), timeout=_SEND_TIMEOUT_S)
@@ -267,7 +280,18 @@ async def _connection_handler(
     except ConnectionClosed:
         return
     authenticated[ws] = role
+    _deferred[ws] = []  # hold broadcasts until this client's snapshot is done
     logger.info("client authenticated (role=%s, mock=%s)", role, mock)
+
+    async def _release_deferred() -> None:
+        """Snapshot finished: flush anything that arrived during it, in order."""
+        held = _deferred.pop(ws, None)
+        for raw in held or []:
+            try:
+                await asyncio.wait_for(ws.send(raw), timeout=_SEND_TIMEOUT_S)
+            except (ConnectionClosed, asyncio.TimeoutError):
+                authenticated.pop(ws, None)
+                return
 
     try:
         if mock and role == "ui":
@@ -284,6 +308,9 @@ async def _connection_handler(
 
             graph_mod = await asyncio.to_thread(importlib.import_module, "brain.graph")
             await graph_mod.snapshot(send_fn)
+        # Snapshot done (or none was owed -- Voice gets no snapshot): release
+        # anything broadcast while it was streaming, then go live.
+        await _release_deferred()
 
         async for raw in ws:
             try:
@@ -331,6 +358,7 @@ async def _connection_handler(
             # mode, per Phase 0 Step 4's original scope.
     finally:
         authenticated.pop(ws, None)
+        _deferred.pop(ws, None)
 
 
 async def start(

@@ -27,6 +27,7 @@ os.environ["HALO_KEYRING_DIR"] = str(Path(_TMP) / "keys")  # secrets_store test 
 
 import websockets
 
+from brain import server
 from brain.server import (
     BrainAlreadyRunning,
     _frame_visible_to,
@@ -206,6 +207,47 @@ async def check_conversation_order(port: int, token: str) -> None:
     print("[check 5] two messages to one conversation handled in arrival order: OK")
 
 
+async def check_snapshot_not_interleaved() -> None:
+    """A broadcast aimed at a client whose snapshot is still streaming must be
+    HELD and delivered after it, never spliced into the middle -- otherwise
+    `spend_update` (the snapshot's last-frame sentinel every drain reads to)
+    can arrive first, and the UI sees a live delta before the state it applies
+    to. This was a real intermittent failure.
+
+    Driven directly rather than by racing two sockets: the bug needs a
+    broadcast to land inside the snapshot's own await window, which timing
+    alone reproduces only sometimes (a racing version of this test passed 6/6
+    against the BROKEN code -- it proved nothing)."""
+
+    class FakeWS:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, raw: str) -> None:
+            self.sent.append(raw)
+
+    ws = FakeWS()
+    authenticated = {ws: "ui"}
+    server._deferred[ws] = []  # client is mid-snapshot
+    try:
+        await server._broadcast(authenticated, "spend_update", {"session_usd": 1.0, "month_usd": 2.0})
+        assert ws.sent == [], "broadcast leaked into a snapshot that was still streaming"
+        assert len(server._deferred[ws]) == 1, server._deferred[ws]
+
+        # Snapshot finishes -> held frames flush, in order.
+        held = server._deferred.pop(ws)
+        for raw in held:
+            await ws.send(raw)
+        assert [json.loads(r)["type"] for r in ws.sent] == ["spend_update"], ws.sent
+
+        # Once released, broadcasts pass straight through again.
+        await server._broadcast(authenticated, "spend_update", {"session_usd": 3.0, "month_usd": 4.0})
+        assert len(ws.sent) == 2, ws.sent
+    finally:
+        server._deferred.pop(ws, None)
+    print("[check 11] broadcast during a snapshot is held, then flushed in order: OK")
+
+
 async def check_settings_update_round_trip(port: int, token: str) -> None:
     """settings_update for openrouter_key -> a settings_state reply to the
     sender only (not broadcast), reporting "set" (HALO_LLM_STUB makes
@@ -259,6 +301,7 @@ async def main() -> None:
         await check_malformed_frame_rejected(port, token)
         await check_conversation_order(port, token)
         await check_settings_update_round_trip(port, token)
+        await check_snapshot_not_interleaved()
     finally:
         server.close()
         await server.wait_closed()

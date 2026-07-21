@@ -2,8 +2,8 @@
 # Brain and Voice; the standalone options are for worker-only debugging.
 # Usage: ./dev.ps1  (or ./dev.ps1 -Only brain|voice|ui to launch just one;
 #        Voice requires a separately running Brain and its editable package)
-#        ./dev.ps1 -Smoke  runs the Phase 0 and Phase 1 exit-criteria protocol
-#        checks in-place (no windows spawned) instead of launching processes.
+#        ./dev.ps1 -Smoke  runs the Phase 0, Phase 1, and Phase 2 exit-criteria
+#        protocol checks in-place (no windows spawned) instead of launching processes.
 #        ./dev.ps1 -Mock  runs the scripted mock Brain (Phase 1 Step 2). With
 #        the default (-Only all) it launches the full app: Tauri spawns the
 #        Brain with --mock via the HALO_MOCK env var, so the real UI talks to
@@ -75,6 +75,9 @@ if ($Smoke) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     python "$root\shared\phase1_check.py"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    python "$root\shared\phase2_check.py"
     exit $LASTEXITCODE
 }
 
