@@ -118,7 +118,6 @@ export const selectBeliefs = (s: HaloStore) => s.beliefs;
 export const selectSkills = (s: HaloStore) => s.skills;
 export const selectVoice = (s: HaloStore) => s.voice;
 export const selectSpend = (s: HaloStore) => s.spend;
-export const selectOpenrouterKeyStatus = (s: HaloStore) => s.settings.openrouter_key;
 export const selectActiveView = (s: HaloStore) => s.activeView;
 export const selectChats = (s: HaloStore) => s.chats;
 export const selectActiveConversationId = (s: HaloStore) => s.chats.activeId;

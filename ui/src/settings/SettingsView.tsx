@@ -5,11 +5,12 @@
 // backend (launch-at-startup, key entry, advanced knobs) renders disabled
 // with an honest note instead of pretending to work.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getTheme, setTheme, type Theme } from "../styles/theme";
 import { Button } from "../components/Button";
-import { useHaloStore, selectOpenrouterKeyStatus, selectSpend } from "../state/store";
+import { useHaloStore, selectSpend } from "../state/store";
+import { usePendingConfirm } from "../lib/usePendingConfirm";
 import "./SettingsView.css";
 
 interface SettingsViewProps {
@@ -34,26 +35,21 @@ const KEY_STATUS_COPY: Record<string, string> = {
 
 export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   const spend = useHaloStore(selectSpend);
-  const keyStatus = useHaloStore(selectOpenrouterKeyStatus);
+  const settings = useHaloStore((s) => s.settings);
+  const keyStatus = settings.openrouter_key;
   const [theme, setThemeState] = useState<Theme>(getTheme());
   const [hotkey, setHotkey] = useState<string | null>(null);
   const [wakeWord, setWakeWord] = useState(true);
   const [pushToTalk, setPushToTalk] = useState(false);
   const [keyInput, setKeyInput] = useState("");
-  // Rule 3 (lock on press, unlock only on confirm): pending clears when
-  // keyStatus actually changes to a new value, never optimistically.
-  const [pending, setPending] = useState(false);
-  const lastStatus = useRef(keyStatus);
-  useEffect(() => {
-    if (keyStatus !== lastStatus.current) {
-      lastStatus.current = keyStatus;
-      setPending(false);
-    }
-  }, [keyStatus]);
+  // Rule 3 (lock on press, unlock only on confirm): the shared hook clears
+  // pending only when a settings_state frame upserts a new status for the
+  // key — never optimistically.
+  const { pending, begin } = usePendingConfirm(settings);
+  const keyPending = pending.openrouter_key;
 
   function saveKey() {
-    if (pending || !keyInput) return;
-    setPending(true);
+    if (!keyInput || !begin("openrouter_key", "checking…")) return;
     sendSettingsUpdate("openrouter_key", keyInput);
     setKeyInput(""); // never lingers in the DOM once sent
   }
@@ -61,9 +57,9 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   // Explicit removal, so "replace my key" doesn't mean "guess whether the old
   // one is still in there". Confirmed first — it's not recoverable from here.
   function removeKey() {
-    if (pending) return;
+    if (keyPending) return;
     if (!window.confirm("Remove the stored OpenRouter key? You'll need to paste it again to use Halo.")) return;
-    setPending(true);
+    if (!begin("openrouter_key", "checking…")) return;
     sendSettingsUpdate("openrouter_key", "");
   }
 
@@ -161,20 +157,20 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
               placeholder="sk-or-..."
               autoComplete="off"
               value={keyInput}
-              disabled={pending}
+              disabled={!!keyPending}
               onChange={(e) => setKeyInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && saveKey()}
             />
-            <Button variant="ghost" onClick={saveKey} disabled={pending || !keyInput}>
-              {pending ? "Checking…" : "Save"}
+            <Button variant="ghost" onClick={saveKey} disabled={!!keyPending || !keyInput}>
+              {keyPending ? "Checking…" : "Save"}
             </Button>
           </div>
           <div className="settings-row">
             <span className="settings-value" data-key-status={keyStatus ?? "missing"}>
-              {pending ? "checking…" : (keyStatus ? KEY_STATUS_COPY[keyStatus] : KEY_STATUS_COPY.missing)}
+              {keyPending ?? (keyStatus ? KEY_STATUS_COPY[keyStatus] : KEY_STATUS_COPY.missing)}
             </span>
             {keyStatus === "set" && (
-              <Button variant="ghost" onClick={removeKey} disabled={pending}>
+              <Button variant="ghost" onClick={removeKey} disabled={!!keyPending}>
                 Remove key
               </Button>
             )}
