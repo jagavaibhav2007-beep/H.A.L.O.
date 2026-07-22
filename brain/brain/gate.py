@@ -65,7 +65,7 @@ def tool_specs() -> list[dict]:
     return [
         {"type": "function", "function": {"name": name, **entry["schema"]}}
         for name, entry in TOOLS.items()
-        if entry.get("schema")
+        if entry["schema"]
     ]
 
 
@@ -202,7 +202,6 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
             await asyncio.to_thread(_record, tool, redact(tool, args), tier, "denied", frame_task)
             note = "you denied it" if d == "deny" else "you stopped me"
             update = {
-                "pending_tool_intent": None,
                 "pending_tool_result": {"tool": tool, "status": d},
                 "messages": [{"role": "assistant", "content": f"I didn't run {tool} — {note}."}],
             }
@@ -218,6 +217,9 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
         break  # approve
 
     return await _execute_tail(tool, args, tier, frame_task, broadcast)
+
+
+_RESULT_CAP = 8 * 1024  # serialized tool-result bytes fed back to the model
 
 
 async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broadcast) -> dict:
@@ -237,8 +239,7 @@ async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broad
             if asyncio.iscoroutine(out):
                 out = await out
             result = "ok"
-            content = f"I ran {tool}."
-            builder = entry.get("inverse")
+            builder = entry["inverse"]
             if builder is not None:
                 try:
                     # ponytail: inverse args stored as built -- no current tool's
@@ -247,6 +248,20 @@ async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broad
                     inverse = builder(args, out)
                 except Exception:  # noqa: BLE001 - a broken builder just means non-undoable
                     logger.exception("inverse builder failed for tool=%s", tool)
+            # Surface the tool's actual return to the model. A search that found
+            # the file and one that found nothing must not both read "I ran X." --
+            # the graph feeds this content back as the role:"tool" message, so a
+            # content-free ack is what makes the model confabulate "not found".
+            # None-returning tools (e.g. file_delete) keep the bare ack.
+            if out is None:
+                content = f"I ran {tool}."
+            else:
+                payload = json.dumps(out, ensure_ascii=False, default=str)
+                if len(payload) > _RESULT_CAP:
+                    # ponytail: 8KB of tool output into the prompt; spill-to-file if one ever needs more.
+                    payload = payload[:_RESULT_CAP] + " …[truncated]"
+                extra = " (no matches)" if out == [] else ""
+                content = f"I ran {tool}. Result: {payload}{extra}."
         except GraphInterrupt:
             raise  # C2: a tool must never swallow the suspension signal
         except Exception as exc:  # noqa: BLE001 - rule 2: turn continues honestly
@@ -257,22 +272,30 @@ async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broad
         _record, tool, args_redacted, tier, result, frame_task, inverse is not None, inverse
     )
     if tier >= 2:
-        payload = {
-            "text": summarize(tool, args),
-            "narrate": False,
-            "task_id": frame_task,
-            "undoable": undo_token is not None,
-            "tier": tier,
-            "lane": 1,
-        }
-        if undo_token is not None:
-            payload["undo_token"] = undo_token
-        await broadcast("activity", payload)
+        await broadcast(
+            "activity", _activity_frame(tool, args, frame_task, undo_token is not None, tier, 1, undo_token)
+        )
     return {
-        "pending_tool_intent": None,
         "pending_tool_result": {"tool": tool, "status": result},
         "messages": [{"role": "assistant", "content": content}],
     }
+
+
+def _activity_frame(tool, args, task_id, undoable, tier, lane, undo_token=None) -> dict:
+    """The 6-key activity payload every feed frame shares (+ undo_token when the
+    row is still reversible). Callers derive undoable/token themselves -- live
+    execution off the fresh token, backlog replay off the row's consumed state."""
+    frame = {
+        "text": summarize(tool, args),
+        "narrate": False,
+        "task_id": task_id,
+        "undoable": undoable,
+        "tier": tier,
+        "lane": lane,
+    }
+    if undo_token is not None:
+        frame["undo_token"] = undo_token
+    return frame
 
 
 # -------------------------------------------------------------------- undo
@@ -348,14 +371,7 @@ async def push_activity_backlog(send, limit: int = 100) -> None:
     for row in reversed(rows):
         args = json.loads(row["args_redacted"] or "{}")
         undoable = bool(row["undoable"]) and not row["consumed"]
-        payload = {
-            "text": summarize(row["tool"], args),
-            "narrate": False,
-            "task_id": row["task_id"] or "history",
-            "undoable": undoable,
-            "tier": row["tier"],
-            "lane": row["lane"],
-        }
-        if undoable:
-            payload["undo_token"] = row["undo_token"]
-        await send("activity", payload)
+        await send("activity", _activity_frame(
+            row["tool"], args, row["task_id"] or "history", undoable, row["tier"], row["lane"],
+            row["undo_token"] if undoable else None,
+        ))

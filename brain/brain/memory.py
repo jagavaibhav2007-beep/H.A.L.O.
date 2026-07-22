@@ -243,10 +243,10 @@ async def handle_memory_edit(msg: dict, broadcast) -> None:
     await broadcast("belief_state", belief_frame(await asyncio.to_thread(store.get_belief, belief_id)))
 
 
-async def push_beliefs(send, limit: int = 100) -> None:
+async def push_beliefs(send) -> None:
     """Connect-time hydration: replay beliefs (all statuses -- the panel
     renders supersede chains) as belief_state frames, oldest first."""
     store.connect()
     rows = await asyncio.to_thread(store.list_beliefs)
-    for row in reversed(rows[:limit]):
+    for row in reversed(rows[:100]):
         await send("belief_state", belief_frame(row))

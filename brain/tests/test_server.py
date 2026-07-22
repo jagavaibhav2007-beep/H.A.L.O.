@@ -56,6 +56,12 @@ async def _authenticate(ws, token: str) -> None:
     assert ack["type"] == "hello_ack", ack
 
 
+async def _drain_snapshot(ws) -> None:
+    """Drain the Step-9 connect snapshot; it always ends with spend_update."""
+    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
+        pass
+
+
 async def _read_turn(ws, conversation_id: str, timeout: float = 10) -> str:
     """Read frames until `done` for this conversation; returns the joined
     token text. Skips unrelated frames (e.g. spend_update)."""
@@ -160,8 +166,7 @@ async def check_malformed_frame_rejected(port: int, token: str) -> None:
         # malformed-frame error sequence below.
         settings = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
         assert settings["type"] == "settings_state", settings
-        while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
-            pass  # rest of the Step-9 connect snapshot
+        await _drain_snapshot(ws)  # rest of the Step-9 connect snapshot
         bad_frames = [
             {"type": "not_a_real_type", "id": "x", "ts": "x"},
             _frame("user_msg", text="hi", conversation_id=[], source="ui"),
@@ -265,8 +270,7 @@ async def check_settings_update_round_trip(port: int, token: str) -> None:
         await _authenticate(ws, token)
         initial = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
         assert initial["type"] == "settings_state" and initial["status"] == "missing", initial
-        while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
-            pass  # rest of the Step-9 connect snapshot
+        await _drain_snapshot(ws)  # rest of the Step-9 connect snapshot
 
         await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="sk-or-test")))
         saved = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))

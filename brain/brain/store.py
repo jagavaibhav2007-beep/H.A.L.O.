@@ -18,6 +18,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import sqlite_vec  # hard dep -- hoisted so it isn't re-imported inside three hot functions
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
@@ -50,8 +52,6 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
 
     try:
         conn.enable_load_extension(True)
-        import sqlite_vec
-
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         _vec_ok = True
@@ -146,10 +146,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _row_to_dict(row: sqlite3.Row) -> dict:
-    return dict(row)
-
-
 def _embed(text: str) -> list[float] | None:
     """Lazily init fastembed and embed one string. Returns None on any failure
     (offline/first-download-fails) -- memory degrades, never breaks (rule 5)."""
@@ -175,8 +171,6 @@ def _index_embedding(conn: sqlite3.Connection, belief_id: str, text: str) -> Non
     vec = _embed(text)
     if vec is None:
         return
-    import sqlite_vec
-
     with conn:
         # delete belief_vec first -- its subquery depends on belief_map still
         # having the old row (deleting map first orphans the old vec row).
@@ -211,7 +205,7 @@ def add_belief(text: str, kind: str, provenance: str, salience: float = 0.6) -> 
 def get_belief(belief_id: str) -> dict | None:
     conn = connect()
     row = conn.execute("SELECT * FROM belief WHERE belief_id=?", (belief_id,)).fetchone()
-    return _row_to_dict(row) if row else None
+    return dict(row) if row else None
 
 
 def list_beliefs(status: str | None = None) -> list[dict]:
@@ -222,7 +216,7 @@ def list_beliefs(status: str | None = None) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM belief WHERE status=? ORDER BY created_at DESC", (status,)
         ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    return [dict(r) for r in rows]
 
 
 def update_belief(belief_id: str, text: str, provenance: str | None = None) -> None:
@@ -266,8 +260,6 @@ def search_beliefs(query_text: str, k: int = 15) -> list[dict]:
     vec = _embed(query_text)
     if vec is not None:
         try:
-            import sqlite_vec
-
             rows = conn.execute(
                 """
                 SELECT b.*, v.distance AS distance FROM belief_vec v
@@ -278,14 +270,14 @@ def search_beliefs(query_text: str, k: int = 15) -> list[dict]:
                 """,
                 (sqlite_vec.serialize_float32(vec), k),
             ).fetchall()
-            return [_row_to_dict(r) for r in rows]
+            return [dict(r) for r in rows]
         except Exception:
             logger.warning("vector search failed; falling back to recency", exc_info=True)
 
     rows = conn.execute(
         "SELECT * FROM belief WHERE status='active' ORDER BY last_used_at DESC LIMIT ?", (k,)
     ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    return [dict(r) for r in rows]
 
 
 def bump_salience(belief_ids: list[str]) -> None:
@@ -363,7 +355,7 @@ def record_action(
 def get_action_by_undo_token(token: str) -> dict | None:
     conn = connect()
     row = conn.execute("SELECT * FROM action WHERE undo_token=?", (token,)).fetchone()
-    return _row_to_dict(row) if row else None
+    return dict(row) if row else None
 
 
 def consume_undo_token(token: str) -> bool:
@@ -379,7 +371,7 @@ def consume_undo_token(token: str) -> bool:
 def recent_actions(limit: int = 100) -> list[dict]:
     conn = connect()
     rows = conn.execute("SELECT * FROM action ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    return [dict(r) for r in rows]
 
 
 # ------------------------------------------------------------------- tasks --
@@ -408,7 +400,7 @@ def list_tasks(states: list[str] | None = None) -> list[dict]:
         rows = conn.execute(
             f"SELECT * FROM task WHERE state IN ({placeholders}) ORDER BY updated_at DESC", tuple(states)
         ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    return [dict(r) for r in rows]
 
 
 # ------------------------------------------------------------------- spend --

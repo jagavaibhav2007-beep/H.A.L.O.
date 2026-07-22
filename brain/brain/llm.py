@@ -134,8 +134,6 @@ async def _stream_once(messages, model, api_key, usage_out, tools=None, tool_acc
                 usage = chunk.get("usage")
                 if usage and usage_out is not None:
                     usage_out["cost"] = float(usage.get("cost", 0.0) or 0.0)
-                    usage_out["prompt_tokens"] = int(usage.get("prompt_tokens", 0) or 0)
-                    usage_out["completion_tokens"] = int(usage.get("completion_tokens", 0) or 0)
                 choices = chunk.get("choices") or []
                 if choices:
                     delta = choices[0].get("delta") or {}
@@ -198,7 +196,7 @@ async def stream_chat(
                 last_user = m.get("content", "")
                 break
         if usage_out is not None:
-            usage_out.update({"cost": 0.0, "prompt_tokens": 1, "completion_tokens": 1})
+            usage_out["cost"] = 0.0
         if tools is not None and tool_calls_out is not None:
             calls = _stub_tool_calls(messages)
             if calls:

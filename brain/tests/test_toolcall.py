@@ -61,6 +61,17 @@ gate.register(
 gate.register("tc_internal", _make_tool("tc_internal"), tier=1, summary="internal")
 
 
+def _empty_tool(args):
+    EXECUTED.append(("tc_empty", dict(args)))
+    return []  # a search that found nothing -- must read as "no matches", not a bare ack
+
+
+gate.register(
+    "tc_empty", _empty_tool, tier=1, summary="I looked and found nothing.",
+    schema={"description": "search", "parameters": {"type": "object", "properties": {}}},
+)
+
+
 # ------------------------------------------------------- 1. pure accumulator
 
 
@@ -237,11 +248,33 @@ async def check_tier1_loop(port: int, token: str) -> None:
         assert roles == ["user", "assistant", "tool", "assistant"], roles
         assert msgs[1].get("tool_calls"), "assistant message lost its tool_calls"
         assert msgs[2]["tool_call_id"] == msgs[1]["tool_calls"][0]["id"], msgs[1:3]
+        # The regression guard: the tool's actual return ("done") must reach the
+        # model via the tool message, not a content-free "I ran tc_read." ack.
+        assert "done" in msgs[2]["content"], msgs[2]
+        assert msgs[2]["content"] != "I ran tc_read.", "tool result discarded, not surfaced"
         assert msgs[-1]["content"] and not msgs[-1].get("tool_calls"), msgs[-1]
     finally:
         await ws.close()
     print("[check 3] Tier-1 tool call: respond -> gate -> respond -> final answer; "
-          "assistant keeps tool_calls, result comes back as a matching tool message: OK")
+          "assistant keeps tool_calls, result comes back as a matching tool message "
+          "carrying the real return value: OK")
+
+
+async def check_empty_result(port: int, token: str) -> None:
+    """A tool that returns [] must surface as an explicit 'no matches', not a
+    bare ack -- otherwise a search that found nothing is indistinguishable from
+    one that found the file, and the model confabulates 'not found'."""
+    ws = await _connect_auth(port, token)
+    try:
+        cid = "tc-empty"
+        await _send(ws, cid, 'look CALL_TOOL tc_empty {"path": "x"}')
+        await _drain_to_done(ws, cid)
+        msgs = await _history(cid)
+        tool_msg = next(m for m in msgs if m["role"] == "tool")
+        assert "[]" in tool_msg["content"] and "no matches" in tool_msg["content"], tool_msg
+    finally:
+        await ws.close()
+    print("[check 3b] empty result: [] surfaces as an explicit 'no matches' in the tool message: OK")
 
 
 # ------------------------------------------- 4. Tier-3 approval mid-loop
@@ -350,6 +383,7 @@ async def main() -> None:
     port = server.sockets[0].getsockname()[1]
     try:
         await check_tier1_loop(port, token)
+        await check_empty_result(port, token)
         await check_tier3_mid_loop(port, token)
         await check_multi_call_round(port, token)
         await check_round_cap(port, token)

@@ -39,7 +39,10 @@ def _roots() -> list[Path]:
 
 
 def _resolve(p: str) -> Path:
-    return Path(p).expanduser().resolve()
+    q = Path(p).expanduser()
+    if not q.is_absolute():
+        q = Path.home() / q  # bare/relative paths anchor at home, not the Brain's CWD
+    return q.resolve()
 
 
 def _in_roots(p: Path) -> bool:

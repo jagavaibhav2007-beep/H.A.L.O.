@@ -68,7 +68,7 @@ async def _run_async_checks() -> None:
         words.append(delta)
     reply = " ".join(words)
     assert reply == f"stub reply from {LIGHT}: hello world", reply
-    assert usage == {"cost": 0.0, "prompt_tokens": 1, "completion_tokens": 1}, usage
+    assert usage == {"cost": 0.0}, usage
 
     ok = await validate_key("unused")
     assert ok is True

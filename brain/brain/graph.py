@@ -39,23 +39,35 @@ _MAX_TOOL_ROUNDS = 8
 # actions, so it "helpfully" asks for permission in prose and never calls the
 # tool -- which silently bypasses the entire approval UI. Observed live: asked
 # to delete a file, it replied "please confirm" and raised no approval card.
-_SYSTEM_MSG = {
-    "role": "system",
-    "content": (
-        "You are Halo, a desktop companion running locally on the user's Windows machine. "
-        "You have real tools that act on their real files.\n\n"
-        "Use your tools instead of describing what you would do. When a request needs a file "
-        "read, listed, searched, created, edited, moved, organized, or deleted, call the "
-        "matching tool.\n\n"
-        "Do NOT ask the user for permission in your reply. Halo shows its own approval card "
-        "for anything risky or destructive, and the user approves or denies it there. If an "
-        "action needs consent, calling the tool IS how you ask -- writing 'please confirm' "
-        "instead just stalls, because it never reaches the approval step. A denial comes back "
-        "to you as a tool result; accept it and move on.\n\n"
-        "Never claim you lack permission or access before actually trying the tool. If a tool "
-        "returns an error, report what it actually said."
-    ),
-}
+_SYSTEM_PROMPT = (
+    "You are Halo, a desktop companion running locally on the user's Windows machine. "
+    "You have real tools that act on their real files.\n\n"
+    "Use your tools instead of describing what you would do. When a request needs a file "
+    "read, listed, searched, created, edited, moved, organized, or deleted, call the "
+    "matching tool.\n\n"
+    "Do NOT ask the user for permission in your reply. Halo shows its own approval card "
+    "for anything risky or destructive, and the user approves or denies it there. If an "
+    "action needs consent, calling the tool IS how you ask -- writing 'please confirm' "
+    "instead just stalls, because it never reaches the approval step. A denial comes back "
+    "to you as a tool result; accept it and move on.\n\n"
+    "Never claim you lack permission or access before actually trying the tool. If a tool "
+    "returns an error, report what it actually said."
+)
+
+
+def _roots_note() -> str:
+    """One sentence naming the folders the file tools can reach, so the model
+    stops guessing paths. Built per turn (not baked into _SYSTEM_PROMPT) since
+    project_roots is a runtime setting; derived from _roots() so it's correct
+    on any machine and never hardcodes a personal path."""
+    try:
+        roots = ", ".join(str(r) for r in brain.tools.files._roots())
+    except Exception:  # noqa: BLE001 - a missing store must not break the turn
+        return ""
+    return (
+        f"\n\nYou can read and act on files under: {roots}. Bare or relative paths "
+        "resolve against the user's home folder, so prefer absolute paths."
+    ) if roots else ""
 # ponytail: two layers, on purpose. _MAX_TOOL_ROUNDS is the SOFT cap -- at it we
 # still answer, tools-free. _RECURSION_LIMIT is the hard net LangGraph enforces
 # over super-steps (route + respond*(rounds+1) + gate*total_calls), which the
@@ -72,7 +84,6 @@ class State(TypedDict, total=False):
     redirected: bool  # sticky: user interrupted the previous answer
     error: str | None  # set by respond on failure; cleared on each turn's input
     # D6 carry fields -- present now, consumed by Step 5's gate. Untouched here.
-    pending_tool_intent: dict | None
     pending_tool_result: dict | None
     task_id: str | None
     # Step 10 tool-calling loop. `pending_tool_calls` is a QUEUE: the gate node
@@ -251,8 +262,9 @@ async def _respond_node(state: State, config) -> dict:
     try:
         # Retrieved beliefs prepend at stream time only -- never into graph
         # state, so they're recomputed per turn (no-double-injection rule).
+        system = {"role": "system", "content": _SYSTEM_PROMPT + _roots_note()}
         async for delta in llm.stream_chat(
-            [_SYSTEM_MSG] + ctx.get("memory", []) + history,
+            [system] + ctx.get("memory", []) + history,
             state["model"],
             ctx["api_key"],
             ctx["usage"],
@@ -352,6 +364,25 @@ def _spend_sync(cost: float) -> float:
     store.connect()
     store.add_spend(cost)
     return store.month_spend()
+
+
+async def _bill_and_extract(cid: str, result: dict, ctx: dict, api_key: str | None, broadcast) -> None:
+    """Shared completed-turn tail (run_turn and resume_turn): fire-and-forget
+    memory extraction when the turn didn't error (memory.extract swallows its own
+    failures, rule 5), then roll up cost and broadcast spend. resume owes this as
+    much as run_turn: since the tool-calling loop landed, a resumed invoke is no
+    longer just `gate -> END` -- it continues `gate -> respond -> ...` and streams
+    a real (billable) final answer, so skipping it would undercount spend and skip
+    extraction on approved-tool turns. The `api_key and` guard is harmless in
+    run_turn (it early-returns without a key)."""
+    global _session_usd
+    if api_key and not result.get("error"):
+        asyncio.create_task(memory.extract(cid, result.get("messages") or [], api_key, broadcast))
+    cost = ctx["usage"].get("cost")
+    if cost is not None:
+        _session_usd += cost
+        month = await asyncio.to_thread(_spend_sync, cost)
+        await broadcast("spend_update", {"session_usd": _session_usd, "month_usd": month})
 
 
 async def _finish_turn(result: dict, cid: str, broadcast) -> bool:
@@ -454,7 +485,6 @@ async def snapshot(send) -> None:
 
 async def run_turn(msg: dict, broadcast) -> None:
     """One chat turn, called by server.py inside the conversation lock."""
-    global _session_usd
     cid = msg["conversation_id"]
     try:
         graph = await _ensure_graph()
@@ -499,7 +529,6 @@ async def run_turn(msg: dict, broadcast) -> None:
                     "messages": [{"role": "user", "content": content}],
                     "error": None,
                     "redirected": False,
-                    "pending_tool_intent": None,
                     "pending_tool_result": None,
                     "pending_tool_calls": None,
                     "tool_rounds": 0,  # per-turn: the cap is not cumulative
@@ -511,17 +540,7 @@ async def run_turn(msg: dict, broadcast) -> None:
 
         if await _finish_turn(result, cid, broadcast):
             return  # suspended on a Tier-3 approval: no done, lock releases
-
-        if not result.get("error"):
-            # Fire-and-forget: the turn already completed, extraction can't
-            # break it (memory.extract swallows its own failures, rule 5).
-            asyncio.create_task(memory.extract(cid, result.get("messages") or [], api_key, broadcast))
-
-        cost = ctx["usage"].get("cost")
-        if cost is not None:
-            _session_usd += cost
-            month = await asyncio.to_thread(_spend_sync, cost)
-            await broadcast("spend_update", {"session_usd": _session_usd, "month_usd": month})
+        await _bill_and_extract(cid, result, ctx, api_key, broadcast)
     except Exception as exc:  # noqa: BLE001 - rule 2: never a silent drop
         logger.exception("turn failed for conversation_id=%s", cid)
         await broadcast(
@@ -536,7 +555,6 @@ async def resume_turn(approval_id: str, decision: str, edited_args: dict | None,
     handled (first response wins). Re-establishes _turn_ctx before ainvoke --
     run_turn popped it on suspend, and the resumed run may stream tokens and
     emit the confirming activity."""
-    global _session_usd
     entry = gate.pop_pending(approval_id)
     if entry is None:
         return False
@@ -560,18 +578,7 @@ async def resume_turn(approval_id: str, decision: str, edited_args: dict | None,
         if await _finish_turn(result, cid, broadcast):
             return True  # re-suspended (an edit raised the tier, or a later
             # round hit another Tier 3): nothing to bill or extract yet.
-        # Since the tool-calling loop landed, a resumed invoke is no longer just
-        # `gate -> END` -- it continues `gate -> respond -> ...`, which streams a
-        # real (billable) final answer. So the resumed half of the turn owes the
-        # same tail run_turn's does, or every approved-tool turn would silently
-        # undercount spend and skip memory extraction.
-        if api_key and not result.get("error"):
-            asyncio.create_task(memory.extract(cid, result.get("messages") or [], api_key, broadcast))
-        cost = ctx["usage"].get("cost")
-        if cost is not None:
-            _session_usd += cost
-            month = await asyncio.to_thread(_spend_sync, cost)
-            await broadcast("spend_update", {"session_usd": _session_usd, "month_usd": month})
+        await _bill_and_extract(cid, result, ctx, api_key, broadcast)
     except Exception as exc:  # noqa: BLE001 - rule 2: never a silent drop
         logger.exception("resume failed for approval_id=%s", approval_id)
         await broadcast(

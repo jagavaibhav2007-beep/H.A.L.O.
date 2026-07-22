@@ -24,7 +24,7 @@ _TMP = tempfile.mkdtemp(prefix="halo-test-files-")
 os.environ["LOCALAPPDATA"] = _TMP  # store's default DB path lands in the temp dir
 
 from brain import gate, store
-import brain.tools.files  # noqa: F401 -- registers the real file tools
+from brain.tools import files  # registers the real file tools; also exposes _resolve/_file_search
 
 ROOT = Path(tempfile.mkdtemp(prefix="halo-files-root-")).resolve()
 OUT = Path(tempfile.mkdtemp(prefix="halo-files-out-")).resolve()
@@ -207,6 +207,45 @@ async def check_readonly_cmd() -> None:
     print("[check 6] run_readonly_cmd: git status runs; del, redirection, --output refused: OK")
 
 
+def check_resolve() -> None:
+    home = Path.home()
+    # Bare/relative paths anchor at home, NOT the Brain's CWD (the bug that sent
+    # "Desktop" to a spurious out-of-roots location and emptied the search).
+    assert files._resolve("Desktop") == (home / "Desktop").resolve(), files._resolve("Desktop")
+    assert files._resolve("a/b.txt") == (home / "a" / "b.txt").resolve()
+    if Path.cwd().resolve() != home.resolve():
+        assert files._resolve("Desktop") != (Path.cwd() / "Desktop").resolve(), "relative path resolved against CWD"
+    # ~ and absolute paths are untouched.
+    assert files._resolve("~") == home.resolve()
+    assert files._resolve(str(ROOT / "x.txt")) == (ROOT / "x.txt").resolve()
+    print("[check 8] _resolve: bare/relative anchors at home not CWD; ~ and absolute paths untouched: OK")
+
+
+async def check_search() -> None:
+    (ROOT / "needle.pdf").write_text("x", encoding="utf-8")
+    # The result must reach the model via the tool message content, not just the
+    # status -- a found search and an empty one were both "I ran file_search."
+    FRAMES.clear()
+    res = await gate.gated_execute(
+        "file_search", {"path": str(ROOT), "pattern": "*.pdf"},
+        conversation_id="files-test", task_id=None, broadcast=broadcast,
+    )
+    assert res["pending_tool_result"]["status"] == "ok", res
+    content = res["messages"][0]["content"]
+    assert "needle.pdf" in content, content
+    assert content != "I ran file_search.", "search result discarded, not surfaced to the model"
+
+    res = await gate.gated_execute(
+        "file_search", {"path": str(ROOT), "pattern": "*.nomatch"},
+        conversation_id="files-test", task_id=None, broadcast=broadcast,
+    )
+    empty = res["messages"][0]["content"]
+    assert "[]" in empty and "no matches" in empty, empty
+    (ROOT / "needle.pdf").unlink()
+    print("[check 9] file_search: finds a known file and its name reaches the tool message; "
+          "empty result reads as explicit 'no matches': OK")
+
+
 def check_traversal() -> None:
     sneaky = str(ROOT / ".." / ".." / "Windows" / "system32" / "x")
     assert gate.classify("file_read", {"path": sneaky}) == 3, "traversal escaped roots at Tier 1"
@@ -221,6 +260,8 @@ async def main() -> None:
     await check_move()
     await check_organize()
     await check_readonly_cmd()
+    check_resolve()
+    await check_search()
     check_traversal()
     print("[brain.files] self-check OK")
 
