@@ -23,7 +23,12 @@ from websockets.asyncio.server import Server, ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 from brain import mock as mock_engine
-from brain.ipc.contract import IpcValidationError, parse_ipc_message
+from brain.ipc.contract import (
+    CONTRACT_VERSION,
+    IpcValidationError,
+    contract_major,
+    parse_ipc_message,
+)
 
 logger = logging.getLogger("brain.server")
 
@@ -40,74 +45,9 @@ _DEFERRED_MAX_BYTES = 1_048_576
 _REAL_TURN_CONCURRENCY = 4
 
 
-class _ConversationLockEntry:
-    """One lock plus the active/waiting acquisition count that owns it."""
-
-    def __init__(self) -> None:
-        self.lock = asyncio.Lock()
-        self.users = 0
-
-
-class _ConversationLockLease:
-    """Per-acquisition context manager, including cancellation-safe cleanup."""
-
-    def __init__(self, owner, conversation_id: str, entry: _ConversationLockEntry) -> None:
-        self._owner = owner
-        self._conversation_id = conversation_id
-        self._entry = entry
-        self._acquired = False
-        self._released = False
-
-    async def __aenter__(self) -> asyncio.Lock:
-        try:
-            await self._entry.lock.acquire()
-        except BaseException:
-            self._release_reference()
-            raise
-        self._acquired = True
-        return self._entry.lock
-
-    async def __aexit__(self, exc_type, exc, traceback) -> None:
-        if self._acquired:
-            self._entry.lock.release()
-        self._release_reference()
-
-    def _release_reference(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        self._entry.users -= 1
-        if (
-            self._entry.users == 0
-            and self._owner._entries.get(self._conversation_id) is self._entry
-        ):
-            # Every lease increments users synchronously before its first
-            # await, so zero proves there are no active or queued users.
-            self._owner._entries.pop(self._conversation_id)
-
-
-class _ConversationLocks:
-    """Dict-like registry whose idle per-conversation locks reclaim safely."""
-
-    def __init__(self) -> None:
-        self._entries: dict[str, _ConversationLockEntry] = {}
-
-    def setdefault(
-        self, conversation_id: str, default: asyncio.Lock | None = None
-    ) -> _ConversationLockLease:
-        # Keep graph.py's existing dict.setdefault-shaped acquisition API.
-        del default
-        entry = self._entries.get(conversation_id)
-        if entry is None:
-            entry = _ConversationLockEntry()
-            self._entries[conversation_id] = entry
-        # Count the caller before it can suspend. An exiting holder therefore
-        # cannot remove an entry already captured by a queued waiter.
-        entry.users += 1
-        return _ConversationLockLease(self, conversation_id, entry)
-
-    def __len__(self) -> int:
-        return len(self._entries)
+# ponytail: one asyncio.Lock per conversation_id, never reclaimed. Unbounded in
+# theory, but a single-user desktop app makes a handful of conversations -- add
+# reference-counted GC only if a session ever spans thousands of them.
 
 
 class BrainAlreadyRunning(RuntimeError):
@@ -397,6 +337,24 @@ class ManagedServer:
 # of broadcast_fn). Keep in sync with mock.py's handle_* functions -- a type
 # handled here but not in mock.py (or vice versa) is the documented "affordance
 # hangs forever" bug class (see CLAUDE.md, "Working against the mocked Brain").
+# Control operations the real (non-mock) Brain can't execute yet (no task
+# engine / no voice capture in Phase 2). They route through
+# _send_unsupported_operation so the UI affordance gets a correlated error
+# instead of hanging forever waiting on a confirming frame that never comes.
+_REAL_UNSUPPORTED_OPS: tuple[str, ...] = ("task_op", "lane_pin", "mic", "skill_op")
+
+# Every inbound type the real dispatch in _connection_handler actually handles
+# (real handlers + the unsupported-op group above), minus the `hello`
+# handshake, which _auth consumes before the message loop. A UI-sendable
+# inbound type in the contract that is NOT here is the "mock handles it, real
+# Brain silently drops it, affordance hangs" bug (mem/Bugs.md #12) --
+# test_server enumerates the contract and fails if this set drifts. Keep it
+# beside the if/elif chain in _connection_handler that it mirrors.
+_REAL_DISPATCH_TYPES: frozenset[str] = frozenset({
+    "user_msg", "settings_update", "interrupt", "approval_response", "memory_edit", "undo",
+    *_REAL_UNSUPPORTED_OPS,
+})
+
 _MOCK_DISPATCH: dict[str, tuple[str, bool]] = {
     "approval_response": ("handle_approval_response", True),
     "interrupt": ("handle_interrupt", False),
@@ -438,7 +396,7 @@ async def _send_unsupported_operation(msg: dict, send_fn) -> None:
 
 async def _serialize_user_msg(
     msg: dict,
-    locks: _ConversationLocks,
+    locks: dict[str, asyncio.Lock],
     turn_slots: asyncio.Semaphore,
     send,
     broadcast,
@@ -489,6 +447,27 @@ async def _auth(ws: ServerConnection, token: str, timeout: float) -> str | None:
         logger.info("dropping connection: bad token")
         return None
 
+    # Version negotiation runs only AFTER the token check -- an unauthenticated
+    # peer learns nothing about the protocol. A major mismatch is terminal:
+    # tell the (authenticated) client loudly so it can stop retrying instead of
+    # storming the reconnect loop forever, then let the caller close. Absent
+    # contract_version = pre-versioning client -> treated as compatible.
+    their_major = contract_major(parsed.get("contract_version"))
+    if their_major is not None and their_major != contract_major(CONTRACT_VERSION):
+        logger.info("dropping connection: incompatible contract major (client=%s)", their_major)
+        try:
+            await _send(ws, "error", {
+                "code": "incompatible_contract",
+                "message": (
+                    f"This client speaks contract {parsed.get('contract_version')}, "
+                    f"but the Brain speaks {CONTRACT_VERSION}. Restart the app to update."
+                ),
+                "recoverable": False,
+            })
+        except (ConnectionClosed, asyncio.TimeoutError):
+            pass
+        return None
+
     # ponytail: unknown/missing role -> "ui" (the full stream). Only Voice
     # opts into the restricted subset by declaring role:"voice".
     return "voice" if parsed.get("role") == "voice" else "ui"
@@ -497,7 +476,7 @@ async def _auth(ws: ServerConnection, token: str, timeout: float) -> str | None:
 async def _connection_handler(
     ws: ServerConnection,
     token: str,
-    locks: _ConversationLocks,
+    locks: dict[str, asyncio.Lock],
     turn_slots: asyncio.Semaphore,
     auth_timeout: float,
     authenticated: dict[ServerConnection, str],
@@ -516,7 +495,7 @@ async def _connection_handler(
         await _broadcast(authenticated, msg_type, payload)
 
     try:
-        await send_fn("hello_ack", {})
+        await send_fn("hello_ack", {"contract_version": CONTRACT_VERSION})
     except (ConnectionClosed, asyncio.TimeoutError):
         return
     authenticated[ws] = role
@@ -596,7 +575,7 @@ async def _connection_handler(
                 from brain import gate
 
                 runtime.spawn(gate.handle_undo(msg, broadcast_fn), send_fn, msg)
-            elif not mock and msg["type"] in ("task_op", "lane_pin"):
+            elif not mock and msg["type"] in _REAL_UNSUPPORTED_OPS:
                 runtime.spawn(_send_unsupported_operation(msg, send_fn), send_fn, msg)
             elif mock and msg["type"] in _MOCK_DISPATCH:
                 handler_name, needs_send = _MOCK_DISPATCH[msg["type"]]
@@ -616,7 +595,7 @@ async def start(
     """Start the server in-process. Returns (server, token) for callers/tests
     that need the bound port without touching session.json."""
     token = token or secrets.token_urlsafe(32)
-    locks = _ConversationLocks()
+    locks: dict[str, asyncio.Lock] = {}
     turn_slots = asyncio.Semaphore(_REAL_TURN_CONCURRENCY)
     authenticated: dict[ServerConnection, str] = {}  # connection -> role ("ui"/"voice")
     runtime = _ServerRuntime()
@@ -652,7 +631,15 @@ async def _run(mock: bool = False) -> None:
         logger.info(
             "listening on 127.0.0.1:%d, session.json written to %s (mock=%s)", bound_port, SESSION_FILE, mock
         )
-        await server.serve_forever()
+        try:
+            await server.serve_forever()
+        finally:
+            if not mock:
+                # Graceful shutdown flushes any dirty conversations' memory
+                # (graph.aclose -> memory.flush_all) before the process exits.
+                from brain import graph
+
+                await graph.aclose()
 
 
 def main() -> None:

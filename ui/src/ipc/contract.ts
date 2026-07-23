@@ -16,7 +16,19 @@ export interface HelloMsg extends IpcEnvelope {
   type: "hello";
   token: string;
   role?: "ui" | "voice"; // absent -> "ui" (full stream); Voice opts into its subset
+  contract_version?: string; // major.minor; absent -> pre-versioning client, treated as compatible
 }
+
+// The protocol version this build speaks. Bump the major on any breaking
+// envelope/field change; a major mismatch across the WS is refused loudly on
+// both sides. Hand-mirrored with brain/brain/ipc/contract.py CONTRACT_VERSION
+// and shared/ipc-contract.json "version" — check_contract_sync.py compares them.
+export const CONTRACT_VERSION = "1.0";
+export const contractMajor = (v: string | undefined): number | null => {
+  if (typeof v !== "string") return null;
+  const major = Number.parseInt(v.split(".")[0], 10);
+  return Number.isNaN(major) ? null : major;
+};
 
 export interface UserMsg extends IpcEnvelope {
   type: "user_msg";
@@ -82,6 +94,7 @@ export interface UndoMsg extends IpcEnvelope {
 
 export interface HelloAckMsg extends IpcEnvelope {
   type: "hello_ack";
+  contract_version?: string; // the Brain's protocol version; absent -> old Brain, treated as compatible
 }
 
 export interface TokenMsg extends IpcEnvelope {
@@ -127,7 +140,7 @@ export interface DoneMsg extends IpcEnvelope {
   task_id?: string;
 }
 
-export type OperationKind = "undo" | "memory_edit" | "approval_response" | "task_op" | "lane_pin";
+export type OperationKind = "undo" | "memory_edit" | "approval_response" | "task_op" | "lane_pin" | "mic" | "skill_op";
 
 interface ErrorMsgBase extends IpcEnvelope {
   type: "error";
@@ -263,7 +276,7 @@ export const CONTRACT_SPEC = {
     type: field(S), id: field(S), ts: field(S),
   } },
   messages: {
-    hello: message(IN, ["token"], { token: field(S), role: field(S, ["ui", "voice"]) }),
+    hello: message(IN, ["token"], { token: field(S), role: field(S, ["ui", "voice"]), contract_version: field(S) }),
     user_msg: message(IN, ["text", "conversation_id", "source"], {
       text: field(S), conversation_id: field(S), source: field(S, ["ui", "voice"]),
     }),
@@ -282,7 +295,7 @@ export const CONTRACT_SPEC = {
     mic: message(IN, ["op"], { op: field(S, ["mute", "unmute"]) }),
     settings_update: message(IN, ["key", "value"], { key: field(S), value: field(J) }),
     undo: message(IN, ["undo_token"], { undo_token: field(S) }),
-    hello_ack: message(OUT, [], {}),
+    hello_ack: message(OUT, [], { contract_version: field(S) }),
     token: message(OUT, ["text", "conversation_id"], { text: field(S), conversation_id: field(S) }),
     activity: message(OUT, ["text", "narrate", "task_id", "undoable"], {
       text: field(S), narrate: field(B), task_id: field(S), undoable: field(B), undo_token: field(S),
@@ -295,7 +308,7 @@ export const CONTRACT_SPEC = {
     done: message(OUT, ["conversation_id"], { conversation_id: field(S), task_id: field(S) }),
     error: message(OUT, ["code", "message", "recoverable"], {
       code: field(S), message: field(S), recoverable: field(B), conversation_id: field(S),
-      operation_kind: field(S, ["undo", "memory_edit", "approval_response", "task_op", "lane_pin"]),
+      operation_kind: field(S, ["undo", "memory_edit", "approval_response", "task_op", "lane_pin", "mic", "skill_op"]),
       operation_id: field(S),
     }),
     task_state: message(OUT, ["task_id", "state", "lane"], {
@@ -362,8 +375,19 @@ function valueMatches(value: unknown, spec: RuntimeFieldSpec): boolean {
 
 /** Validate an arbitrary decoded-JSON frame against the contract. Throws on
  * an unknown `type` or a missing required field — never returns a partial
- * message. */
-export function parseIpcMessage(raw: unknown, expectedDirection?: IpcDirection): IpcMessage {
+ * message.
+ *
+ * `tolerantFields` (off by default): skip the unknown-extra-field rejection so
+ * a frame from a newer minor-version peer that added a field to a KNOWN type
+ * still parses (the extra rides along unread — the reducer only touches
+ * declared fields). Declared fields stay strictly typed either way. Only the
+ * UI's inbound onmessage opts in; outbound sends and both selfchecks stay
+ * strict so the trust boundary and drift checks don't loosen. */
+export function parseIpcMessage(
+  raw: unknown,
+  expectedDirection?: IpcDirection,
+  opts?: { tolerantFields?: boolean },
+): IpcMessage {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("ipc: frame is not an object");
   }
@@ -386,8 +410,10 @@ export function parseIpcMessage(raw: unknown, expectedDirection?: IpcDirection):
   }
 
   const allowed = new Set([...Object.keys(CONTRACT_SPEC.envelope.fields), ...Object.keys(messageSpec.fields)]);
-  for (const field of Object.keys(obj)) {
-    if (!allowed.has(field)) throw new Error(`ipc: "${type}" has unknown field "${field}"`);
+  if (!opts?.tolerantFields) {
+    for (const field of Object.keys(obj)) {
+      if (!allowed.has(field)) throw new Error(`ipc: "${type}" has unknown field "${field}"`);
+    }
   }
   for (const [field, spec] of Object.entries(CONTRACT_SPEC.envelope.fields)) {
     if (!valueMatches(obj[field], spec)) throw new Error(`ipc: envelope field "${field}" has an invalid value`);

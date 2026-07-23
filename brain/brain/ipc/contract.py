@@ -24,9 +24,26 @@ class IpcEnvelope(TypedDict):
 # ---- Inbound to Brain (from UI or Voice) ----
 
 
+# The protocol version this build speaks. Bump the major on any breaking
+# envelope/field change; a major mismatch across the WS is refused loudly on
+# both sides. Hand-mirrored with ui/src/ipc/contract.ts CONTRACT_VERSION and
+# shared/ipc-contract.json "version" -- check_contract_sync.py compares them.
+CONTRACT_VERSION = "1.0"
+
+
+def contract_major(version: object) -> int | None:
+    if not isinstance(version, str):
+        return None
+    try:
+        return int(version.split(".")[0])
+    except ValueError:
+        return None
+
+
 class HelloMsg(IpcEnvelope):
     token: str
     role: NotRequired[Literal["ui", "voice"]]  # absent -> "ui" (full stream); Voice opts into its subset
+    contract_version: NotRequired[str]  # major.minor; absent -> pre-versioning client, treated as compatible
 
 
 class UserMsg(IpcEnvelope):
@@ -83,7 +100,7 @@ class UndoMsg(IpcEnvelope):
 
 
 class HelloAckMsg(IpcEnvelope):
-    pass
+    contract_version: NotRequired[str]  # the Brain's protocol version; absent -> old Brain, treated as compatible
 
 
 class TokenMsg(IpcEnvelope):
@@ -238,7 +255,9 @@ CONTRACT_SPEC: dict = {
         "type": _field(S), "id": _field(S), "ts": _field(S),
     }},
     "messages": {
-        "hello": _message(IN, ["token"], {"token": _field(S), "role": _field(S, ["ui", "voice"])}),
+        "hello": _message(IN, ["token"], {
+            "token": _field(S), "role": _field(S, ["ui", "voice"]), "contract_version": _field(S),
+        }),
         "user_msg": _message(IN, ["text", "conversation_id", "source"], {
             "text": _field(S), "conversation_id": _field(S), "source": _field(S, ["ui", "voice"]),
         }),
@@ -260,7 +279,7 @@ CONTRACT_SPEC: dict = {
         "mic": _message(IN, ["op"], {"op": _field(S, ["mute", "unmute"])}),
         "settings_update": _message(IN, ["key", "value"], {"key": _field(S), "value": _field(J)}),
         "undo": _message(IN, ["undo_token"], {"undo_token": _field(S)}),
-        "hello_ack": _message(OUT, [], {}),
+        "hello_ack": _message(OUT, [], {"contract_version": _field(S)}),
         "token": _message(OUT, ["text", "conversation_id"], {
             "text": _field(S), "conversation_id": _field(S),
         }),
@@ -276,7 +295,7 @@ CONTRACT_SPEC: dict = {
         "done": _message(OUT, ["conversation_id"], {"conversation_id": _field(S), "task_id": _field(S)}),
         "error": _message(OUT, ["code", "message", "recoverable"], {
             "code": _field(S), "message": _field(S), "recoverable": _field(B), "conversation_id": _field(S),
-            "operation_kind": _field(S, ["undo", "memory_edit", "approval_response", "task_op", "lane_pin"]),
+            "operation_kind": _field(S, ["undo", "memory_edit", "approval_response", "task_op", "lane_pin", "mic", "skill_op"]),
             "operation_id": _field(S),
         }),
         "task_state": _message(OUT, ["task_id", "state", "lane"], {

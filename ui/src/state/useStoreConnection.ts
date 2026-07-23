@@ -22,8 +22,8 @@ export function useStoreConnection() {
     const event =
       connState === "connected"
         ? ({ type: "authenticated" } as const)
-        : connState === "reconnecting"
-          ? ({ type: "ws_closed" } as const)
+        : connState === "reconnecting" || connState === "incompatible"
+          ? ({ type: "ws_closed" } as const) // incompatible: terminal, treated as not-connected for the store slice
           : ({ type: "ws_open" } as const);
     useHaloStore.getState().applyConnectionEvent(event);
   }, [connState]);

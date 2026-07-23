@@ -456,16 +456,95 @@ async def check_real_task_controls_fail_honestly() -> None:
         frames.append((kind, payload))
     await server._send_unsupported_operation(_frame("task_op", task_id="task-1", op="pause"), send)
     await server._send_unsupported_operation(_frame("lane_pin", task_id="task-2", lane=3), send)
+    # mic/skill_op carry no domain id -> correlate by the envelope id (fallback).
+    mic = _frame("mic", op="mute")
+    skill = _frame("skill_op", skill_name="demo", op="disable")
+    await server._send_unsupported_operation(mic, send)
+    await server._send_unsupported_operation(skill, send)
     assert frames[0][1]["operation_kind"] == "task_op" and frames[0][1]["operation_id"] == "task-1", frames
     assert frames[1][1]["operation_kind"] == "lane_pin" and frames[1][1]["operation_id"] == "task-2", frames
+    assert frames[2][1]["operation_kind"] == "mic" and frames[2][1]["operation_id"] == mic["id"], frames
+    assert frames[3][1]["operation_kind"] == "skill_op" and frames[3][1]["operation_id"] == skill["id"], frames
     assert all(payload["code"] == "operation_unsupported" for _, payload in frames), frames
-    print("[check 15] real task controls return exact correlated unsupported errors: OK")
+    print("[check 15] real task/mic/skill controls return correlated unsupported errors: OK")
 
 
-async def check_turn_admission_and_lock_reclamation() -> None:
-    """Distinct real conversations are capped and completed lock entries vanish."""
+def check_real_dispatch_covers_all_ui_inbound_types() -> None:
+    """Every UI-sendable inbound type in the contract has a real (non-mock)
+    dispatch branch. A new inbound type added to the contract but not wired into
+    _connection_handler is the "mock handles it, real Brain drops it silently,
+    affordance hangs forever" bug (mem/Bugs.md #12) -- this fails the instant
+    the handled set drifts from the contract. `hello` is excluded: _auth
+    consumes it before the message loop."""
+    from brain.ipc.contract import CONTRACT_SPEC
+
+    inbound = {
+        name
+        for name, spec in CONTRACT_SPEC["messages"].items()
+        if spec["direction"] == "inbound" and name != "hello"
+    }
+    assert inbound == server._REAL_DISPATCH_TYPES, inbound ^ server._REAL_DISPATCH_TYPES
+    print("[check 17] real dispatch covers every UI-sendable inbound type: OK")
+
+
+async def check_real_dispatch_routes_unsupported_over_wire(port: int, token: str) -> None:
+    """Proves the dispatch BRANCH (not just the helper) routes mic/skill_op:
+    the exact regression the mock-only handler masked. Each returns a correlated
+    operation_unsupported error over the real socket, connection stays up."""
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        settings = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+        assert settings["type"] == "settings_state", settings
+        await _drain_snapshot(ws)
+        for frame in (_frame("mic", op="mute"), _frame("skill_op", skill_name="x", op="disable")):
+            await ws.send(json.dumps(frame))
+            while True:
+                reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                if reply["type"] != "spend_update":  # unsolicited global broadcast
+                    break
+            assert reply["type"] == "error" and reply["code"] == "operation_unsupported", reply
+            assert reply["operation_kind"] == frame["type"] and reply["operation_id"] == frame["id"], reply
+    finally:
+        await ws.close()
+    print("[check 18] real dispatch routes mic/skill_op to unsupported over the wire: OK")
+
+
+async def check_contract_version_negotiation(port: int, token: str) -> None:
+    """hello_ack advertises the Brain's contract version; a same-major client
+    (any minor) is accepted; a major mismatch gets a terminal
+    incompatible_contract error, then the socket closes -- so the UI can stop
+    retrying instead of storming the reconnect loop forever."""
+    from brain.ipc.contract import CONTRACT_VERSION
+
+    ws = await _connect(port)
+    try:
+        await ws.send(json.dumps(_frame("hello", token=token, contract_version="1.999")))
+        ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+        assert ack["type"] == "hello_ack" and ack["contract_version"] == CONTRACT_VERSION, ack
+    finally:
+        await ws.close()
+
+    ws = await _connect(port)
+    try:
+        await ws.send(json.dumps(_frame("hello", token=token, contract_version="2.0")))
+        reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        assert reply["type"] == "error" and reply["code"] == "incompatible_contract", reply
+        assert reply["recoverable"] is False, reply
+        try:
+            await asyncio.wait_for(ws.recv(), timeout=2)
+            raise AssertionError("expected socket to close after incompatible_contract")
+        except websockets.exceptions.ConnectionClosed:
+            pass
+    finally:
+        await ws.close()
+    print("[check 19] contract version: same-major accepted, major mismatch refused then closed: OK")
+
+
+async def check_turn_admission_and_ordering() -> None:
+    """Distinct real conversations are capped; same-conversation order holds."""
     real_run_turn = graph.run_turn
-    locks = server._ConversationLocks()
+    locks: dict[str, asyncio.Lock] = {}
     slots = asyncio.Semaphore(2)
     active = 0
     peak = 0
@@ -493,7 +572,6 @@ async def check_turn_admission_and_lock_reclamation() -> None:
         ]
         await asyncio.gather(*distinct)
         assert peak == 2, peak
-        assert len(locks) == 0, "idle conversation locks were retained"
 
         order.clear()
         same = [
@@ -505,10 +583,9 @@ async def check_turn_admission_and_lock_reclamation() -> None:
         ]
         await asyncio.gather(*same)
         assert order == ["0", "1", "2", "3", "4"], order
-        assert len(locks) == 0
     finally:
         graph.run_turn = real_run_turn
-    print("[check 16] real turns cap at 2 in the test; same-conversation order holds; idle locks reclaim: OK")
+    print("[check 16] real turns cap at 2 in the test; same-conversation order holds: OK")
 
 
 def check_frame_visible_to_routing() -> None:
@@ -542,16 +619,22 @@ async def main() -> None:
         await check_settings_failures_and_status_persistence(port, token)
         await check_snapshot_not_interleaved()
         await check_sends_and_deferred_queue_are_bounded()
+        await check_real_dispatch_routes_unsupported_over_wire(port, token)
+        await check_contract_version_negotiation(port, token)
     finally:
         server.close()
         await server.wait_closed()
+        # v2 memory arms an idle-consolidation timer per real turn; aclose ->
+        # memory.flush_all cancels them so they don't leak past interpreter exit.
+        await graph.aclose()
     await check_idle_auth_times_out()
     check_session_file_is_atomic_and_private()
     check_second_brain_lock_is_rejected()
     check_frame_visible_to_routing()
     await check_tasks_are_supervised_and_cancelled_on_close()
     await check_real_task_controls_fail_honestly()
-    await check_turn_admission_and_lock_reclamation()
+    check_real_dispatch_covers_all_ui_inbound_types()
+    await check_turn_admission_and_ordering()
     print("[brain.server] self-check OK")
 
 

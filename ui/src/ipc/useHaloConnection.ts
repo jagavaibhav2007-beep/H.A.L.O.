@@ -7,6 +7,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  CONTRACT_VERSION,
+  contractMajor,
   parseIpcMessage,
   type ApprovalResponseMsg,
   type InterruptMsg,
@@ -40,7 +42,10 @@ interface Session {
   token: string;
 }
 
-export type ConnState = "connecting" | "connected" | "reconnecting";
+// "incompatible": the Brain speaks a different contract major — terminal, the
+// reconnect loop stops and the UI tells the user to restart (a retry can't fix
+// a version skew). Distinct from the recoverable "reconnecting".
+export type ConnState = "connecting" | "connected" | "reconnecting" | "incompatible";
 export type SidecarStatus = "unknown" | "starting" | "running" | "restarting" | "error";
 
 export interface SidecarSnapshot {
@@ -72,10 +77,26 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
 
   useEffect(() => {
     let torndown = false;
+    let incompatible = false; // terminal contract-major skew: stop reconnecting for good
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
+    // Enter the terminal incompatible state: detach handlers before closing so
+    // the intentional close doesn't fall into the reconnect loop (same pattern
+    // the effect cleanup uses), then surface the persistent state.
+    function stopForIncompatible(ws: WebSocket) {
+      incompatible = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      ws.onclose = null;
+      ws.onmessage = null;
+      ws.onopen = null;
+      ws.close();
+      if (wsRef.current === ws) wsRef.current = null;
+      authenticatedRef.current = false;
+      setConnState("incompatible");
+    }
+
     function connect() {
-      if (torndown) return;
+      if (torndown || incompatible) return;
       setConnState((s) => (s === "connected" ? "reconnecting" : s));
 
       invoke<Session>("read_session")
@@ -93,6 +114,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
               ts: new Date().toISOString(),
               token: session.token,
               role: "ui" as const, // gets the full stream (11-ipc-contract.md routing)
+              contract_version: CONTRACT_VERSION,
             };
             try {
               parseIpcMessage(hello);
@@ -104,23 +126,52 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
           };
 
           ws.onmessage = (ev) => {
+            // Tolerant of schema skew: an unparseable/unknown-type frame is
+            // logged and DROPPED — never close the socket, or a single bad
+            // frame becomes an infinite 1s reconnect storm. Extra fields on a
+            // known type ride along unread (tolerantFields). Declared fields
+            // stay strictly typed.
+            let message: IpcMessage;
             try {
-              const message = parseIpcMessage(JSON.parse(ev.data));
-              if (message.type === "hello_ack") {
-                if (authenticatedRef.current) return;
-                flushQueuedMessages(ws, queueRef.current);
-                authenticatedRef.current = true;
-                setConnState("connected");
+              message = parseIpcMessage(JSON.parse(ev.data), "outbound", { tolerantFields: true });
+            } catch (e) {
+              console.warn("halo: dropping unparseable/unknown inbound frame", e);
+              return;
+            }
+
+            // Terminal contract skew: the Brain refuses our major and closes.
+            // Recognize it before hello_ack (no hello_ack will ever arrive) and
+            // stop retrying — a reconnect can't fix a version mismatch.
+            if (
+              !authenticatedRef.current &&
+              message.type === "error" &&
+              message.code === "incompatible_contract"
+            ) {
+              console.error("halo: incompatible contract —", message.message);
+              stopForIncompatible(ws);
+              return;
+            }
+
+            if (message.type === "hello_ack") {
+              if (authenticatedRef.current) return;
+              const brainMajor = contractMajor(message.contract_version);
+              if (brainMajor !== null && brainMajor !== contractMajor(CONTRACT_VERSION)) {
+                console.error(
+                  `halo: incompatible contract — Brain speaks ${message.contract_version}, UI speaks ${CONTRACT_VERSION}`,
+                );
+                stopForIncompatible(ws);
                 return;
               }
-              if (!authenticatedRef.current) {
-                throw new Error(`received ${message.type} before hello_ack`);
-              }
-              onMessageRef.current(message);
-            } catch (e) {
-              console.error("halo: dropping bad inbound frame", e);
-              ws.close();
+              flushQueuedMessages(ws, queueRef.current);
+              authenticatedRef.current = true;
+              setConnState("connected");
+              return;
             }
+            if (!authenticatedRef.current) {
+              console.warn(`halo: dropping ${message.type} received before hello_ack`);
+              return;
+            }
+            onMessageRef.current(message);
           };
 
           ws.onclose = () => {
@@ -128,7 +179,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
               wsRef.current = null;
               authenticatedRef.current = false;
             }
-            if (torndown) return;
+            if (torndown || incompatible) return;
             setConnState("reconnecting");
             // ponytail: fixed ~1s retry; the real backoff ladder (1s/5s/30s)
             // already lives in supervisor.rs for the process itself.

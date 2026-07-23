@@ -16,6 +16,7 @@ import {
   selectActivities,
   selectVoice,
   selectChats,
+  selectOperationErrors,
 } from "../state/store";
 import type { AssistantTurn, Turn } from "../state/reducer";
 import type { ActivityMsg } from "../ipc/contract";
@@ -36,6 +37,16 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   const conv = useHaloStore(selectConversation(conversationId));
   const activities = useHaloStore(selectActivities);
   const voice = useHaloStore(selectVoice);
+  const operationErrors = useHaloStore(selectOperationErrors);
+  // Against the real Brain there is no voice capture yet, so a mic toggle comes
+  // back as an operation_unsupported error (correlated by envelope id, so keyed
+  // "mic:<uuid>"). Nothing else renders that error, so surface it here: once
+  // one arrives, the mic control is honestly disabled instead of dead. In mock
+  // mode voice_state confirms the toggle and no such error is ever produced.
+  const micUnsupported = useMemo(
+    () => Object.keys(operationErrors).some((k) => k.startsWith("mic:")),
+    [operationErrors],
+  );
   const appendUserTurn = useHaloStore((s) => s.appendUserTurn);
   const acknowledgeInputRestore = useHaloStore((s) => s.acknowledgeInputRestore);
   const titleFromMessage = useHaloStore((s) => s.titleFromMessage);
@@ -110,15 +121,17 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   const restored = empty && chats.all.find((c) => c.id === conversationId)?.restored;
   const latestAssistant = [...turns].reverse().find((turn): turn is AssistantTurn => turn.role === "assistant");
   const connectionStatus =
-    connState === "reconnecting"
-      ? "Halo is reconnecting. Messages will send when reconnected."
-      : connState === "connecting"
-        ? "Halo is connecting. Messages will send when connected."
-        : latestAssistant?.status === "streaming"
-          ? "Halo is thinking."
-          : latestAssistant?.status === "done"
-            ? "Halo response complete."
-            : "";
+    connState === "incompatible"
+      ? "Halo is running a different protocol version. Please restart the app to update."
+      : connState === "reconnecting"
+        ? "Halo is reconnecting. Messages will send when reconnected."
+        : connState === "connecting"
+          ? "Halo is connecting. Messages will send when connected."
+          : latestAssistant?.status === "streaming"
+            ? "Halo is thinking."
+            : latestAssistant?.status === "done"
+              ? "Halo response complete."
+              : "";
   const latestError =
     latestAssistant?.status === "error" ? latestAssistant.error?.message ?? "Halo could not answer." : "";
 
@@ -167,7 +180,16 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
           type="button"
           className="chat-input-mic"
           data-muted={voice.state === "muted" || undefined}
-          aria-label={voice.state === "muted" ? "Unmute mic" : "Mute mic"}
+          data-unavailable={micUnsupported || undefined}
+          disabled={micUnsupported}
+          title={micUnsupported ? "Voice input isn't available yet." : undefined}
+          aria-label={
+            micUnsupported
+              ? "Voice input isn't available yet"
+              : voice.state === "muted"
+                ? "Unmute mic"
+                : "Mute mic"
+          }
           aria-pressed={voice.state === "muted"}
           onClick={() => sendMic(voice.state === "muted" ? "unmute" : "mute")}
         >
@@ -185,9 +207,11 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
           placeholder="Message Halo…"
           rows={1}
         />
-        {connState !== "connected" && (
+        {connState === "incompatible" ? (
+          <span className="chat-queued-badge">restart to update</span>
+        ) : connState !== "connected" ? (
           <span className="chat-queued-badge">will send when reconnected</span>
-        )}
+        ) : null}
       </div>
     </div>
   );

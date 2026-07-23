@@ -36,6 +36,10 @@ sys.path.insert(0, str(ROOT / "brain"))
 _TMP = tempfile.mkdtemp(prefix="halo-phase2-check-")
 os.environ["HALO_LLM_STUB"] = "1"
 os.environ["HALO_EXTRACT_STUB"] = "1"
+# v2 memory: consolidation is idle-debounced. Shrink the idle window to ~50ms
+# so the "loop until belief_state" checks see a consolidation promptly instead
+# of waiting out the 1800s default.
+os.environ["HALO_MEMORY_IDLE_S"] = "0.05"
 os.environ["LOCALAPPDATA"] = _TMP
 os.environ["HALO_CHECKPOINT_DB"] = str(Path(_TMP) / "checkpoints.db")
 os.environ["HALO_KEYRING_DIR"] = str(Path(_TMP) / "keys")

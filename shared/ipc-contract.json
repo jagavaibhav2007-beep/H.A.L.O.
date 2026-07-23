@@ -1,5 +1,6 @@
 {
   "$comment": "Single source of truth for Halo IPC runtime validation. ui/src/ipc/contract.ts and brain/brain/ipc/contract.py are hand-mirrored from this file. Run `python shared/check_contract_sync.py` after editing any copy; it compares directions, required and optional fields, runtime types, and enums.",
+  "version": "1.0",
   "envelope": {
     "required": ["type", "id", "ts"],
     "fields": {
@@ -11,7 +12,7 @@
   "messages": {
     "hello": {
       "direction": "inbound", "required": ["token"],
-      "fields": { "token": { "type": "string" }, "role": { "type": "string", "enum": ["ui", "voice"] } }
+      "fields": { "token": { "type": "string" }, "role": { "type": "string", "enum": ["ui", "voice"] }, "contract_version": { "type": "string" } }
     },
     "user_msg": {
       "direction": "inbound", "required": ["text", "conversation_id", "source"],
@@ -54,7 +55,7 @@
       "fields": { "undo_token": { "type": "string" } }
     },
 
-    "hello_ack": { "direction": "outbound", "required": [], "fields": {} },
+    "hello_ack": { "direction": "outbound", "required": [], "fields": { "contract_version": { "type": "string" } } },
     "token": {
       "direction": "outbound", "required": ["text", "conversation_id"],
       "fields": { "text": { "type": "string" }, "conversation_id": { "type": "string" } }
@@ -83,7 +84,7 @@
       "fields": {
         "code": { "type": "string" }, "message": { "type": "string" }, "recoverable": { "type": "boolean" },
         "conversation_id": { "type": "string" },
-        "operation_kind": { "type": "string", "enum": ["undo", "memory_edit", "approval_response", "task_op", "lane_pin"] },
+        "operation_kind": { "type": "string", "enum": ["undo", "memory_edit", "approval_response", "task_op", "lane_pin", "mic", "skill_op"] },
         "operation_id": { "type": "string" }
       }
     },

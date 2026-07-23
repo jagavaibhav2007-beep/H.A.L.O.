@@ -35,6 +35,13 @@ def load_python_contract() -> dict:
     return CONTRACT_SPEC
 
 
+def load_python_version() -> str:
+    sys.path.insert(0, str(ROOT / "brain"))
+    from brain.ipc.contract import CONTRACT_VERSION  # noqa: PLC0415
+
+    return CONTRACT_VERSION
+
+
 def load_ts_contract() -> dict:
     rel_path = TS_CONTRACT_PATH.relative_to(ROOT).as_posix()
     script = (
@@ -53,6 +60,26 @@ def load_ts_contract() -> dict:
         print(result.stderr)
         sys.exit(1)
     return json.loads(result.stdout)
+
+
+def load_ts_version() -> str:
+    rel_path = TS_CONTRACT_PATH.relative_to(ROOT).as_posix()
+    script = (
+        f"import {{ CONTRACT_VERSION }} from './{rel_path}';"
+        "console.log(CONTRACT_VERSION);"
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        print("[check_contract_sync] failed to read CONTRACT_VERSION from contract.ts:")
+        print(result.stderr)
+        sys.exit(1)
+    return result.stdout.strip()
 
 
 def diff(label_a: str, a: dict, label_b: str, b: dict) -> list[str]:
@@ -80,6 +107,19 @@ def main() -> int:
         *diff("schema", schema, "python", python_contract),
         *diff("schema", schema, "typescript", ts_contract),
     ]
+
+    # The contract_version FIELD is compared by the structural diff above; this
+    # cross-checks the version VALUE, a single hand-mirrored constant in each
+    # copy that the structural comparison never sees. A drift there = spurious
+    # incompatibility at runtime (one side refuses the other), so pin it here.
+    schema_version = json.loads(SCHEMA_PATH.read_text(encoding="utf-8")).get("version")
+    versions = {
+        "schema": schema_version,
+        "python": load_python_version(),
+        "typescript": load_ts_version(),
+    }
+    if len(set(versions.values())) != 1:
+        problems.append(f"CONTRACT_VERSION differs across copies: {versions}")
 
     if problems:
         print("[check_contract_sync] DRIFT DETECTED:")

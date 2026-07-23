@@ -189,4 +189,31 @@ for (const [type, spec] of Object.entries(CONTRACT_SPEC.messages)) {
   );
 }
 
+// A6: schema-skew tolerance. An unknown extra field on a KNOWN type is
+// rejected by default (strict, the trust-boundary/outbound path), but tolerated
+// under `tolerantFields` (the UI's inbound onmessage) so a frame from a newer
+// minor-version Brain still parses instead of storming the reconnect loop.
+// Declared fields stay strictly typed either way, and an unknown TYPE is never
+// tolerated.
+const withExtra = { ...sample, future_field: "from a newer Brain" };
+expectRejected(withExtra, "unknown extra field rejected by default");
+try {
+  parseIpcMessage(withExtra, "inbound", { tolerantFields: true });
+} catch (e) {
+  throw new Error(`expected tolerantFields to accept an unknown extra field: ${e}`);
+}
+try {
+  // tolerantFields must NOT loosen declared-field typing.
+  parseIpcMessage({ ...sample, source: "other" }, "inbound", { tolerantFields: true });
+  throw new Error("tolerantFields wrongly accepted an invalid declared field");
+} catch (e) {
+  if (String(e).includes("wrongly accepted")) throw e;
+}
+try {
+  parseIpcMessage({ type: "not_a_real_type", id: "x", ts: "x" }, undefined, { tolerantFields: true });
+  throw new Error("tolerantFields wrongly accepted an unknown type");
+} catch (e) {
+  if (String(e).includes("wrongly accepted")) throw e;
+}
+
 console.log("[contract.selfcheck.ts] self-check OK");
