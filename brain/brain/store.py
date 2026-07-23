@@ -24,7 +24,7 @@ import sqlite_vec  # hard dep -- hoisted so it isn't re-imported inside three ho
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EMBED_DIM = 384
 
 _conn: sqlite3.Connection | None = None
@@ -102,68 +102,109 @@ def close() -> None:
         _conn = None
 
 
+# [v2] Episodic + consolidation-cursor tables. Kept separate so both the
+# fresh-create path and the v1->v2 upgrade path run the exact same DDL.
+_V2_NEW_TABLES = """
+    CREATE TABLE IF NOT EXISTS session_summary (
+        summary_id TEXT PRIMARY KEY,
+        conversation_id TEXT,
+        text TEXT,
+        key_points_json TEXT,
+        created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_meta (
+        conversation_id TEXT PRIMARY KEY,
+        consolidation_cursor INTEGER DEFAULT 0,
+        message_count INTEGER DEFAULT 0,
+        last_activity_at TEXT
+    );
+"""
+
+
 def _run_migrations(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
         return
     with conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS belief (
-                belief_id TEXT PRIMARY KEY,
-                text TEXT NOT NULL,
-                kind TEXT,
-                provenance TEXT NOT NULL CHECK (provenance IN ('user','inferred')),
-                salience REAL NOT NULL DEFAULT 0.6,
-                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived','superseded')),
-                superseded_by TEXT,
-                created_at TEXT NOT NULL,
-                last_used_at TEXT NOT NULL
-            );
+        if version < 1:
+            # Fresh DB: create everything directly at the v2 shape (belief
+            # carries valid_at/invalid_at from the start).
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS belief (
+                    belief_id TEXT PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    kind TEXT,
+                    provenance TEXT NOT NULL CHECK (provenance IN ('user','inferred')),
+                    salience REAL NOT NULL DEFAULT 0.6,
+                    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived','superseded')),
+                    superseded_by TEXT,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT NOT NULL,
+                    valid_at TEXT,
+                    invalid_at TEXT
+                );
 
-            CREATE TABLE IF NOT EXISTS belief_map (
-                rowid INTEGER PRIMARY KEY,
-                belief_id TEXT UNIQUE NOT NULL
-            );
+                CREATE TABLE IF NOT EXISTS belief_map (
+                    rowid INTEGER PRIMARY KEY,
+                    belief_id TEXT UNIQUE NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS action (
-                action_id TEXT PRIMARY KEY,
-                tool TEXT,
-                args_redacted TEXT,
-                tier INTEGER,
-                lane INTEGER,
-                result TEXT,
-                undoable INTEGER NOT NULL DEFAULT 0,
-                undo_token TEXT UNIQUE,
-                inverse_json TEXT,
-                consumed INTEGER NOT NULL DEFAULT 0,
-                task_id TEXT,
-                ts TEXT NOT NULL
-            );
+                CREATE TABLE IF NOT EXISTS action (
+                    action_id TEXT PRIMARY KEY,
+                    tool TEXT,
+                    args_redacted TEXT,
+                    tier INTEGER,
+                    lane INTEGER,
+                    result TEXT,
+                    undoable INTEGER NOT NULL DEFAULT 0,
+                    undo_token TEXT UNIQUE,
+                    inverse_json TEXT,
+                    consumed INTEGER NOT NULL DEFAULT 0,
+                    task_id TEXT,
+                    ts TEXT NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS task (
-                task_id TEXT PRIMARY KEY,
-                state TEXT,
-                lane INTEGER,
-                title TEXT,
-                step INTEGER,
-                steps_total INTEGER,
-                step_label TEXT,
-                reason TEXT,
-                updated_at TEXT
-            );
+                CREATE TABLE IF NOT EXISTS task (
+                    task_id TEXT PRIMARY KEY,
+                    state TEXT,
+                    lane INTEGER,
+                    title TEXT,
+                    step INTEGER,
+                    steps_total INTEGER,
+                    step_label TEXT,
+                    reason TEXT,
+                    updated_at TEXT
+                );
 
-            CREATE TABLE IF NOT EXISTS spend (
-                day TEXT PRIMARY KEY,
-                usd REAL NOT NULL DEFAULT 0
-            );
+                CREATE TABLE IF NOT EXISTS spend (
+                    day TEXT PRIMARY KEY,
+                    usd REAL NOT NULL DEFAULT 0
+                );
 
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-            """
-        )
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+                """
+                + _V2_NEW_TABLES
+            )
+        elif version < 2:
+            # Upgrade an existing v1 DB in place. valid_at backfills to
+            # created_at; superseded rows are dead so they get invalid_at too
+            # (archived rows keep invalid_at NULL -- "not auto-injected", not
+            # "false"). Idempotent: executescript below implicitly commits, so
+            # a crash between here and PRAGMA user_version=2 must not re-raise
+            # "duplicate column name" on the next startup's retry.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(belief)").fetchall()}
+            if "valid_at" not in cols:
+                conn.execute("ALTER TABLE belief ADD COLUMN valid_at TEXT")
+            if "invalid_at" not in cols:
+                conn.execute("ALTER TABLE belief ADD COLUMN invalid_at TEXT")
+            conn.execute("UPDATE belief SET valid_at = created_at")
+            conn.execute("UPDATE belief SET invalid_at = created_at WHERE status = 'superseded'")
+            conn.executescript(_V2_NEW_TABLES)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 def _now() -> str:
@@ -198,8 +239,10 @@ def _embed(text: str) -> list[float] | None:
         return None
 
 
-def _index_embedding(conn: sqlite3.Connection, belief_id: str, text: str) -> None:
-    vec = _embed(text)
+def _index_embedding(conn: sqlite3.Connection, belief_id: str, vec: list[float] | None) -> None:
+    """SQL-only: caller precomputes `vec` via _embed() before taking _OP_LOCK
+    (A4) so a slow/first-time embed (model load/download) doesn't block every
+    other store operation."""
     if vec is None:
         return
     # Caller owns the transaction, so belief text + vector index commit or
@@ -218,22 +261,24 @@ def _index_embedding(conn: sqlite3.Connection, belief_id: str, text: str) -> Non
 # ---------------------------------------------------------------- beliefs --
 
 
-@_serialized
 def add_belief(text: str, kind: str, provenance: str, salience: float = 0.6) -> str:
-    conn = connect()
-    belief_id = str(uuid.uuid4())
-    now = _now()
-    with conn:
-        conn.execute(
-            "INSERT INTO belief(belief_id, text, kind, provenance, salience, status, created_at, last_used_at) "
-            "VALUES (?,?,?,?,?,'active',?,?)",
-            (belief_id, text, kind, provenance, salience, now, now),
-        )
-        _index_embedding(conn, belief_id, text)
+    # A4: embed BEFORE the lock -- first call may load/download the fastembed
+    # model, which must not stall every other store-touching turn.
+    vec = _embed(text)
+    with _OP_LOCK:
+        conn = connect()
+        belief_id = str(uuid.uuid4())
+        now = _now()
+        with conn:
+            conn.execute(
+                "INSERT INTO belief(belief_id, text, kind, provenance, salience, status, created_at, last_used_at, valid_at) "
+                "VALUES (?,?,?,?,?,'active',?,?,?)",
+                (belief_id, text, kind, provenance, salience, now, now, now),
+            )
+            _index_embedding(conn, belief_id, vec)
     return belief_id
 
 
-@_serialized
 def add_candidate_belief(
     text: str,
     kind: str,
@@ -248,40 +293,43 @@ def add_candidate_belief(
     bookkeeping share one transaction. An inferred candidate is retained but
     cannot displace a user-stated belief, matching the existing rule.
     """
-    conn = connect()
-    belief_id = str(uuid.uuid4())
-    now = _now()
-    superseded = False
-    with conn:
-        old = None
-        if supersede_id is not None:
-            old = conn.execute(
-                "SELECT provenance, status FROM belief WHERE belief_id=?", (supersede_id,)
-            ).fetchone()
-            if old is None:
-                raise ValueError("add_candidate_belief: unknown supersede_id")
-            if old["status"] != "active":
-                raise ValueError("add_candidate_belief: belief to supersede is not active")
+    # A4: embed BEFORE the lock (see add_belief).
+    vec = _embed(text)
+    with _OP_LOCK:
+        conn = connect()
+        belief_id = str(uuid.uuid4())
+        now = _now()
+        superseded = False
+        with conn:
+            old = None
+            if supersede_id is not None:
+                old = conn.execute(
+                    "SELECT provenance, status FROM belief WHERE belief_id=?", (supersede_id,)
+                ).fetchone()
+                if old is None:
+                    raise ValueError("add_candidate_belief: unknown supersede_id")
+                if old["status"] != "active":
+                    raise ValueError("add_candidate_belief: belief to supersede is not active")
 
-        conn.execute(
-            "INSERT INTO belief(belief_id, text, kind, provenance, salience, status, created_at, last_used_at) "
-            "VALUES (?,?,?,?,?,'active',?,?)",
-            (belief_id, text, kind, provenance, salience, now, now),
-        )
-
-        if old is not None and not (old["provenance"] == "user" and provenance == "inferred"):
-            cur = conn.execute(
-                "UPDATE belief SET status='superseded', superseded_by=? "
-                "WHERE belief_id=? AND status='active'",
-                (belief_id, supersede_id),
+            conn.execute(
+                "INSERT INTO belief(belief_id, text, kind, provenance, salience, status, created_at, last_used_at, valid_at) "
+                "VALUES (?,?,?,?,?,'active',?,?,?)",
+                (belief_id, text, kind, provenance, salience, now, now, now),
             )
-            if cur.rowcount != 1:
-                raise ValueError("add_candidate_belief: belief changed before supersession")
-            superseded = True
 
-        # Kept last so a vector/index failure rolls back both the candidate
-        # and any supersession update made above.
-        _index_embedding(conn, belief_id, text)
+            if old is not None and not (old["provenance"] == "user" and provenance == "inferred"):
+                cur = conn.execute(
+                    "UPDATE belief SET status='superseded', superseded_by=?, invalid_at=? "
+                    "WHERE belief_id=? AND status='active'",
+                    (belief_id, now, supersede_id),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("add_candidate_belief: belief changed before supersession")
+                superseded = True
+
+            # Kept last so a vector/index failure rolls back both the candidate
+            # and any supersession update made above.
+            _index_embedding(conn, belief_id, vec)
     return belief_id, superseded
 
 
@@ -304,17 +352,19 @@ def list_beliefs(status: str | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-@_serialized
 def update_belief(belief_id: str, text: str, provenance: str | None = None) -> None:
-    conn = connect()
-    with conn:
-        if provenance is None:
-            conn.execute("UPDATE belief SET text=? WHERE belief_id=?", (text, belief_id))
-        else:
-            conn.execute(
-                "UPDATE belief SET text=?, provenance=? WHERE belief_id=?", (text, provenance, belief_id)
-            )
-        _index_embedding(conn, belief_id, text)
+    # A4: embed BEFORE the lock (see add_belief).
+    vec = _embed(text)
+    with _OP_LOCK:
+        conn = connect()
+        with conn:
+            if provenance is None:
+                conn.execute("UPDATE belief SET text=? WHERE belief_id=?", (text, belief_id))
+            else:
+                conn.execute(
+                    "UPDATE belief SET text=?, provenance=? WHERE belief_id=?", (text, provenance, belief_id)
+                )
+            _index_embedding(conn, belief_id, vec)
 
 
 @_serialized
@@ -337,36 +387,58 @@ def supersede(old_id: str, new_id: str) -> None:
         if old["provenance"] == "user" and new["provenance"] == "inferred":
             raise ValueError("user-stated beliefs can only be superseded by a newer user statement")
         cur = conn.execute(
-            "UPDATE belief SET status='superseded', superseded_by=? WHERE belief_id=?", (new_id, old_id)
+            "UPDATE belief SET status='superseded', superseded_by=?, invalid_at=? WHERE belief_id=?",
+            (new_id, _now(), old_id),
         )
         if cur.rowcount != 1:
             raise ValueError("supersede: old belief changed before update")
 
 
-@_serialized
-def search_beliefs(query_text: str, k: int = 15) -> list[dict]:
+def search_beliefs(query_text: str, k: int = 15, live_only: bool = True) -> list[dict]:
     """Vector similarity over active beliefs; falls back to recency if the
-    embedder/vec table is unavailable (memory degrades, never breaks)."""
-    conn = connect()
-    vec = _embed(query_text)
-    if vec is not None:
-        try:
-            rows = conn.execute(
-                """
-                SELECT b.*, v.distance AS distance FROM belief_vec v
-                JOIN belief_map m ON m.rowid = v.rowid
-                JOIN belief b ON b.belief_id = m.belief_id
-                WHERE v.embedding MATCH ? AND k = ? AND b.status='active'
-                ORDER BY distance
-                """,
-                (sqlite_vec.serialize_float32(vec), k),
-            ).fetchall()
-            return [dict(r) for r in rows]
-        except Exception:
-            logger.warning("vector search failed; falling back to recency", exc_info=True)
+    embedder/vec table is unavailable (memory degrades, never breaks).
 
+    live_only additionally excludes rows with a closed validity window
+    (invalid_at set). ponytail: for active rows invalid_at is always NULL, so
+    this is belt-and-suspenders today; it becomes load-bearing if invalidation
+    ever detaches from the status enum."""
+    # A4: embed BEFORE the lock (see add_belief).
+    vec = _embed(query_text)
+    with _OP_LOCK:
+        conn = connect()
+        live = " AND b.invalid_at IS NULL" if live_only else ""
+        if vec is not None:
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT b.*, v.distance AS distance FROM belief_vec v
+                    JOIN belief_map m ON m.rowid = v.rowid
+                    JOIN belief b ON b.belief_id = m.belief_id
+                    WHERE v.embedding MATCH ? AND k = ? AND b.status='active'{live}
+                    ORDER BY distance
+                    """,
+                    (sqlite_vec.serialize_float32(vec), k),
+                ).fetchall()
+                return [dict(r) for r in rows]
+            except Exception:
+                logger.warning("vector search failed; falling back to recency", exc_info=True)
+
+        live_flat = " AND invalid_at IS NULL" if live_only else ""
+        rows = conn.execute(
+            f"SELECT * FROM belief WHERE status='active'{live_flat} ORDER BY last_used_at DESC LIMIT ?", (k,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+@_serialized
+def live_beliefs(limit: int = 50) -> list[dict]:
+    """Snapshot hydration set: live (invalid_at IS NULL), active, salience-ranked,
+    capped. Deterministic order (stable tiebreak) so two reconnects converge."""
+    conn = connect()
     rows = conn.execute(
-        "SELECT * FROM belief WHERE status='active' ORDER BY last_used_at DESC LIMIT ?", (k,)
+        "SELECT * FROM belief WHERE invalid_at IS NULL AND status='active' "
+        "ORDER BY salience DESC, last_used_at DESC, belief_id LIMIT ?",
+        (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -406,6 +478,112 @@ def decay(half_life_days: float = 30, archive_below: float = 0.2, now: datetime 
                     "UPDATE belief SET salience=? WHERE belief_id=?", (new_salience, row["belief_id"])
                 )
     return archived
+
+
+@_serialized
+def invalidate_belief(belief_id: str, superseded_by: str | None = None, *, by_inferred: bool = False) -> None:
+    """Close a belief's validity window (Graphiti pattern): invalid_at=now,
+    status='superseded', optional superseded_by -- one transaction. Enforces
+    rule 6 in-store, below the LLM decision layer: an inferred caller
+    (by_inferred=True) can never invalidate a user-stated belief."""
+    conn = connect()
+    with conn:
+        row = conn.execute("SELECT provenance FROM belief WHERE belief_id=?", (belief_id,)).fetchone()
+        if row is None:
+            raise ValueError("invalidate_belief: unknown belief_id")
+        if by_inferred and row["provenance"] == "user":
+            raise ValueError("user-stated beliefs can only be invalidated by a newer user statement")
+        conn.execute(
+            "UPDATE belief SET status='superseded', invalid_at=?, superseded_by=? WHERE belief_id=?",
+            (_now(), superseded_by, belief_id),
+        )
+
+
+# ------------------------------------------------- conversation meta + episodic --
+
+
+@_serialized
+def get_conversation_meta(conversation_id: str) -> dict | None:
+    conn = connect()
+    row = conn.execute(
+        "SELECT * FROM conversation_meta WHERE conversation_id=?", (conversation_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+@_serialized
+def note_conversation_activity(conversation_id: str, message_count: int) -> None:
+    """Upsert the conversation's live message count + last-activity stamp. The
+    consolidation cursor is left untouched (advanced only by a successful pass)."""
+    conn = connect()
+    with conn:
+        conn.execute(
+            "INSERT INTO conversation_meta(conversation_id, consolidation_cursor, message_count, last_activity_at) "
+            "VALUES (?, 0, ?, ?) "
+            "ON CONFLICT(conversation_id) DO UPDATE SET message_count=excluded.message_count, "
+            "last_activity_at=excluded.last_activity_at",
+            (conversation_id, message_count, _now()),
+        )
+
+
+@_serialized
+def set_consolidation_cursor(conversation_id: str, cursor: int) -> None:
+    conn = connect()
+    with conn:
+        conn.execute(
+            "INSERT INTO conversation_meta(conversation_id, consolidation_cursor, message_count, last_activity_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(conversation_id) DO UPDATE SET consolidation_cursor=excluded.consolidation_cursor",
+            (conversation_id, cursor, cursor, _now()),
+        )
+
+
+@_serialized
+def list_dirty_conversations() -> list[dict]:
+    """Conversations with un-consolidated messages (message_count > cursor)."""
+    conn = connect()
+    rows = conn.execute(
+        "SELECT * FROM conversation_meta WHERE message_count > consolidation_cursor"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@_serialized
+def add_session_summary(conversation_id: str, text: str, key_points: dict) -> str:
+    conn = connect()
+    summary_id = str(uuid.uuid4())
+    with conn:
+        conn.execute(
+            "INSERT INTO session_summary(summary_id, conversation_id, text, key_points_json, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (summary_id, conversation_id, text, json.dumps(key_points or {}), _now()),
+        )
+    return summary_id
+
+
+@_serialized
+def list_session_summaries(conversation_id: str | None = None, limit: int = 20) -> list[dict]:
+    conn = connect()
+    if conversation_id is None:
+        rows = conn.execute(
+            "SELECT * FROM session_summary ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM session_summary WHERE conversation_id=? ORDER BY created_at DESC LIMIT ?",
+            (conversation_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@_serialized
+def latest_session_summary(conversation_id: str) -> dict | None:
+    conn = connect()
+    row = conn.execute(
+        "SELECT * FROM session_summary WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1",
+        (conversation_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 # ----------------------------------------------------------------- actions --

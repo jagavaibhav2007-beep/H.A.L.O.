@@ -1,8 +1,13 @@
-"""Memory: extraction, retrieval, decay, panel round-trips (Phase 2 Step 8).
+"""Memory: consolidation, retrieval, episodic summaries, decay, panel round-trips.
 
-Write path: end of a successful turn -> light-model extraction -> dedupe /
-supersede against the store (provenance enforced there, rule 6). Extraction
-failure of any kind skips the write and never touches existing rows (rule 5).
+Write path (v2, memory doc 03-memory): NOT per-turn. A successful turn only
+`note_turn`s the conversation dirty and (re)arms an idle timer; the actual
+extract->decide->summarize pass runs off the hot path via `consolidate` on an
+idle / shutdown / startup-recovery / pressure trigger. One extraction call over
+the whole un-consolidated span, an AUDN decision per candidate against its
+vector neighbors, then one session_summary row -- the cursor advances only on
+full success (rule 5). Provenance (rule 6) stays enforced in the store, below
+the decision layer.
 """
 
 from __future__ import annotations
@@ -22,13 +27,49 @@ _KINDS = {"preference", "project", "workflow", "decision", "lesson"}
 # a wrong merge. Tune via settings if false-merges ever show up.
 _DUP_DIST = 0.35
 _BUDGET_TOKENS = 1000  # ~len(text)//4 estimate, per the memory doc
+_PRESSURE_TOKENS = 8000  # un-consolidated span this big consolidates immediately (Letta)
+_SUMMARY_CHARS = 1200  # ~300-token cap on episodic prepend / fallback summary text
 
 _EXTRACT_SYSTEM = (
-    "Extract durable facts about the user from this conversation. Reply with ONLY a "
+    "Extract durable facts about the user from this conversation segment. Reply with ONLY a "
     'JSON array: [{"text": "...", "kind": "preference|project|workflow|decision|lesson", '
     '"provenance": "user|inferred"}]. provenance is "user" only if the user explicitly '
-    'stated the fact. Reply [] if there is nothing durable.'
+    "stated the fact. Do NOT extract: restatements of what the assistant said, tool-call "
+    "noise or results, transient task state, or things the user only asked about. "
+    "Reply [] if there is nothing durable."
 )
+
+_SUMMARY_SYSTEM = (
+    "Summarize this conversation segment as ONLY a JSON object: "
+    '{"summary": "2-3 sentences: what happened and why", "key_points": [...], "open_loops": [...]}.'
+)
+
+# Consolidation runs off the hot path. `_dirty` holds the latest full message
+# list + api_key + broadcast per conversation; `_idle_tasks` the armed idle
+# timers (cancelled/re-armed on each turn, cancelled on flush); `_bg_tasks`
+# keeps pressure/idle tasks referenced so exceptions are observed; a per-cid
+# lock serializes overlapping triggers (idle vs flush vs startup recovery).
+_dirty: dict[str, dict] = {}
+_idle_tasks: dict[str, asyncio.Task] = {}
+_consolidate_locks: dict[str, asyncio.Lock] = {}
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _idle_seconds() -> float:
+    return float(os.environ.get("HALO_MEMORY_IDLE_S", "1800"))
+
+
+def _observe(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("background memory task failed: %r", task.exception())
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    task.add_done_callback(_observe)
+    return task
 
 
 def belief_frame(row: dict) -> dict:
@@ -62,7 +103,7 @@ def _contradicts(a: str, b: str) -> bool:
 def _stub_candidates(last_user: str) -> list[dict]:
     # ponytail: offline test seam (HALO_EXTRACT_STUB) -- "remember: ..." lines
     # become user facts, "remember(inferred): ..." inferred. Real extraction
-    # is the LLM path in _llm_candidates.
+    # is the LLM path in _llm_span_candidates.
     out = []
     for line in last_user.splitlines():
         line = line.strip()
@@ -73,24 +114,27 @@ def _stub_candidates(last_user: str) -> list[dict]:
     return out
 
 
-async def _llm_candidates(messages: list[dict], api_key: str) -> list[dict]:
-    convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in messages[-10:])
+async def _llm_span_candidates(span: list[dict], api_key: str) -> list[dict]:
+    """One extraction call over the WHOLE un-consolidated span (v2), not the
+    last-10 window. Malformed/empty reply -> [] (rule 5)."""
+    convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in span)
     prompt = [{"role": "system", "content": _EXTRACT_SYSTEM}, {"role": "user", "content": convo}]
     parts: list[str] = []
     usage: dict = {}
     async for delta in llm.stream_chat(prompt, llm.LIGHT, api_key, usage):
         parts.append(delta)
     if usage.get("cost"):
-        # ponytail: month rollup only -- extraction runs fire-and-forget after
-        # the turn closed, so there's no broadcast to ride and the session
-        # counter belongs to graph. The next turn's spend_update includes it.
         await asyncio.to_thread(store.add_spend, usage["cost"])
     text = "".join(parts)
     start, end = text.find("["), text.rfind("]")
     if start < 0 or end <= start:
         logger.info("extraction reply had no JSON array; skipping (rule 5)")
         return []
-    raw = json.loads(text[start : end + 1])
+    try:
+        raw = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        logger.info("extraction reply was not valid JSON; skipping (rule 5)")
+        return []
     cands = []
     for item in raw:
         if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"].strip():
@@ -105,61 +149,218 @@ async def _llm_candidates(messages: list[dict], api_key: str) -> list[dict]:
     return cands
 
 
-def _apply_candidates(cands: list[dict]) -> list[tuple[dict, str | None]]:
+async def _extract_span(span: list[dict], api_key: str) -> list[dict]:
+    if os.environ.get("HALO_EXTRACT_STUB"):
+        joined = "\n".join(m.get("content", "") for m in span if m.get("role") == "user")
+        return _stub_candidates(joined)
+    return await _llm_span_candidates(span, api_key)
+
+
+def _can_replace(cand_provenance: str, target_provenance: str) -> bool:
+    """Rule 6 for UPDATE: a user statement may replace anything; an inference
+    may replace only another inference."""
+    return cand_provenance == "user" or target_provenance == "inferred"
+
+
+async def _decide(cand: dict, neighbors: list[dict], api_key: str) -> tuple[str, str | None]:
+    """AUDN decision (mem0): (op, target_id). op in add|update|invalidate|noop.
+
+    Under the extract stub, or whenever there is no real key, the v1 distance +
+    first-3-words heuristics ARE the deterministic decision function (contradict
+    -> invalidate, near-duplicate -> noop, else add). The real per-candidate
+    light-model call is used only with a real key."""
+    dup = next(
+        (h for h in neighbors if h["text"] == cand["text"]
+         or (h.get("distance") is not None and h["distance"] < _DUP_DIST)),
+        None,
+    )
+    contra = next((h for h in neighbors if _contradicts(cand["text"], h["text"])), None)
+    if os.environ.get("HALO_EXTRACT_STUB") or not api_key or api_key == "stub-key":
+        if contra is not None:
+            return "invalidate", contra["belief_id"]
+        if dup is not None:
+            return "noop", dup["belief_id"]
+        return "add", None
+    # ponytail: real per-candidate AUDN -- one light-model call, strict JSON.
+    # Untested offline (no gate exercises a real key); malformed -> ADD if no
+    # close neighbor else NOOP, a fail-safe that never risks a wrong overwrite.
+    return await _llm_decide(cand, neighbors, dup, api_key)
+
+
+async def _llm_decide(cand: dict, neighbors: list[dict], dup: dict | None, api_key: str) -> tuple[str, str | None]:
+    listing = "\n".join(f'{i}. ({n["belief_id"]}) {n["text"]}' for i, n in enumerate(neighbors))
+    system = (
+        "Decide how a new fact relates to existing memories. Reply with ONLY a JSON object "
+        '{"op": "add|update|invalidate|noop", "target_id": "<id or null>"}. '
+        "add: no equivalent exists. update: complements/corrects one. invalidate: contradicts one. "
+        "noop: duplicate or not durable."
+    )
+    user = f'New fact: {cand["text"]}\nExisting:\n{listing or "(none)"}'
+    parts: list[str] = []
+    usage: dict = {}
+    try:
+        async for delta in llm.stream_chat(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}], llm.LIGHT, api_key, usage
+        ):
+            parts.append(delta)
+        if usage.get("cost"):
+            await asyncio.to_thread(store.add_spend, usage["cost"])
+        text = "".join(parts)
+        obj = json.loads(text[text.find("{"): text.rfind("}") + 1])
+        op = obj.get("op")
+        target = obj.get("target_id")
+        valid = {n["belief_id"] for n in neighbors}
+        if op in ("update", "invalidate", "noop") and target in valid:
+            return op, target
+        if op == "add":
+            return "add", None
+    except Exception:  # noqa: BLE001 - fail-safe below
+        logger.info("AUDN decision parse failed; falling back to add/noop")
+    return ("noop", dup["belief_id"]) if dup is not None else ("add", None)
+
+
+def _execute_decision(cand: dict, op: str, target: str | None) -> list[tuple[dict, str | None]]:
     """Sync store work (run via to_thread). Returns (changed_row, narrate_text)."""
     store.connect()
-    changed: list[tuple[dict, str | None]] = []
-    for cand in cands:
-        hits = store.search_beliefs(cand["text"], k=3)
-        contra = next((h for h in hits if _contradicts(cand["text"], h["text"])), None)
-        if contra is not None:
-            new_id, superseded = store.add_candidate_belief(
-                cand["text"], cand["kind"], cand["provenance"], supersede_id=contra["belief_id"]
-            )
-            if superseded:
-                changed.append((store.get_belief(contra["belief_id"]), None))
-                changed.append((store.get_belief(new_id), f"updated what I remember — {cand['text']}"))
-            else:
-                # Provenance rule (rule 6): inferred can't displace user-stated.
-                # Keep both, log honestly.
-                logger.info("supersede refused (provenance): kept both beliefs")
-                changed.append((store.get_belief(new_id), None))
-            continue
-        dup = next(
-            (h for h in hits if h["text"] == cand["text"] or (h.get("distance") is not None and h["distance"] < _DUP_DIST)),
-            None,
+    if op == "invalidate" and target:
+        new_id, superseded = store.add_candidate_belief(
+            cand["text"], cand["kind"], cand["provenance"], supersede_id=target
         )
-        if dup is not None:
-            store.bump_salience([dup["belief_id"]])
-            changed.append((store.get_belief(dup["belief_id"]), None))
-            continue
+        if superseded:
+            return [(store.get_belief(target), None),
+                    (store.get_belief(new_id), f"updated what I remember — {cand['text']}")]
+        # Provenance rule (rule 6): inferred can't displace user-stated. Keep both.
+        logger.info("supersede refused (provenance): kept both beliefs")
+        return [(store.get_belief(new_id), None)]
+    if op == "update" and target:
+        tgt = store.get_belief(target)
+        if tgt and _can_replace(cand["provenance"], tgt["provenance"]):
+            store.update_belief(target, cand["text"])
+            return [(store.get_belief(target), None)]
+        # ponytail: unlawful provenance replacement -> downgrade to ADD (never lose the fact).
         new_id, _ = store.add_candidate_belief(cand["text"], cand["kind"], cand["provenance"])
-        changed.append((store.get_belief(new_id), None))
-    return changed
+        return [(store.get_belief(new_id), None)]
+    if op == "noop" and target:
+        store.bump_salience([target])
+        return [(store.get_belief(target), None)]
+    new_id, _ = store.add_candidate_belief(cand["text"], cand["kind"], cand["provenance"])
+    return [(store.get_belief(new_id), None)]
 
 
-async def extract(conversation_id: str, messages: list[dict], api_key: str, broadcast) -> None:
-    """Fire-and-forget at end of a successful turn. Never raises -- the turn
-    already completed; an extraction crash must not surface as a turn error."""
+async def _write_summary(conversation_id: str, span: list[dict], api_key: str) -> None:
+    if os.environ.get("HALO_EXTRACT_STUB"):
+        first_user = next((m.get("content", "") for m in span if m.get("role") == "user"), "")
+        text, key_points = ("session: " + first_user)[:_SUMMARY_CHARS], {}
+    else:
+        text, key_points = await _llm_summary(span, api_key)
+    await asyncio.to_thread(store.add_session_summary, conversation_id, text, key_points)
+
+
+async def _llm_summary(span: list[dict], api_key: str) -> tuple[str, dict]:
+    """Best-effort episodic summary. Soft-fails to a first-user-line fallback --
+    a bad parse must NOT raise, or the cursor would never advance (rule 5)."""
+    convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in span)
+    parts: list[str] = []
+    usage: dict = {}
     try:
-        last_user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
-        if len(last_user.strip()) < 20:
-            return  # trivially transient turn
-        if os.environ.get("HALO_EXTRACT_STUB"):
-            cands = _stub_candidates(last_user)
-        else:
-            cands = await _llm_candidates(messages, api_key)
-        if not cands:
+        async for delta in llm.stream_chat(
+            [{"role": "system", "content": _SUMMARY_SYSTEM}, {"role": "user", "content": convo}],
+            llm.LIGHT, api_key, usage,
+        ):
+            parts.append(delta)
+        if usage.get("cost"):
+            await asyncio.to_thread(store.add_spend, usage["cost"])
+        text = "".join(parts)
+        obj = json.loads(text[text.find("{"): text.rfind("}") + 1])
+        summary = (obj.get("summary") or "").strip()
+        key_points = {k: obj[k] for k in ("key_points", "open_loops") if obj.get(k)}
+        if summary:
+            return summary[:_SUMMARY_CHARS], key_points
+    except Exception:  # noqa: BLE001 - fall through to the fallback
+        logger.info("summary generation failed; using fallback")
+    first_user = next((m.get("content", "") for m in span if m.get("role") == "user"), "")
+    return ("session: " + first_user)[:_SUMMARY_CHARS], {}
+
+
+async def consolidate_span(conversation_id: str, messages: list[dict], api_key: str, broadcast) -> None:
+    """Core off-hot-path pass over `messages[cursor:]`. Never raises (same
+    contract as v1 extract). Advances the cursor ONLY on full success, so any
+    failure retries the same span next trigger (rule 5). Shared by the idle/
+    pressure/flush triggers and by startup recovery."""
+    lock = _consolidate_locks.setdefault(conversation_id, asyncio.Lock())
+    async with lock:
+        try:
+            meta = await asyncio.to_thread(store.get_conversation_meta, conversation_id)
+            cursor = (meta or {}).get("consolidation_cursor") or 0
+            span = messages[cursor:]
+            if not span:
+                return  # empty span -> silent no-op (idle/flush/recovery all land here)
+            cands = await _extract_span(span, api_key)
+            changed: list[tuple[dict, str | None]] = []
+            for cand in cands:
+                neighbors = await asyncio.to_thread(store.search_beliefs, cand["text"], 5)
+                op, target = await _decide(cand, neighbors, api_key)
+                changed.extend(await asyncio.to_thread(_execute_decision, cand, op, target))
+            for row, narrate_text in changed:
+                await broadcast("belief_state", belief_frame(row))
+                if narrate_text:
+                    await broadcast(
+                        "activity", {"text": narrate_text, "narrate": True, "task_id": "memory", "undoable": False}
+                    )
+            await _write_summary(conversation_id, span, api_key)
+            await asyncio.to_thread(store.set_consolidation_cursor, conversation_id, len(messages))
+        except Exception:  # noqa: BLE001 - rule 5: cursor stays put, retry next trigger
+            logger.exception("consolidation failed for %s (cursor not advanced)", conversation_id)
+
+
+async def consolidate(conversation_id: str) -> None:
+    """Consolidate a dirty conversation from its stashed `_dirty` entry."""
+    entry = _dirty.get(conversation_id)
+    if entry is None:
+        return
+    await consolidate_span(conversation_id, entry["messages"], entry["api_key"], entry["broadcast"])
+
+
+async def _idle_then_consolidate(conversation_id: str) -> None:
+    try:
+        await asyncio.sleep(_idle_seconds())
+    except asyncio.CancelledError:
+        return
+    _idle_tasks.pop(conversation_id, None)
+    await consolidate(conversation_id)
+
+
+async def note_turn(conversation_id: str, messages: list[dict], api_key: str, broadcast) -> None:
+    """Called after each successful turn (fire-and-forget from graph). Cheap:
+    mark the conversation dirty + record its message count, then (re)arm the
+    idle-consolidation timer. Pressure trigger (Letta): a large un-consolidated
+    span consolidates immediately instead of waiting for the clock. Never raises."""
+    try:
+        _dirty[conversation_id] = {"messages": messages, "api_key": api_key, "broadcast": broadcast}
+        await asyncio.to_thread(store.note_conversation_activity, conversation_id, len(messages))
+        meta = await asyncio.to_thread(store.get_conversation_meta, conversation_id)
+        cursor = (meta or {}).get("consolidation_cursor") or 0
+        est = sum(len(str(m)) // 4 for m in messages[cursor:])
+        old = _idle_tasks.pop(conversation_id, None)
+        if old is not None:
+            old.cancel()
+        if est > _PRESSURE_TOKENS:
+            _spawn(consolidate(conversation_id))
             return
-        changed = await asyncio.to_thread(_apply_candidates, cands)
-        for row, narrate_text in changed:
-            await broadcast("belief_state", belief_frame(row))
-            if narrate_text:
-                await broadcast(
-                    "activity", {"text": narrate_text, "narrate": True, "task_id": "memory", "undoable": False}
-                )
-    except Exception:  # noqa: BLE001 - rule 5: log, never touch the turn
-        logger.exception("belief extraction failed (turn unaffected)")
+        _idle_tasks[conversation_id] = _spawn(_idle_then_consolidate(conversation_id))
+    except Exception:  # noqa: BLE001 - rule 5: never surface as a turn error
+        logger.exception("note_turn failed (turn unaffected)")
+
+
+async def flush_all() -> None:
+    """Shutdown hook: cancel every armed idle timer, then consolidate every
+    dirty conversation now (an already-consolidated span is a silent no-op)."""
+    for task in list(_idle_tasks.values()):
+        task.cancel()
+    _idle_tasks.clear()
+    for conversation_id in list(_dirty.keys()):
+        await consolidate(conversation_id)
+    _dirty.clear()
 
 
 # -------------------------------------------------------------- retrieval --
@@ -184,6 +385,18 @@ def retrieve(user_text: str) -> list[dict]:
     if out:
         store.bump_salience([r["belief_id"] for r in out])
     return out
+
+
+def episodic_prepend(conversation_id: str) -> str | None:
+    """Most recent prior session summary for this conversation, ~300-token
+    capped, for continuity across sessions. ponytail: recency-only, no summary
+    vector search yet (memory doc marks that a later step). Returns None if the
+    conversation has no summary yet."""
+    store.connect()
+    row = store.latest_session_summary(conversation_id)
+    if not row or not row.get("text"):
+        return None
+    return row["text"][:_SUMMARY_CHARS]
 
 
 # ------------------------------------------------------------------ decay --
@@ -247,9 +460,11 @@ async def handle_memory_edit(msg: dict, broadcast) -> None:
 
 
 async def push_beliefs(send) -> None:
-    """Connect-time hydration: replay beliefs (all statuses -- the panel
-    renders supersede chains) as belief_state frames, oldest first."""
+    """Connect-time hydration (v2): live beliefs ONLY -- invalid_at IS NULL,
+    status active, salience-ranked, capped at 50. Dead rows (superseded/archived)
+    and full supersede history are fetched on demand by the panel, never replayed
+    on every connect (that was v1's 60%-dead firehose)."""
     store.connect()
-    rows = await asyncio.to_thread(store.list_beliefs)
-    for row in reversed(rows[:100]):
+    rows = await asyncio.to_thread(store.live_beliefs, 50)
+    for row in rows:
         await send("belief_state", belief_frame(row))

@@ -108,6 +108,8 @@ class State(TypedDict, total=False):
 _graph = None
 _saver_conn: aiosqlite.Connection | None = None
 _session_usd = 0.0  # per-process accumulator; resets on Brain restart by design
+_recovery_started = False  # startup consolidation recovery runs once per process
+_recovery_task: asyncio.Task | None = None  # retained so the once-per-process task can't be GC'd mid-flight
 # conversation_id -> live-turn context while its stream runs. Callables stay
 # out of the graph config so the checkpointer never tries to serialize them.
 _turn_ctx: dict[str, dict] = {}
@@ -382,7 +384,44 @@ async def _ensure_graph():
         {"gate": "gate", "respond": "respond", END: END},
     )
     _graph = builder.compile(checkpointer=AsyncSqliteSaver(_saver_conn))
+    global _recovery_started, _recovery_task
+    if not _recovery_started:
+        _recovery_started = True
+        _recovery_task = asyncio.create_task(_recover_consolidation())
     return _graph
+
+
+async def _recover_consolidation() -> None:
+    """Crash-safety net: any conversation left dirty (checkpoint has messages
+    past its cursor) is consolidated once on process start -- a crash that
+    skipped the graceful flush just consolidates late, never loses the session.
+
+    # ponytail: runs once per process; unverified by the automated gates
+    # (phase2_check flushes on its simulated restart, so nothing is dirty
+    # afterward). The shared consolidate_span path IS gate-covered. Recovery has
+    # no connected client, so it broadcasts to a no-op -- the recovered beliefs
+    # surface on the next connect's snapshot."""
+    try:
+        stubbed = bool(os.environ.get("HALO_LLM_STUB"))
+        api_key = "stub-key" if stubbed else await asyncio.to_thread(secrets_store.get_key)
+        if not api_key:
+            return  # no key, not stubbed: skip silently (can't extract anyway)
+        dirty = await asyncio.to_thread(store.list_dirty_conversations)
+        if not dirty:
+            return
+        graph = await _ensure_graph()
+
+        async def _noop(_type, _payload):
+            return
+
+        for row in dirty:
+            cid = row["conversation_id"]
+            snap = await graph.aget_state({"configurable": {"thread_id": cid}})
+            messages = snap.values.get("messages", [])
+            if messages:
+                await memory.consolidate_span(cid, messages, api_key, _noop)
+    except Exception:  # noqa: BLE001 - recovery is best-effort, never fatal
+        logger.exception("startup consolidation recovery failed")
 
 
 async def aclose() -> None:
@@ -390,6 +429,13 @@ async def aclose() -> None:
     need it -- SQLite WAL survives a kill, which is the restart semantics:
     history persists, a dead half-streamed turn is never auto-resumed)."""
     global _graph, _saver_conn
+    try:
+        # Consolidate any dirty conversations before the saver closes (flush
+        # needs nothing from it) so a graceful shutdown doesn't lose a session's
+        # worth of un-consolidated memory. Order: flush -> close saver -> llm.
+        await memory.flush_all()
+    except Exception:  # noqa: BLE001 - shutdown flush must not block teardown
+        logger.exception("memory flush on shutdown failed")
     try:
         if _saver_conn is not None:
             await _saver_conn.close()
@@ -407,8 +453,9 @@ def _spend_sync(cost: float) -> float:
 
 async def _bill_and_extract(cid: str, result: dict, ctx: dict, api_key: str | None, broadcast) -> None:
     """Shared completed-turn tail (run_turn and resume_turn): fire-and-forget
-    memory extraction when the turn didn't error (memory.extract swallows its own
-    failures, rule 5), then roll up cost and broadcast spend. resume owes this as
+    memory note_turn when the turn didn't error (it swallows its own failures,
+    rule 5, and consolidation runs later off the hot path), then roll up cost and
+    broadcast spend. resume owes this as
     much as run_turn: since the tool-calling loop landed, a resumed invoke is no
     longer just `gate -> END` -- it continues `gate -> respond -> ...` and streams
     a real (billable) final answer, so skipping it would undercount spend and skip
@@ -416,7 +463,10 @@ async def _bill_and_extract(cid: str, result: dict, ctx: dict, api_key: str | No
     run_turn (it early-returns without a key)."""
     global _session_usd
     if api_key and not result.get("error"):
-        asyncio.create_task(memory.extract(cid, result.get("messages") or [], api_key, broadcast))
+        # v2: no per-turn extraction. Mark the conversation dirty + (re)arm the
+        # idle consolidation timer; the actual extract/decide/summarize runs off
+        # the hot path. note_turn swallows its own failures (rule 5).
+        memory._spawn(memory.note_turn(cid, result.get("messages") or [], api_key, broadcast))
     cost = ctx["usage"].get("cost")
     if cost is not None:
         _session_usd += cost
@@ -566,14 +616,19 @@ async def run_turn(msg: dict, broadcast) -> None:
         except Exception:  # noqa: BLE001 - memory degrades, never breaks the turn
             logger.exception("belief retrieval failed; continuing without memory")
             beliefs = []
-        mem_msgs = (
-            [{
-                "role": "system",
-                "content": "Things I remember about the user:\n" + "\n".join(f"- {b['text']}" for b in beliefs),
-            }]
-            if beliefs
-            else []
-        )
+        try:
+            summary = await asyncio.to_thread(memory.episodic_prepend, cid)
+        except Exception:  # noqa: BLE001 - episodic is best-effort continuity
+            logger.exception("episodic retrieval failed; continuing without it")
+            summary = None
+        mem_lines: list[str] = []
+        if summary:
+            mem_lines.append(f"Last session: {summary}")
+        if beliefs:
+            mem_lines.append(
+                "Things I remember about the user:\n" + "\n".join(f"- {b['text']}" for b in beliefs)
+            )
+        mem_msgs = [{"role": "system", "content": "\n\n".join(mem_lines)}] if mem_lines else []
         ctx = {"broadcast": broadcast, "stop": asyncio.Event(), "api_key": api_key, "usage": {}, "memory": mem_msgs}
         _turn_ctx[cid] = ctx
         try:

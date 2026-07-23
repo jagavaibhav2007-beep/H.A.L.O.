@@ -104,3 +104,64 @@ async def _run_async_checks() -> None:
 asyncio.run(_run_async_checks())
 
 print("[brain.llm] self-check OK")
+
+# --- A5: 429 Retry-After bounded retry + global outbound semaphore ---
+# Below exercises the real HTTP path (via httpx.MockTransport), so the stub
+# seam must be off -- HALO_LLM_STUB short-circuits before _stream_once runs.
+
+import json  # noqa: E402
+import httpx  # noqa: E402
+
+os.environ.pop("HALO_LLM_STUB", None)
+
+
+def _sse_body(text: str) -> bytes:
+    chunk = json.dumps({"choices": [{"delta": {"content": text}}]})
+    return f"data: {chunk}\n\ndata: [DONE]\n\n".encode()
+
+
+async def _run_a5_checks() -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"retry-after": "0"}, content=b"")
+        return httpx.Response(200, content=_sse_body("recovered"))
+
+    llm._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        words = []
+        async for delta in llm.stream_chat([{"role": "user", "content": "hi"}], model=LIGHT, api_key="k"):
+            words.append(delta)
+        assert "".join(words) == "recovered", words
+        assert len(calls) == 2, "expected exactly one bounded retry after the 429"
+    finally:
+        await llm.aclose()
+
+    # Retry-After is honored but capped, and defaults sanely when absent/bad.
+    assert llm._retry_after_seconds(httpx.Response(429, headers={"retry-after": "9999"})) == llm._MAX_RETRY_AFTER_S
+    assert llm._retry_after_seconds(httpx.Response(429, headers={})) == 1.0
+    assert llm._retry_after_seconds(httpx.Response(429, headers={"retry-after": "2"})) == 2.0
+
+    # The module-level semaphore is the one choke point every caller (turns +
+    # background memory consolidation) inherits.
+    assert isinstance(llm._LLM_SEM, asyncio.Semaphore)
+    in_flight = 0
+    max_in_flight = 0
+
+    async def one_call() -> None:
+        nonlocal in_flight, max_in_flight
+        async with llm._LLM_SEM:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.05)
+            in_flight -= 1
+
+    await asyncio.gather(*(one_call() for _ in range(10)))
+    assert max_in_flight <= 4, f"semaphore did not cap concurrency, saw {max_in_flight}"
+
+
+asyncio.run(_run_a5_checks())
+
+print("[brain.llm] A5 429/Retry-After + semaphore self-check OK")

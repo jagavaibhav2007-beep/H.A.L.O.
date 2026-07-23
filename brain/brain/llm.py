@@ -22,6 +22,26 @@ _TIMEOUT = httpx.Timeout(connect=10, read=120, write=10, pool=10)
 _PLAN_VERBS = ("plan", "organize", "refactor", "design", "migrate")
 _client: httpx.AsyncClient | None = None
 
+# A5: one process-wide cap on outbound LLM calls -- turns AND background memory
+# consolidation (extract/decide/summary) route through _stream_once, so this is
+# the single choke point stopping consolidation from stampeding the provider
+# concurrently with live turns. ponytail: fixed global cap; per-tier/per-key
+# limits if provider quotas ever need to differ.
+_LLM_SEM = asyncio.Semaphore(4)
+
+# A5: cap on honoring a 429's Retry-After -- a provider asking for longer than
+# this just fails the turn honestly instead of hanging it.
+_MAX_RETRY_AFTER_S = 10.0
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float:
+    raw = resp.headers.get("retry-after")
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        seconds = 1.0
+    return min(max(seconds, 0.0), _MAX_RETRY_AFTER_S)
+
 
 class OpenRouterStreamError(RuntimeError):
     """An HTTP-200 OpenRouter stream terminated with an in-band error."""
@@ -159,7 +179,9 @@ async def _stream_once(messages, model, api_key, usage_out, tools=None, tool_acc
     if tool_acc is not None:
         tool_acc.clear()  # a retry re-streams from scratch; never double-count
     client = _get_client()
-    async with client.stream("POST", _API_URL, headers=headers, json=body) as resp:
+    # A5: every outbound LLM call (turns + background memory consolidation)
+    # funnels through here, so this is the one place that needs the semaphore.
+    async with _LLM_SEM, client.stream("POST", _API_URL, headers=headers, json=body) as resp:
         if resp.status_code == 401:
             raise RuntimeError("openrouter key rejected — check Settings")
         if resp.status_code >= 400:
@@ -259,11 +281,18 @@ async def stream_chat(
             yield delta
     except (httpx.TransportError, httpx.HTTPStatusError) as e:
         is_5xx = isinstance(e, httpx.HTTPStatusError) and e.response.status_code >= 500
+        is_429 = isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429
         # Retry only if the client saw nothing yet -- re-streaming after partial
         # yield would duplicate text (plan: "partial tokens already sent stay
         # sent, turn closes with error").
         if not yielded and (isinstance(e, httpx.TransportError) or is_5xx):
             await asyncio.sleep(random.uniform(0.5, 1.5))
+            async for delta in _stream_once(messages, model, api_key, usage_out, tools, acc):
+                yield delta
+        elif not yielded and is_429:
+            # A5: one bounded retry honoring Retry-After (capped) instead of
+            # failing the turn outright on a rate limit.
+            await asyncio.sleep(_retry_after_seconds(e.response))
             async for delta in _stream_once(messages, model, api_key, usage_out, tools, acc):
                 yield delta
         else:
