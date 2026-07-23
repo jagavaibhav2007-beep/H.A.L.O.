@@ -16,7 +16,7 @@ export function useStoreConnection() {
     useHaloStore.getState().applyFrame(frame);
   }, []);
   const conn = useHaloConnection(onMessage);
-  const { connState, sidecarError } = conn;
+  const { connState, sidecars } = conn;
 
   useEffect(() => {
     const event =
@@ -29,9 +29,21 @@ export function useStoreConnection() {
   }, [connState]);
 
   useEffect(() => {
-    if (!sidecarError) return;
-    useHaloStore.getState().applyConnectionEvent({ type: "sidecar_state", process: "brain", state: "error" });
-  }, [sidecarError]);
+    if (sidecars.brain !== "unknown") {
+      useHaloStore.getState().applyConnectionEvent({
+        type: "sidecar_state",
+        process: "brain",
+        state: sidecars.brain,
+      });
+    }
+    if (sidecars.voice !== "unknown") {
+      useHaloStore.getState().applyConnectionEvent({
+        type: "sidecar_state",
+        process: "voice",
+        state: sidecars.voice,
+      });
+    }
+  }, [sidecars]);
 
   return conn;
 }

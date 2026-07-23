@@ -113,12 +113,13 @@ def _apply_candidates(cands: list[dict]) -> list[tuple[dict, str | None]]:
         hits = store.search_beliefs(cand["text"], k=3)
         contra = next((h for h in hits if _contradicts(cand["text"], h["text"])), None)
         if contra is not None:
-            new_id = store.add_belief(cand["text"], cand["kind"], cand["provenance"])
-            try:
-                store.supersede(contra["belief_id"], new_id)
+            new_id, superseded = store.add_candidate_belief(
+                cand["text"], cand["kind"], cand["provenance"], supersede_id=contra["belief_id"]
+            )
+            if superseded:
                 changed.append((store.get_belief(contra["belief_id"]), None))
                 changed.append((store.get_belief(new_id), f"updated what I remember — {cand['text']}"))
-            except ValueError:
+            else:
                 # Provenance rule (rule 6): inferred can't displace user-stated.
                 # Keep both, log honestly.
                 logger.info("supersede refused (provenance): kept both beliefs")
@@ -132,7 +133,7 @@ def _apply_candidates(cands: list[dict]) -> list[tuple[dict, str | None]]:
             store.bump_salience([dup["belief_id"]])
             changed.append((store.get_belief(dup["belief_id"]), None))
             continue
-        new_id = store.add_belief(cand["text"], cand["kind"], cand["provenance"])
+        new_id, _ = store.add_candidate_belief(cand["text"], cand["kind"], cand["provenance"])
         changed.append((store.get_belief(new_id), None))
     return changed
 
@@ -224,14 +225,16 @@ async def handle_memory_edit(msg: dict, broadcast) -> None:
     row = await asyncio.to_thread(store.get_belief, belief_id)
     if row is None:
         await broadcast(
-            "error", {"code": "belief_not_found", "message": "I couldn't find that memory.", "recoverable": True}
+            "error", {"code": "belief_not_found", "message": "I couldn't find that memory.", "recoverable": True,
+                      "operation_kind": "memory_edit", "operation_id": belief_id}
         )
         return
     if op == "edit":
         text = msg.get("text")
         if not text:
             await broadcast(
-                "error", {"code": "memory_edit_invalid", "message": "Editing a memory needs new text.", "recoverable": True}
+                "error", {"code": "memory_edit_invalid", "message": "Editing a memory needs new text.", "recoverable": True,
+                          "operation_kind": "memory_edit", "operation_id": belief_id}
             )
             return
         # A human typed it -> provenance user; update_belief re-embeds.

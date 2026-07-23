@@ -19,10 +19,11 @@ import { StrictMode, type ReactNode } from "react";
 import { act, renderHook } from "@testing-library/react";
 import { expect, test } from "vitest";
 import { usePendingConfirm } from "./usePendingConfirm";
+import type { ErrorMsg } from "../ipc/contract";
 
 const strict = { wrapper: ({ children }: { children: ReactNode }) => <StrictMode>{children}</StrictMode> };
 
-test("rule 3: a key unlocks only when the collection upserts a fresh object reference for it", () => {
+test("rule 3: a key unlocks only when its operation-specific confirmation matches", () => {
   const obj1 = { v: 1 };
   const { result, rerender } = renderHook(
     ({ collection }: { collection: Record<string, { v: number }> }) => usePendingConfirm(collection),
@@ -30,16 +31,20 @@ test("rule 3: a key unlocks only when the collection upserts a fresh object refe
   );
 
   act(() => {
-    expect(result.current.begin("a", "Approving…")).toBe(true);
+    expect(result.current.begin("a", "Pausing…", (value) => value?.v === 2)).toBe(true);
   });
-  expect(result.current.pending.a).toBe("Approving…");
+  expect(result.current.pending.a).toBe("Pausing…");
 
   // An unrelated change that keeps `a`'s reference must NOT unlock it.
   rerender({ collection: { a: obj1, b: { v: 9 } } });
-  expect(result.current.pending.a).toBe("Approving…");
+  expect(result.current.pending.a).toBe("Pausing…");
 
-  // The Brain's confirming frame = a fresh object for `a`. Now it unlocks --
-  // and must survive StrictMode's double-invoked updater.
+  // A fresh object with the old value can be a reconnect snapshot or unrelated
+  // progress. Object identity is not confirmation.
+  rerender({ collection: { a: { v: 1 } } });
+  expect(result.current.pending.a).toBe("Pausing…");
+
+  // Only the requested semantic state unlocks.
   rerender({ collection: { a: { v: 2 } } });
   expect(result.current.pending.a).toBeUndefined();
 });
@@ -51,10 +56,26 @@ test("begin refuses a second lock on an already-pending key", () => {
   );
 
   act(() => {
-    expect(result.current.begin("a", "first")).toBe(true);
+    expect(result.current.begin("a", "first", () => false)).toBe(true);
   });
   act(() => {
-    expect(result.current.begin("a", "second")).toBe(false);
+    expect(result.current.begin("a", "second", () => true)).toBe(false);
   });
   expect(result.current.pending.a).toBe("first");
+});
+
+test("a new exact correlated error releases pending but a stale error does not", () => {
+  const stale = {
+    type: "error", id: "old", ts: "x", code: "unsupported", message: "old", recoverable: true,
+    operation_kind: "task_op", operation_id: "a",
+  } as const;
+  const { result, rerender } = renderHook(
+    ({ errors }: { errors: Record<string, ErrorMsg> }) => usePendingConfirm({ a: { v: 1 } }, errors),
+    { initialProps: { errors: { "task_op:a": stale } as Record<string, ErrorMsg> }, ...strict },
+  );
+  act(() => { result.current.begin("a", "Pausing", () => false, "task_op"); });
+  expect(result.current.pending.a).toBe("Pausing");
+  rerender({ errors: { "task_op:a": { ...stale, id: "new", message: "Not supported." } } });
+  expect(result.current.pending.a).toBeUndefined();
+  expect(result.current.failures.a).toBe("Not supported.");
 });

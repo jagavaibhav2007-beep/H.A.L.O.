@@ -6,7 +6,7 @@
 // (trial/disable/restore/delete) are rule-3 locked — the store never mutates
 // a skill locally; a fresh skill_state is the only source of truth.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Pencil, Play, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
@@ -33,12 +33,15 @@ export function SkillsView({ sendSkillOp }: SkillsViewProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const { pending, begin } = usePendingConfirm(skills);
   const [trialOpenFor, setTrialOpenFor] = useState<string | null>(null);
+  const trialOpenerRef = useRef<HTMLButtonElement | null>(null);
 
   const op = (s: SkillStateMsg, kind: "disable" | "restore" | "delete", label: string) => {
-    if (begin(s.skill_name, label)) sendSkillOp(s.skill_name, kind);
+    const expected = kind === "disable" ? "paused" : kind === "restore" ? "active" : "retired";
+    if (begin(s.skill_name, label, (value) => value?.status === expected)) sendSkillOp(s.skill_name, kind);
   };
 
-  const trial = (s: SkillStateMsg) => {
+  const trial = (s: SkillStateMsg, opener: HTMLButtonElement) => {
+    trialOpenerRef.current = opener;
     setTrialOpenFor(s.skill_name);
     sendSkillOp(s.skill_name, "trial"); // no rule-3 lock — a dry run doesn't change skill_state
   };
@@ -88,6 +91,7 @@ export function SkillsView({ sendSkillOp }: SkillsViewProps) {
           skillName={trialOpenFor}
           activities={activities}
           onClose={() => setTrialOpenFor(null)}
+          restoreFocusTo={trialOpenerRef.current}
         />
       )}
     </div>
@@ -106,7 +110,7 @@ function SkillGroup({
   skills: SkillStateMsg[];
   pending: Record<string, string>;
   op: (s: SkillStateMsg, kind: "disable" | "restore" | "delete", label: string) => void;
-  onTrial: (s: SkillStateMsg) => void;
+  onTrial: (s: SkillStateMsg, opener: HTMLButtonElement) => void;
   retiredGroup?: boolean;
 }) {
   if (skills.length === 0) return null;
@@ -134,7 +138,7 @@ function SkillCard({
   skill: SkillStateMsg;
   pending: string | undefined;
   op: (s: SkillStateMsg, kind: "disable" | "restore" | "delete", label: string) => void;
-  onTrial: (s: SkillStateMsg) => void;
+  onTrial: (s: SkillStateMsg, opener: HTMLButtonElement) => void;
   retiredGroup?: boolean;
 }) {
   const busy = pending !== undefined;
@@ -169,7 +173,7 @@ function SkillCard({
           </Button>
         ) : (
           <>
-            <Button variant="ghost" disabled={busy} onClick={() => onTrial(skill)}>
+            <Button variant="ghost" disabled={busy} onClick={(event) => onTrial(skill, event.currentTarget)}>
               <Icon icon={Play} size={16} />
               Trial run
             </Button>
@@ -197,18 +201,67 @@ function TrialDrawer({
   skillName,
   activities,
   onClose,
+  restoreFocusTo,
 }: {
   skillName: string;
   activities: ActivityMsg[];
   onClose: () => void;
+  restoreFocusTo: HTMLButtonElement | null;
 }) {
   const taskId = trialTaskId(skillName);
   const lines = activities.filter((a) => a.task_id === taskId);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    closeRef.current?.focus();
+    return () => {
+      if (restoreFocusTo?.isConnected) restoreFocusTo.focus();
+    };
+  }, [restoreFocusTo]);
+
+  function onDialogKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialogRef.current?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
-    <div className="trial-drawer" role="dialog" aria-label={`Trial run: ${skillName}`}>
+    <div
+      ref={dialogRef}
+      className="trial-drawer"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Trial run — ${skillName}`}
+      tabIndex={-1}
+      onKeyDown={onDialogKeyDown}
+    >
       <div className="trial-drawer-head">
         <span>Trial run — {skillName}</span>
-        <button type="button" onClick={onClose} aria-label="Close">
+        <button ref={closeRef} type="button" onClick={onClose} aria-label="Close trial run">
           ×
         </button>
       </div>

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -86,6 +88,53 @@ def check_supersede_provenance_matrix() -> None:
         pass
     assert store.get_belief(user4)["status"] == "active"
     print("[check 3] supersede provenance matrix (user/inferred x4): OK")
+
+
+def check_candidate_transaction_atomicity() -> None:
+    old_inferred = store.add_belief("my editor is vim okay", "preference", "inferred")
+    new_user, superseded = store.add_candidate_belief(
+        "my editor is emacs okay", "preference", "user", supersede_id=old_inferred
+    )
+    assert superseded is True
+    assert store.get_belief(old_inferred)["status"] == "superseded"
+    assert store.get_belief(old_inferred)["superseded_by"] == new_user
+    assert store.get_belief(new_user)["status"] == "active"
+
+    old_user = store.add_belief("my terminal is wezterm okay", "preference", "user")
+    new_inferred, superseded = store.add_candidate_belief(
+        "my terminal is alacritty okay", "preference", "inferred", supersede_id=old_user
+    )
+    assert superseded is False
+    assert store.get_belief(old_user)["status"] == "active"
+    assert store.get_belief(old_user)["superseded_by"] is None
+    assert store.get_belief(new_inferred)["status"] == "active"
+
+    rollback_old = store.add_belief("my formatter is black okay", "preference", "inferred")
+    before_ids = {row["belief_id"] for row in store.list_beliefs()}
+    conn = store.connect()
+    before_maps = conn.execute("SELECT COUNT(*) FROM belief_map").fetchone()[0]
+    original_index = store._index_embedding
+
+    def fail_after_supersession(*_args) -> None:
+        raise RuntimeError("injected vector bookkeeping failure")
+
+    store._index_embedding = fail_after_supersession
+    try:
+        try:
+            store.add_candidate_belief(
+                "my formatter is ruff okay", "preference", "user", supersede_id=rollback_old
+            )
+            raise AssertionError("expected injected candidate transaction failure")
+        except RuntimeError as exc:
+            assert "injected vector" in str(exc), exc
+    finally:
+        store._index_embedding = original_index
+
+    assert {row["belief_id"] for row in store.list_beliefs()} == before_ids
+    rollback_row = store.get_belief(rollback_old)
+    assert rollback_row["status"] == "active" and rollback_row["superseded_by"] is None, rollback_row
+    assert conn.execute("SELECT COUNT(*) FROM belief_map").fetchone()[0] == before_maps
+    print("[check 4] candidate insert/provenance/supersession/vector bookkeeping is atomic: OK")
 
 
 def check_vector_search_synthetic() -> None:
@@ -181,6 +230,8 @@ def check_undo_token_record_consume() -> None:
 
     assert store.consume_undo_token(token) is True
     assert store.consume_undo_token(token) is False  # double-consume guarded
+    assert store.release_undo_token(token) is True
+    assert store.consume_undo_token(token) is True
 
     action_id2, no_token = store.record_action(
         tool="file_read", args_redacted={}, tier=1, lane=1, result="ok", undoable=False,
@@ -192,12 +243,40 @@ def check_undo_token_record_consume() -> None:
     print("[check 7] undo token record/consume/double-consume + recent_actions: OK")
 
 
+def check_operations_serialize_across_threads() -> None:
+    """A store call must wait behind the module's operation lock."""
+    entered = threading.Event()
+    finished = threading.Event()
+
+    def writer() -> None:
+        entered.set()
+        store.set_setting("serialized_writer", "done")
+        finished.set()
+
+    store._OP_LOCK.acquire()
+    released = False
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(writer)
+            assert entered.wait(1), "writer thread did not start"
+            assert not finished.wait(0.1), "store write bypassed the operation lock"
+            store._OP_LOCK.release()
+            released = True
+            assert finished.wait(2), "store write did not resume after lock release"
+            future.result()
+    finally:
+        if not released:
+            store._OP_LOCK.release()
+    assert store.get_setting("serialized_writer") == "done"
+    print("[check 8] concurrent store operations serialize behind one re-entrant lock: OK")
+
+
 def check_spend_accumulation() -> None:
     store.add_spend(1.5)
     store.add_spend(2.25)
     total = store.month_spend()
     assert total >= 3.75, total
-    print("[check 8] spend accumulates within the month: OK")
+    print("[check 9] spend accumulates within the month: OK")
 
 
 def check_settings_roundtrip() -> None:
@@ -206,7 +285,7 @@ def check_settings_roundtrip() -> None:
     assert store.get_setting("openrouter_model") == {"light": "gemma", "heavy": "deepseek"}
     store.set_setting("openrouter_model", {"light": "gemma2"})
     assert store.get_setting("openrouter_model") == {"light": "gemma2"}
-    print("[check 9] settings round-trip with JSON values: OK")
+    print("[check 10] settings round-trip with JSON values: OK")
 
 
 def check_tasks() -> None:
@@ -220,7 +299,7 @@ def check_tasks() -> None:
     running = store.list_tasks(states=["running"])
     assert any(t["task_id"] == "t1" for t in running)
     assert all(t["task_id"] != "t2" for t in running)
-    print("[check 10] upsert_task merges fields, list_tasks filters by state: OK")
+    print("[check 11] upsert_task merges fields, list_tasks filters by state: OK")
 
 
 def main() -> None:
@@ -229,10 +308,12 @@ def main() -> None:
         check_fresh_connect_and_reconnect_no_redo_ddl(tmp_path)
         check_belief_crud()
         check_supersede_provenance_matrix()
+        check_candidate_transaction_atomicity()
         check_vector_search_synthetic()
         check_bump_salience_caps_at_one()
         check_decay_archives_old_not_fresh()
         check_undo_token_record_consume()
+        check_operations_serialize_across_threads()
         check_spend_accumulation()
         check_settings_roundtrip()
         check_tasks()

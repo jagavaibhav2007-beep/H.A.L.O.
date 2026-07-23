@@ -1,5 +1,5 @@
 // IPC contract for the Halo WebSocket protocol.
-// Source of truth: shared/ipc-contract.json (message names + required fields).
+// Source of truth: shared/ipc-contract.json (directions, fields, types, and enums).
 // Mirrored by hand in brain/brain/ipc/contract.py — keep both in sync;
 // run `python shared/check_contract_sync.py` after editing either.
 // Full contract prose: systemdesign/11-ipc-contract.md
@@ -127,13 +127,20 @@ export interface DoneMsg extends IpcEnvelope {
   task_id?: string;
 }
 
-export interface ErrorMsg extends IpcEnvelope {
+export type OperationKind = "undo" | "memory_edit" | "approval_response" | "task_op" | "lane_pin";
+
+interface ErrorMsgBase extends IpcEnvelope {
   type: "error";
   code: string;
   message: string;
   recoverable: boolean;
   conversation_id?: string;
 }
+export type ErrorMsg = ErrorMsgBase & (
+  | { operation_kind: OperationKind; operation_id: string }
+  | { operation_kind?: never; operation_id?: never }
+);
+export const operationCorrelationKey = (kind: OperationKind, id: string) => `${kind}:${id}`;
 
 export interface TaskStateMsg extends IpcEnvelope {
   type: "task_state";
@@ -230,95 +237,160 @@ export type IpcMessage =
   | SkillStateMsg;
 
 type MsgType = IpcMessage["type"];
+export type IpcDirection = "inbound" | "outbound";
+export type RuntimeFieldType = "string" | "boolean" | "integer" | "number" | "object" | "json";
+export interface RuntimeFieldSpec { type: RuntimeFieldType; enum?: readonly unknown[] }
+export interface RuntimeMessageSpec {
+  direction: IpcDirection;
+  required: readonly string[];
+  fields: Readonly<Record<string, RuntimeFieldSpec>>;
+}
 
-// Required payload fields per type (envelope's type/id/ts are checked separately).
-// Keep in lockstep with shared/ipc-contract.json "required" lists.
-export const REQUIRED_FIELDS: Record<MsgType, readonly string[]> = {
-  hello: ["token"],
-  user_msg: ["text", "conversation_id", "source"],
-  interrupt: ["conversation_id"],
-  approval_response: ["reply_to", "decision"],
-  memory_edit: ["belief_id", "op"],
-  skill_op: ["skill_name", "op"],
-  lane_pin: ["task_id", "lane"],
-  task_op: ["op"],
-  mic: ["op"],
-  settings_update: ["key", "value"],
-  undo: ["undo_token"],
-  hello_ack: [],
-  token: ["text", "conversation_id"],
-  activity: ["text", "narrate", "task_id", "undoable"],
-  approval_request: ["approval_id", "tool", "args_redacted", "tier", "task_id"],
-  done: ["conversation_id"],
-  error: ["code", "message", "recoverable"],
-  task_state: ["task_id", "state", "lane"],
-  stream_frame: ["task_id", "jpeg_b64", "seq"],
-  voice_state: ["state"],
-  transcript: ["text", "final", "conversation_id"],
-  spend_update: ["session_usd", "month_usd"],
-  settings_state: ["key", "status"],
-  belief_state: ["belief_id", "text", "kind", "provenance", "salience", "status"],
-  skill_state: ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"],
+const field = (type: RuntimeFieldType, values?: readonly unknown[]): RuntimeFieldSpec =>
+  values === undefined ? { type } : { type, enum: values };
+const message = (
+  direction: IpcDirection,
+  required: readonly string[],
+  fields: Readonly<Record<string, RuntimeFieldSpec>>,
+): RuntimeMessageSpec => ({ direction, required, fields });
+
+const S = "string", B = "boolean", I = "integer", N = "number", O = "object", J = "json";
+const IN = "inbound", OUT = "outbound";
+const LANES = [1, 2, 3];
+
+export const CONTRACT_SPEC = {
+  envelope: { required: ["type", "id", "ts"], fields: {
+    type: field(S), id: field(S), ts: field(S),
+  } },
+  messages: {
+    hello: message(IN, ["token"], { token: field(S), role: field(S, ["ui", "voice"]) }),
+    user_msg: message(IN, ["text", "conversation_id", "source"], {
+      text: field(S), conversation_id: field(S), source: field(S, ["ui", "voice"]),
+    }),
+    interrupt: message(IN, ["conversation_id"], { conversation_id: field(S) }),
+    approval_response: message(IN, ["reply_to", "decision"], {
+      reply_to: field(S), decision: field(S, ["approve", "deny", "edit"]), edited_args: field(O),
+    }),
+    memory_edit: message(IN, ["belief_id", "op"], {
+      belief_id: field(S), op: field(S, ["edit", "delete", "restore"]), text: field(S),
+    }),
+    skill_op: message(IN, ["skill_name", "op"], {
+      skill_name: field(S), op: field(S, ["trial", "disable", "restore", "delete"]),
+    }),
+    lane_pin: message(IN, ["task_id", "lane"], { task_id: field(S), lane: field(I, LANES) }),
+    task_op: message(IN, ["op"], { task_id: field(S), op: field(S, ["pause", "resume", "stop"]) }),
+    mic: message(IN, ["op"], { op: field(S, ["mute", "unmute"]) }),
+    settings_update: message(IN, ["key", "value"], { key: field(S), value: field(J) }),
+    undo: message(IN, ["undo_token"], { undo_token: field(S) }),
+    hello_ack: message(OUT, [], {}),
+    token: message(OUT, ["text", "conversation_id"], { text: field(S), conversation_id: field(S) }),
+    activity: message(OUT, ["text", "narrate", "task_id", "undoable"], {
+      text: field(S), narrate: field(B), task_id: field(S), undoable: field(B), undo_token: field(S),
+      tier: field(I, LANES), lane: field(I, LANES),
+    }),
+    approval_request: message(OUT, ["approval_id", "tool", "args_redacted", "tier", "task_id"], {
+      approval_id: field(S), tool: field(S), args_redacted: field(O), tier: field(I, LANES),
+      task_id: field(S), summary: field(S), destructive: field(B), conversation_id: field(S),
+    }),
+    done: message(OUT, ["conversation_id"], { conversation_id: field(S), task_id: field(S) }),
+    error: message(OUT, ["code", "message", "recoverable"], {
+      code: field(S), message: field(S), recoverable: field(B), conversation_id: field(S),
+      operation_kind: field(S, ["undo", "memory_edit", "approval_response", "task_op", "lane_pin"]),
+      operation_id: field(S),
+    }),
+    task_state: message(OUT, ["task_id", "state", "lane"], {
+      task_id: field(S), state: field(S, ["running", "paused", "waiting_approval", "done", "failed"]),
+      lane: field(I, LANES), title: field(S), step: field(I), steps_total: field(I),
+      step_label: field(S), reason: field(S),
+    }),
+    stream_frame: message(OUT, ["task_id", "jpeg_b64", "seq"], {
+      task_id: field(S), jpeg_b64: field(S), seq: field(I),
+    }),
+    voice_state: message(OUT, ["state"], {
+      state: field(S, ["idle", "wake", "listening", "thinking", "speaking", "muted"]),
+    }),
+    transcript: message(OUT, ["text", "final", "conversation_id"], {
+      text: field(S), final: field(B), conversation_id: field(S),
+    }),
+    spend_update: message(OUT, ["session_usd", "month_usd"], {
+      session_usd: field(N), month_usd: field(N),
+    }),
+    settings_state: message(OUT, ["key", "status"], {
+      key: field(S), status: field(S, ["set", "missing", "invalid", "unverified"]),
+    }),
+    belief_state: message(OUT, ["belief_id", "text", "kind", "provenance", "salience", "status"], {
+      belief_id: field(S), text: field(S),
+      kind: field(S, ["preference", "project", "workflow", "decision", "lesson"]),
+      provenance: field(S, ["user", "inferred"]), salience: field(N),
+      status: field(S, ["active", "archived", "superseded"]), superseded_by: field(S), used_at: field(S),
+    }),
+    skill_state: message(OUT, ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"], {
+      skill_name: field(S), origin: field(S, ["auto", "user"]), kind: field(S, ["skill", "playbook"]),
+      uses: field(I), success_rate: field(N), status: field(S, ["active", "paused", "retired"]),
+      born_at: field(S), reason: field(S),
+    }),
+  } satisfies Record<MsgType, RuntimeMessageSpec>,
 };
 
-const KNOWN_TYPES = new Set(Object.keys(REQUIRED_FIELDS));
-const STRING_FIELDS: Partial<Record<MsgType, readonly string[]>> = {
-  hello: ["token"],
-  user_msg: ["text", "conversation_id", "source"],
-  interrupt: ["conversation_id"],
-  approval_response: ["reply_to", "decision"],
-  memory_edit: ["belief_id", "op"],
-  skill_op: ["skill_name", "op"],
-  lane_pin: ["task_id"],
-  task_op: ["op"],
-  mic: ["op"],
-  settings_update: ["key"],
-  undo: ["undo_token"],
-  token: ["text", "conversation_id"],
-  done: ["conversation_id"],
-  error: ["code", "message"],
-  settings_state: ["key"],
-};
+const MESSAGES: Record<string, RuntimeMessageSpec> = CONTRACT_SPEC.messages;
+const KNOWN_TYPES = new Set(Object.keys(MESSAGES));
+export const REQUIRED_FIELDS: Record<MsgType, readonly string[]> = Object.fromEntries(
+  Object.entries(MESSAGES).map(([name, spec]) => [name, spec.required]),
+) as Record<MsgType, readonly string[]>;
+export const DIRECTIONS: Record<MsgType, IpcDirection> = Object.fromEntries(
+  Object.entries(MESSAGES).map(([name, spec]) => [name, spec.direction]),
+) as Record<MsgType, IpcDirection>;
 
-const ENUM_FIELDS: Partial<Record<MsgType, Readonly<Record<string, readonly unknown[]>>>> = {
-  user_msg: { source: ["ui", "voice"] },
-  approval_response: { decision: ["approve", "deny", "edit"] },
-  memory_edit: { op: ["edit", "delete", "restore"] },
-  skill_op: { op: ["trial", "disable", "restore", "delete"] },
-  task_op: { op: ["pause", "resume", "stop"] },
-  mic: { op: ["mute", "unmute"] },
-  settings_state: { status: ["set", "missing", "invalid", "unverified"] },
-};
+function isJsonValue(value: unknown): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (typeof value === "object") return Object.entries(value).every(([, item]) => isJsonValue(item));
+  return false;
+}
+
+function valueMatches(value: unknown, spec: RuntimeFieldSpec): boolean {
+  const matches = spec.type === "string" ? typeof value === "string"
+    : spec.type === "boolean" ? typeof value === "boolean"
+    : spec.type === "integer" ? typeof value === "number" && Number.isSafeInteger(value)
+    : spec.type === "number" ? typeof value === "number" && Number.isFinite(value)
+    : spec.type === "object" ? typeof value === "object" && value !== null && !Array.isArray(value) && isJsonValue(value)
+    : spec.type === "json" ? isJsonValue(value)
+    : false;
+  return matches && (spec.enum === undefined || spec.enum.includes(value));
+}
 
 /** Validate an arbitrary decoded-JSON frame against the contract. Throws on
  * an unknown `type` or a missing required field — never returns a partial
  * message. */
-export function parseIpcMessage(raw: unknown): IpcMessage {
+export function parseIpcMessage(raw: unknown, expectedDirection?: IpcDirection): IpcMessage {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("ipc: frame is not an object");
   }
   const obj = raw as Record<string, unknown>;
-  const { type, id, ts } = obj;
+  const { type } = obj;
   if (typeof type !== "string" || !KNOWN_TYPES.has(type)) {
     throw new Error(`ipc: unknown message type ${JSON.stringify(type)}`);
   }
-  if (typeof id !== "string" || typeof ts !== "string") {
-    throw new Error("ipc: envelope missing id/ts");
+  const messageSpec = MESSAGES[type];
+  if (expectedDirection !== undefined && messageSpec.direction !== expectedDirection) {
+    throw new Error(`ipc: "${type}" is ${messageSpec.direction}, expected ${expectedDirection}`);
   }
-  for (const field of REQUIRED_FIELDS[type as MsgType]) {
+  for (const field of CONTRACT_SPEC.envelope.required) {
+    if (!(field in obj)) throw new Error(`ipc: envelope missing required field "${field}"`);
+  }
+  for (const field of messageSpec.required) {
     if (!(field in obj)) {
       throw new Error(`ipc: "${type}" missing required field "${field}"`);
     }
   }
-  for (const field of STRING_FIELDS[type as MsgType] ?? []) {
-    if (typeof obj[field] !== "string") {
-      throw new Error(`ipc: "${type}" field "${field}" must be a string`);
-    }
+
+  const allowed = new Set([...Object.keys(CONTRACT_SPEC.envelope.fields), ...Object.keys(messageSpec.fields)]);
+  for (const field of Object.keys(obj)) {
+    if (!allowed.has(field)) throw new Error(`ipc: "${type}" has unknown field "${field}"`);
   }
-  for (const [field, allowed] of Object.entries(ENUM_FIELDS[type as MsgType] ?? {})) {
-    if (!allowed.includes(obj[field])) {
-      throw new Error(`ipc: "${type}" field "${field}" has an invalid value`);
-    }
+  for (const [field, spec] of Object.entries(CONTRACT_SPEC.envelope.fields)) {
+    if (!valueMatches(obj[field], spec)) throw new Error(`ipc: envelope field "${field}" has an invalid value`);
   }
   // NOTE: these optional-field checks test `obj.field !== undefined`, not
   // `"field" in obj` — a sender built via object-literal spread of an unset
@@ -327,23 +399,19 @@ export function parseIpcMessage(raw: unknown): IpcMessage {
   // `"text" in obj` is true even though nothing was actually supplied. That
   // false positive rejected every real delete/restore memory_edit outbound
   // (see mem/Bugs.md, "Delete gets stuck on Deleting... forever").
-  if (type === "hello" && obj.role !== undefined && !["ui", "voice"].includes(obj.role as string)) {
-    throw new Error('ipc: "hello" field "role" has an invalid value');
+  const required = new Set(messageSpec.required);
+  for (const [field, spec] of Object.entries(messageSpec.fields)) {
+    if (!(field in obj)) continue;
+    // Object-literal outbound builders retain known optional keys with an
+    // undefined value. JSON.stringify omits those keys on the wire, so treat
+    // them like absent optional fields while rejecting undefined when required.
+    if (obj[field] === undefined && !required.has(field)) continue;
+    if (!valueMatches(obj[field], spec)) {
+      throw new Error(`ipc: "${type}" field "${field}" has an invalid value`);
+    }
   }
-  if (type === "memory_edit" && obj.text !== undefined && typeof obj.text !== "string") {
-    throw new Error('ipc: "memory_edit" field "text" must be a string');
-  }
-  if (type === "lane_pin" && ![1, 2, 3].includes(obj.lane as number)) {
-    throw new Error('ipc: "lane_pin" field "lane" must be 1, 2, or 3');
-  }
-  if (type === "task_op" && obj.task_id !== undefined && typeof obj.task_id !== "string") {
-    throw new Error('ipc: "task_op" field "task_id" must be a string');
-  }
-  if (type === "error" && typeof obj.recoverable !== "boolean") {
-    throw new Error('ipc: "error" field "recoverable" must be a boolean');
-  }
-  if (type === "error" && obj.conversation_id !== undefined && typeof obj.conversation_id !== "string") {
-    throw new Error('ipc: "error" field "conversation_id" must be a string');
+  if (type === "error" && (("operation_kind" in obj) !== ("operation_id" in obj))) {
+    throw new Error('ipc: "error" operation_kind and operation_id must appear together');
   }
   return obj as unknown as IpcMessage;
 }

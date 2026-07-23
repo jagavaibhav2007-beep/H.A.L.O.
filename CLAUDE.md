@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-**H.A.L.O.** — a local, resident desktop AI companion: Tauri+React UI, Python/LangGraph brain, Python/Pipecat voice worker, talking over an authenticated local-loopback WebSocket. **Phase 0 (skeleton & contract) is complete and hardened** — three real processes spawn, authenticate, and recover from crashes with proper shutdown ordering. **Phase 1 (front-end shell) is complete** — the full premium UI (chat, activity, memory, tasks, skills, settings, orb+workspace windows) renders and animates against a scripted mock Brain; the automated gate (`./dev.ps1 -Smoke`) and the native checklist ([VERIFY.md](VERIFY.md)) are both green. **Phase 2 (backend spine) is complete as of 2026-07-21** — the real Brain is now the default (non-`--mock`) handler: SQLite store, keystore secrets, OpenRouter client + rule-based router, LangGraph control loop with SqliteSaver checkpointing, the permission gate + tool registry, real activity log + undo, Lane-1 file tools, real memory, and a real snapshot-on-connect. The contract stayed frozen throughout (25 types, zero drift). Its automated gate (`shared/phase2_check.py`, in `-Smoke`) is green; **its native checklist in VERIFY.md still needs a human run with a real OpenRouter key.** **Phase 3 (heavy systems) has not started.** See [phases.md](phases.md) for the roadmap; [phase-2-plan.md](phase-2-plan.md) for how Phase 2 was built and its D1–D9 decisions.
+**H.A.L.O.** — a local resident desktop AI companion built with Tauri/React, a Python/LangGraph Brain, and a Python Voice worker over authenticated loopback WebSocket. Phase 0, Phase 1, and the Phase 2 feature set are implemented; the default non-`--mock` Brain is the real Phase 2 backend. The 2026-07-22 evidence-driven hardening audit is complete for automatable scope: `./dev.ps1 -Verify` is green, app-scoped native startup/authentication and forced-parent cleanup pass, and no validated P0/P1 finding remains. Human visual/NVDA and real-key OpenRouter walkthroughs remain in [VERIFY.md](VERIFY.md); findings and deferrals are in [AUDIT_PLAN.md](AUDIT_PLAN.md). Phase 3 has not started.
 
 The repo has two layers: design docs (source of truth for *behavior* and *architecture*) and the code that implements them.
 
@@ -14,6 +14,9 @@ The repo has two layers: design docs (source of truth for *behavior* and *archit
 - **[ui_ux/](ui_ux/00-design-language.md)** — visual/interaction spec (tokens, motion, copy voice). Check `00-design-language.md` for existing tokens before inventing new ones.
 - **[phases.md](phases.md)** — the phase-by-phase build roadmap (Phase 0 skeleton → Phase 1 front-end shell → Phase 2 backend spine → Phase 3 heavy systems).
 - **[phase-0-plan.md](phase-0-plan.md)** — the 8-step Phase 0 implementation plan and its exit criteria (all met — see Commands below to re-verify).
+- **[phase-1-plan.md](phase-1-plan.md)** — the completed 15-step front-end shell plan.
+- **[phase-2-plan.md](phase-2-plan.md)** — the completed 10-step backend spine plan.
+- **[VERIFY.md](VERIFY.md)** — automated and native verification status; the Phase 2 native checklist still needs a human run with a real OpenRouter key.
 
 Each `systemdesign/`/`techstack/`/`ui_ux/` folder numbers files by feature (`01-chat`, `02-voice`, `03-memory`, …) — the same number across folders covers the same feature from architecture, technology, and UI angles. When changing one, check whether the matching file in the others needs to move with it. Treat the PRD as the source of truth for behavior; if a design decision changes a PRD claim, update the PRD too.
 
@@ -26,10 +29,10 @@ Three independent process trees (`ui/` Rust+Node, `brain/` Python, `voice/` Pyth
 ./dev.ps1              # launches Tauri (UI parent spawns brain, voice sidecars) — stable/attached by default
 ./dev.ps1 -Only ui      # just one of: ui | brain | voice (for standalone debugging)
 ./dev.ps1 -Mock         # full app, but Brain launches with --mock (HALO_MOCK) for scripted demo scenarios
-./dev.ps1 -Smoke        # runs Phase 0 (shared/smoke_test.py) then Phase 1 (shared/phase1_check.py) protocol gates in-place (no windows)
+./dev.ps1 -Smoke        # runs Phase 0, Phase 1, and Phase 2 automated gates in-place (no windows)
 ./dev.ps1 -WatchNative  # opt into normal Vite + Rust hot reload instead of the stable build (see below)
 ```
-The default `./dev.ps1` (no flags) spawns the plain Phase 0 echo Brain, which does not respond to `demo ...` triggers — use `-Mock` to drive any of the scripted scenarios in `brain/brain/mock.py`. After the automated gate passes, [VERIFY.md](VERIFY.md) is the manual native-app checklist (render matrix, keyboard/a11y, performance/recovery) — run it against `./dev.ps1 -Mock` for anything with a visual/runtime surface, since green scripts alone don't catch rendering or lifecycle bugs (see Architecture below).
+The default `./dev.ps1` (no flags) launches the real Phase 2 Brain. It does not respond to `demo ...` triggers; use `-Mock` to drive scripted UI scenarios in `brain/brain/mock.py`. After the automated gate passes, [VERIFY.md](VERIFY.md) is the manual native-app checklist (render matrix, keyboard/a11y, performance/recovery, and the real-key Phase 2 walkthrough) — run the mock app for visual/runtime surfaces and the normal app with a real OpenRouter key for Phase 2 behavior, since green scripts alone don't catch rendering or lifecycle bugs.
 
 **Launcher runs attached and stable by default (since 2026-07-17).** `./dev.ps1` now runs in its own terminal (not a detached `Start-Process`), holds a named mutex (`Local\HaloDevLauncher`) so a second launcher refuses to start, and by default builds once (`tauri.stable.conf.json`, `npm run dev:stable`, `vite preview`, `tauri dev --no-watch`) instead of live-reloading. Pass `-WatchNative` to get the original Vite dev server + native Rust hot reload back. This exists because agent-driven edits that touch many files (metadata-only rewrites included) were triggering repeated HMR/Tauri rebuilds under the old default watcher setup — see Decisions.md "Stable attached launcher by default." If you're iterating interactively on UI/Rust code and want hot reload, use `-WatchNative`; leave the default alone for anything scripted/automated.
 
@@ -58,7 +61,8 @@ cargo test               # runs the backoff-ladder unit test in supervisor.rs
 **Brain (`brain/`, Python 3.11+):**
 ```powershell
 python -m brain                          # starts the WS server, writes session.json
-python brain/tests/test_server.py        # auth/echo/ordering tests (plain asyncio+assert, no pytest)
+python brain/tests/test_server.py        # auth/ordering tests (plain asyncio+assert, no pytest)
+python shared/phase2_check.py             # real-Brain E2E gate with offline LLM/extraction stubs (from repo root)
 python -m brain.ipc.contract             # contract self-check
 ```
 
@@ -87,7 +91,7 @@ python shared/phase1_check.py
 ```powershell
 python shared/phase2_check.py
 ```
-All three run together via `./dev.ps1 -Smoke`. No test framework is used anywhere in this repo (plain `asyncio` + `assert` scripts) — don't introduce pytest/jest without a real reason.
+All three run together via `./dev.ps1 -Smoke`. Backend and cross-process checks use plain `asyncio` + `assert` scripts; the UI also has scoped Vitest tests. Don't introduce another test framework without a real reason.
 
 ## Architecture
 
@@ -131,13 +135,13 @@ All three run together via `./dev.ps1 -Smoke`. No test framework is used anywher
 
 ## Working against the mocked Brain
 
-The UI still has no real Brain to talk to — Phase 2 hasn't started — so every UI surface (including Phase 2+ contract additions, until the real Brain lands) is built and verified against a **scripted mock Brain** that replays predetermined IPC events. The mock lives in `brain/brain/mock.py` (state + `demo_*`/`_scenario_*` scenario methods, plus live `_beliefs`/`_skills` registries so edits round-trip realistically) and is dispatched from `brain/server.py` (`--mock` flag / `HALO_MOCK` env var), which also supports role-based routing (Voice only sees its protocol subset, UI sees everything).
+The UI has two supported Brain modes: the default real Phase 2 Brain and the permanent scripted mock harness. Use the mock for deterministic UI scenarios and the real Brain for backend behavior. The mock lives in `brain/brain/mock.py` (state + `demo_*`/`_scenario_*` scenario methods, plus live `_beliefs`/`_skills` registries so edits round-trip realistically) and is dispatched from `brain/server.py` (`--mock` flag / `HALO_MOCK` env var), which also supports role-based routing (Voice only sees its protocol subset, UI sees everything).
 
 **When adding a new outbound message type:**
 1. Add the type to `shared/ipc-contract.json`, mirror it to both `ui/src/ipc/contract.ts` and `brain/brain/ipc/contract.py`.
 2. **Add a mock handler in `brain/brain/mock.py` and wire it into `server.py`'s dispatch table** before testing the UI. If the UI sends `task_op` and the mock doesn't handle it, the UI affordance (e.g., "Stop" button) will hang indefinitely waiting for a confirming `task_state` that never arrives — indistinguishable from a UI bug (this exact bug happened once, see `mem/Bugs.md`).
 3. Verify with `python shared/check_contract_sync.py`.
-4. Test with `./dev.ps1 -Mock` and exercise the surface end to end (plain `./dev.ps1` uses the non-mock Phase 0 echo Brain and won't respond to `demo ...` triggers).
+4. Test with `./dev.ps1 -Mock` and exercise scripted surfaces end to end (plain `./dev.ps1` uses the real non-mock Phase 2 Brain and will not respond to `demo ...` triggers).
 
 **Mock Brain scenarios** are scripted in `brain/brain/mock.py` (`demo_*`/`_scenario_*` methods). When adding a new inbound message type, verify the mock *and* the test suite (`brain/tests/test_mock.py`) handle it, and extend `shared/phase1_check.py` if the new scenario needs an automated frame-sequence assertion.
 
@@ -153,7 +157,7 @@ Before doing non-trivial work, check whether an available skill or agent already
 - **[mem/Gotchas.md](mem/Gotchas.md)** — non-obvious traps: port ephemeral, shutdown flag ordering, StrictMode double-invoke, Tauri window-state plugin gotchas.
 - **[mem/Patterns.md](mem/Patterns.md)** — established patterns for common tasks (event store, mock design, etc.).
 - **[mem/Decisions.md](mem/Decisions.md)** — why certain design choices were made (e.g., why orb is user-resizable, why all-edge resize was replaced with corner grip).
-- **[mem/MigrationLog.md](mem/MigrationLog.md)** — database schema changes, newest first (empty until Phase 2 introduces SQLite).
+- **[mem/MigrationLog.md](mem/MigrationLog.md)** — database schema changes, newest first (currently records the Phase 2 schema v1 migration).
 
 **Before implementing or debugging:** check `mem/Bugs.md` for similar symptoms and "Never do" rules. Before starting a new feature, check `mem/Decisions.md` to understand prior reasoning. **Update mem/ at the end of your session** if you:
 - Hit a new bug (add to Bugs.md with root cause and "Never do" rule).

@@ -12,7 +12,7 @@
 // a trust property. Add it when the chat view needs the card threaded between
 // bubbles rather than floating over them.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertTriangle, ShieldAlert } from "lucide-react";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
@@ -40,13 +40,14 @@ export function ApprovalOverlay({ conversationId, sendApprovalResponse, sendInte
   if (list.length === 0) return null;
   return (
     <div className="approval-overlay" role="region" aria-label="Pending approvals">
-      {list.map((a) => (
+      {list.map((a, index) => (
         <ApprovalCard
           key={a.approval_id}
           approval={a}
           conversationId={conversationId}
           sendApprovalResponse={sendApprovalResponse}
           sendInterrupt={sendInterrupt}
+          shouldFocus={index === list.length - 1}
         />
       ))}
     </div>
@@ -58,9 +59,10 @@ interface CardProps {
   conversationId: string;
   sendApprovalResponse: OverlayProps["sendApprovalResponse"];
   sendInterrupt: OverlayProps["sendInterrupt"];
+  shouldFocus: boolean;
 }
 
-function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInterrupt }: CardProps) {
+function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInterrupt, shouldFocus }: CardProps) {
   const { approval_id, tool, args_redacted, summary, destructive } = approval;
   const setActiveConversation = useHaloStore((s) => s.setActiveConversation);
   // Interrupt is keyed by conversation. With several threads open, a card
@@ -82,6 +84,22 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
   const [argsText, setArgsText] = useState(() => prettyJson(args_redacted));
   const [showArgs, setShowArgs] = useState(false);
   const busy = pending !== "idle";
+  const cardId = useId();
+  const titleId = `${cardId}-title`;
+  const summaryId = `${cardId}-summary`;
+
+  useEffect(() => {
+    if (!shouldFocus) return;
+    const card = document.getElementById(cardId);
+    if (!card) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // The safe decision receives initial focus; approval is never the reflex
+    // action when a consequential request appears.
+    card.querySelector<HTMLButtonElement>("[data-safe-initial-focus]")?.focus();
+    return () => {
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [cardId, shouldFocus]);
 
   const approve = useCallback(
     (edited_args?: unknown) => {
@@ -115,10 +133,15 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
     <GlassPanel
       elevation="card"
       className="approval-card"
+      id={cardId}
       data-destructive={destructive ? "true" : undefined}
-      role="group"
-      aria-label={summary ?? `Approve ${tool}`}
+      role="alertdialog"
+      aria-modal="false"
+      aria-labelledby={titleId}
+      aria-describedby={summaryId}
+      tabIndex={-1}
     >
+      <h2 id={titleId} className="halo-sr-only">Approval required</h2>
       <div className="approval-head">
         <Chip
           icon={destructive ? AlertTriangle : ShieldAlert}
@@ -133,7 +156,7 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
         )}
       </div>
 
-      <p className="approval-summary">{summary ?? `Halo wants to run ${tool}.`}</p>
+      <p id={summaryId} className="approval-summary">{summary ?? `Halo wants to run ${tool}.`}</p>
 
       <button
         type="button"
@@ -175,7 +198,7 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
         {!editing && (
           <>
             {/* Deny is never red — denying is the safe choice (design rule). */}
-            <Button variant="ghost" onClick={deny} disabled={busy}>
+            <Button variant="ghost" onClick={deny} disabled={busy} data-safe-initial-focus>
               {pending === "denying" ? "Denying…" : "Deny"}
             </Button>
             <Button variant="ghost" onClick={() => setEditing(true)} disabled={busy}>

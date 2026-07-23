@@ -163,6 +163,18 @@ async def check_snapshot_idempotent() -> None:
 async def check_summarization() -> None:
     store.connect()
     store.set_setting("history_token_budget", 40)  # ~160 chars -> reachable fast
+    # Tool arguments are sent back to the provider as assistant history. Empty
+    # assistant content must not make a large tool call count as zero tokens.
+    tool_message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "large-call",
+            "type": "function",
+            "function": {"name": "file_create", "arguments": "x" * 800},
+        }],
+    }
+    assert graph._tokens([tool_message]) >= 200, "tool-call arguments were omitted from token estimation"
     cid = "snap-long"
     seen: list[list[dict]] = []
     real_stream = llm.stream_chat

@@ -1,6 +1,12 @@
 # Gotchas
 _Non-obvious traps, hidden constraints, things that bite._
 
+## Direct Node TypeScript self-checks cannot depend on bundler-only resolution - 2026-07-22
+The repository runs several `.selfcheck.ts` files directly with Node. An extensionless runtime import that Vite/Vitest resolves can fail only in the full gate under direct Node execution. Keep pure reducer/self-check helpers runtime-dependency-free (or use imports Node can actually resolve), and run `./dev.ps1 -Verify` rather than assuming Vitest or the production bundle covers this execution mode.
+
+## Closing a resident tray window is not the same as killing its process - 2026-07-22
+H.A.L.O. intercepts ordinary window close so it can remain resident. Native crash-ownership verification must target the exact Tauri PID, force that process to exit, and then verify the exact Brain/Voice child PIDs are gone. `CloseMainWindow()` exercises resident-window behavior, not the Windows Job Object kill-on-close guarantee.
+
 ## Vitest+jsdom does NOT reproduce React StrictMode updater-ordering bugs - 2026-07-18
 **Symptom:** a `renderHook` test wrapped in `<StrictMode>` stays green even when you reintroduce the exact rule-3 "unlock on confirm" bug (mutating `ref.current` inside a `setState(prev => ...)` updater, mem/Bugs.md 2026-07-13). **Cause:** under vitest+jsdom the updater IS double-invoked (probed: `updaterCalls=2`) but the mount effect runs only ONCE (`effectRuns=1`) and React commits the FIRST invocation's result — whereas the real browser mount double-*runs* the effect and the stuck-lock manifests. So the harness can't see the ordering defect. **Handling:** the Vitest hook tests guard *functional* regressions only (inverted comparison, missing clear, broken dedup — those DO fail the test; confirmed by mutation). The StrictMode double-invoke class stays a live-only check: `./dev.ps1 -Mock`, click a real confirmable control (approve/pause/delete), confirm it unlocks when the confirming frame lands. Never claim a green hook test covers the StrictMode bug — verify any new confirmable action's unlock step live.
 

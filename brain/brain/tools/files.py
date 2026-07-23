@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import uuid
+from heapq import nsmallest
 from itertools import islice
 from pathlib import Path
 
@@ -50,7 +51,11 @@ def _in_roots(p: Path) -> bool:
 
 
 def _sha(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with p.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _uncollide(p: Path) -> Path:
@@ -72,10 +77,12 @@ def _uncollide(p: Path) -> Path:
 
 def _file_read(args: dict) -> str:
     p = _resolve(args["path"])
-    data = p.read_bytes()
+    size = p.stat().st_size
+    with p.open("rb") as handle:
+        data = handle.read(_READ_CAP + 1)
     text = data[:_READ_CAP].decode("utf-8", errors="replace")
-    if len(data) > _READ_CAP:
-        text += f"\n... [truncated at 64KB of {len(data)} bytes]"
+    if len(data) > _READ_CAP or size > _READ_CAP:
+        text += f"\n... [truncated at 64KB of {size} bytes]"
     return text
 
 
@@ -83,19 +90,29 @@ def _dir_list(args: dict) -> list[dict]:
     p = _resolve(args["path"])
     return [
         {"name": c.name, "is_dir": c.is_dir()}
-        for c in islice(sorted(p.iterdir()), _LIST_CAP)
+        for c in nsmallest(_LIST_CAP, p.iterdir(), key=lambda child: child.name.casefold())
     ]
 
 
 def _file_search(args: dict) -> list[str]:
     p = _resolve(args["path"])
-    return [str(m.relative_to(p)) for m in islice(p.glob(args["pattern"]), _SEARCH_CAP)]
+    pattern = args["pattern"]
+    pattern_path = Path(pattern)
+    if pattern_path.is_absolute() or ".." in pattern_path.parts:
+        raise ValueError("search pattern must stay below the requested directory")
+    matches: list[str] = []
+    for match in islice(p.glob(pattern), _SEARCH_CAP):
+        resolved = match.resolve()
+        if not resolved.is_relative_to(p):
+            raise ValueError("search result escaped the requested directory")
+        matches.append(str(match.relative_to(p)))
+    return matches
 
 
 def _run_cmd(args: dict) -> dict:
     # Trust boundary: cmd.exe would honor > | & redirection in joined args,
     # and git's --output/-o writes files from "read-only" subcommands.
-    if any(c in args["cmd"] for c in "><|&") or "--output" in args["cmd"]:
+    if any(c in args["cmd"] for c in "><|&\r\n") or "--output" in args["cmd"]:
         raise ValueError(f"not allowed: shell redirection/output flags refused ({args['cmd']!r})")
     parts = shlex.split(args["cmd"])
     allowed = bool(parts) and (
@@ -106,9 +123,42 @@ def _run_cmd(args: dict) -> dict:
         # Refused inside the fn per the plan: arbitrary shell is out of scope
         # until a sandbox exists -- this is not Tier-3, it's a no.
         raise ValueError(f"not allowed: only git status/log/diff, dir, ls (got {args['cmd']!r})")
-    if parts[0] == "dir":
-        parts = ["cmd", "/c"] + parts  # dir is a cmd.exe builtin on Windows
-    r = subprocess.run(parts, capture_output=True, text=True, timeout=10, shell=False)
+    cwd = Path.cwd().resolve()
+    if not _in_roots(cwd):
+        raise ValueError(f"not allowed: command working directory is outside project roots ({cwd})")
+    if parts[0] in ("dir", "ls"):
+        allowed_flags = {"-a", "-l", "-la", "-al", "/b"}
+        operands = [part for part in parts[1:] if part not in allowed_flags]
+        unknown_flags = [part for part in operands if part.startswith("-")]
+        if unknown_flags or len(operands) > 1:
+            raise ValueError("not allowed: dir/ls accepts at most one path and basic listing flags")
+        target = (cwd / operands[0]).resolve() if operands and not Path(operands[0]).is_absolute() else (
+            Path(operands[0]).expanduser().resolve() if operands else cwd
+        )
+        if not _in_roots(target):
+            raise ValueError(f"not allowed: command path is outside project roots ({target})")
+        if target.is_dir():
+            names = [entry["name"] for entry in _dir_list({"path": str(target)})]
+        else:
+            names = [target.name]
+        out = "\n".join(names)
+        return {"code": 0, "stdout": out, "stderr": ""}
+
+    dangerous = {"--no-index", "--ext-diff", "--textconv"}
+    if any(part in dangerous or part.startswith("-o") for part in parts[2:]):
+        raise ValueError("not allowed: git option can escape roots, execute helpers, or write output")
+    path_mode = False
+    for part in parts[2:]:
+        if part == "--":
+            path_mode = True
+            continue
+        candidate = Path(part).expanduser()
+        looks_like_path = path_mode or candidate.is_absolute() or part.startswith(("./", "../", ".\\", "..\\"))
+        if looks_like_path:
+            candidate = candidate.resolve() if candidate.is_absolute() else (cwd / candidate).resolve()
+            if not _in_roots(candidate):
+                raise ValueError(f"not allowed: git path is outside project roots ({candidate})")
+    r = subprocess.run(parts, cwd=cwd, capture_output=True, text=True, timeout=10, shell=False)
     out = r.stdout
     if len(out) > _READ_CAP:
         out = out[:_READ_CAP] + "\n...[truncated]"
@@ -121,7 +171,8 @@ def _run_cmd(args: dict) -> dict:
 def _file_create(args: dict) -> dict:
     p = _resolve(args["path"])
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(args["content"], encoding="utf-8")
+    with p.open("x", encoding="utf-8") as handle:
+        handle.write(args["content"])
     return {"path": str(p), "sha256": _sha(p)}
 
 
@@ -191,7 +242,8 @@ def _file_delete(args: dict) -> None:
     want = args.get("expected_sha256")
     if want and _sha(p) != want:
         raise ValueError("file changed since; refusing to delete")
-    data = p.read_bytes()
+    with p.open("rb") as handle:
+        data = handle.read(_UNDO_BLOB_CAP + 1)
     p.unlink()
     args["_prior"] = data  # handed to the inverse builder, never leaves the fn
 
@@ -206,7 +258,11 @@ def _delete_inverse(args: dict, result) -> dict | None:
         content = data.decode("utf-8")
     except UnicodeDecodeError:
         return None  # ponytail: text files only; binary restore needs a blob store
-    return {"tool": "file_create", "args": {"path": args["path"], "content": content}}
+    return {
+        "tool": "file_create",
+        "args": {"path": args["path"], "content": content},
+        "precondition": {"path": args["path"], "must_be_absent": True},
+    }
 
 
 async def _dir_organize(args: dict) -> dict:
@@ -331,9 +387,9 @@ gate.register(
     summary=lambda a: f"I want to create {a['path']}.",
     inverse=_create_inverse,
     schema=_schema(
-        "Write a new text file, creating parent directories as needed. If the "
-        "path already exists this OVERWRITES it in full -- to change part of an "
-        "existing file use file_edit instead.",
+        "Write a new text file, creating parent directories as needed. The call "
+        "fails safely if the path already exists -- to change an existing file "
+        "use file_edit instead.",
         {
             "path": _PATH,
             "content": {"type": "string", "description": "Full UTF-8 text of the file."},

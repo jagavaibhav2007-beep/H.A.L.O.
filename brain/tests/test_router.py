@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from brain import llm
 from brain.llm import HEAVY, LIGHT, route, stream_chat, validate_key
 
 # --- route() pure-function branch coverage ---
@@ -72,6 +73,32 @@ async def _run_async_checks() -> None:
 
     ok = await validate_key("unused")
     assert ok is True
+
+    # OpenRouter reports failures that occur after streaming starts in-band:
+    # HTTP remains 200 and the terminal SSE chunk carries a top-level error.
+    midstream_error = {
+        "error": {"code": 429, "message": "Rate limit exceeded"},
+        "choices": [{"delta": {"content": ""}, "finish_reason": "error"}],
+    }
+    try:
+        llm._raise_for_stream_error(midstream_error)
+        raise AssertionError("mid-stream error chunk was accepted as success")
+    except llm.OpenRouterStreamError as exc:
+        assert "429" in str(exc) and "Rate limit exceeded" in str(exc), exc
+
+    try:
+        llm._raise_for_stream_error({"choices": [{"delta": {}, "finish_reason": "error"}]})
+        raise AssertionError("finish_reason=error was accepted as success")
+    except llm.OpenRouterStreamError:
+        pass
+
+    # The hot chat/tool loop shares one pool and closes it explicitly.
+    first = llm._get_client()
+    assert llm._get_client() is first, "HTTP client/pool was recreated between requests"
+    await llm.aclose()
+    assert first.is_closed, "shared HTTP client was not closed"
+    assert llm._get_client() is not first, "closed HTTP client was reused"
+    await llm.aclose()
 
 
 asyncio.run(_run_async_checks())

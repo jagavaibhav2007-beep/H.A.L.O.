@@ -89,6 +89,6 @@ Source of truth for *what* each thing does stays in [Halo-PRD.md](Halo-PRD.md), 
 
 ## How to use this file
 
-- **Phase 0 is done** (skeleton + IPC contract, hardened with hello_ack/queueing) — see [phase-0-plan.md](phase-0-plan.md). **Phase 1 is done** — see [phase-1-plan.md](phase-1-plan.md). **Phase 2 is done** (2026-07-21, Steps 1–10; automated gate green, native checklist in VERIFY.md still pending a human run with a real key) — see [phase-2-plan.md](phase-2-plan.md). **Phase 3 is next.**
+- **Phase 0 is done** (skeleton + IPC contract, hardened with hello_ack/queueing) — see [phase-0-plan.md](phase-0-plan.md). **Phase 1 is done** — see [phase-1-plan.md](phase-1-plan.md). **The Phase 2 feature set and 2026-07-22 automated hardening audit are complete**: the full repository gate and app-scoped native lifecycle checks pass, with human visual/NVDA and real-key provider checks explicitly retained in [VERIFY.md](VERIFY.md). See [AUDIT_PLAN.md](AUDIT_PLAN.md) for evidence and deferrals. **Phase 3 is the next implementation phase.**
 - To start a phase: "let's start Phase N" → a `phase-N-plan.md` gets written with concrete tasks, file layout, and interfaces, grounded in the then-current docs.
 - If a phase reveals a design gap, fix the relevant `systemdesign/`/`techstack/`/`ui_ux/` doc first, then continue — this roadmap follows the docs, not the other way around.

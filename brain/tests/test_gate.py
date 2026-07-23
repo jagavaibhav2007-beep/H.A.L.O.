@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,13 +119,65 @@ def check_classify_table() -> None:
     assert gate.classify("t2_tool", {}) == 2
     assert gate.classify("t3_tool", {}) == 3
     assert gate.classify("no_such_tool", {}) == 3  # unknown -> fail safe
+    assert gate.redact("no_such_tool", {"token": "must-not-leak"}) == {}
     assert gate.classify("t_broken_rule", {}) == 3  # classify exception -> fail safe
     assert gate.classify("argtool", {"risky": True}) == 3
     assert gate.classify("argtool", {"risky": False}) == 2
     assert gate.is_destructive("t3_boom", {}) is True
     assert gate.is_destructive("t3_tool", {}) is False
     assert "delete" in gate.summarize("t3_boom", {})
-    print("[check 1] classify table: T1/T2/T3, unknown->3, exception->3, destructive flag: OK")
+    print("[check 1] classify table: T1/T2/T3, unknown->3 with empty redaction, exception->3: OK")
+
+
+async def check_sync_tool_does_not_block_event_loop() -> None:
+    """A heartbeat must be able to release a blocking synchronous tool."""
+    release = threading.Event()
+    sync_results: list[bool] = []
+    loop_thread = threading.get_ident()
+    async_thread: list[int] = []
+
+    def slow_sync_tool(_args: dict) -> bool:
+        # Direct event-loop execution makes this expire before heartbeat runs.
+        released_by_heartbeat = release.wait(timeout=1.0)
+        sync_results.append(released_by_heartbeat)
+        return released_by_heartbeat
+
+    async def async_tool(_args: dict) -> str:
+        async_thread.append(threading.get_ident())
+        await asyncio.sleep(0)
+        return "done"
+
+    async def broadcast(_msg_type: str, _payload: dict) -> None:
+        return None
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.02)
+        release.set()
+
+    gate.register("slow_sync_tool", slow_sync_tool, tier=1)
+    gate.register("async_tool", async_tool, tier=1)
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        result = await gate.gated_execute(
+            "slow_sync_tool", {}, conversation_id="gate-heartbeat",
+            task_id=None, broadcast=broadcast,
+        )
+        await heartbeat_task
+        assert sync_results == [True], sync_results
+        assert result["pending_tool_result"]["status"] == "ok", result
+
+        await gate.gated_execute(
+            "async_tool", {}, conversation_id="gate-async",
+            task_id=None, broadcast=broadcast,
+        )
+        assert async_thread == [loop_thread], async_thread
+    finally:
+        gate.TOOLS.pop("slow_sync_tool", None)
+        gate.TOOLS.pop("async_tool", None)
+        if not heartbeat_task.done():
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+    print("[check 2] slow sync tool runs off-loop; coroutine tool remains on-loop: OK")
 
 
 async def check_tier1(port: int, token: str) -> None:
@@ -308,6 +361,7 @@ async def check_restart_durability(port: int, token: str) -> None:
 
 async def main() -> None:
     check_classify_table()
+    await check_sync_tool_does_not_block_event_loop()
     server, token = await start()
     port = server.sockets[0].getsockname()[1]
     try:

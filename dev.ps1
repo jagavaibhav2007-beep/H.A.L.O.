@@ -2,8 +2,9 @@
 # Brain and Voice; the standalone options are for worker-only debugging.
 # Usage: ./dev.ps1  (or ./dev.ps1 -Only brain|voice|ui to launch just one;
 #        Voice requires a separately running Brain and its editable package)
-#        ./dev.ps1 -Smoke  runs the Phase 0, Phase 1, and Phase 2 exit-criteria
-#        protocol checks in-place (no windows spawned) instead of launching processes.
+#        ./dev.ps1 -Smoke  runs only the Phase 0/1/2 protocol phase checks.
+#        ./dev.ps1 -Verify runs the full automated repository gate: contract
+#        sync, Python suites, UI checks/build, Rust tests, and phase checks.
 #        ./dev.ps1 -Mock  runs the scripted mock Brain (Phase 1 Step 2). With
 #        the default (-Only all) it launches the full app: Tauri spawns the
 #        Brain with --mock via the HALO_MOCK env var, so the real UI talks to
@@ -18,11 +19,74 @@ param(
     [string]$Only = "all",
 
     [switch]$Smoke,
+    [switch]$Verify,
     [switch]$Mock,
     [switch]$WatchNative
 )
 
 $root = $PSScriptRoot
+
+function Test-PythonLauncher {
+    param([string]$Command, [string[]]$PrefixArguments = @())
+    try {
+        & $Command @PrefixArguments -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" 2>$null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-PythonLauncher {
+    $pythonApplication = Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($pythonApplication -and (Test-PythonLauncher -Command $pythonApplication.Source)) {
+        return [pscustomobject]@{ Command = $pythonApplication.Source; Arguments = @() }
+    }
+
+    $pyApplication = Get-Command py -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($pyApplication -and (Test-PythonLauncher -Command $pyApplication.Source -PrefixArguments @("-3"))) {
+        return [pscustomobject]@{ Command = $pyApplication.Source; Arguments = @("-3") }
+    }
+
+    $runtimeRoots = @()
+    if ($env:USERPROFILE) { $runtimeRoots += Join-Path $env:USERPROFILE ".cache\codex-runtimes" }
+    if ($env:LOCALAPPDATA) { $runtimeRoots += Join-Path $env:LOCALAPPDATA "codex-runtimes" }
+    foreach ($runtimeRoot in $runtimeRoots) {
+        if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) { continue }
+        $bundledPythons = Get-ChildItem -LiteralPath $runtimeRoot -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName "dependencies\python\python.exe" } |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+        foreach ($bundledPython in $bundledPythons) {
+            if (Test-PythonLauncher -Command $bundledPython) {
+                return [pscustomobject]@{ Command = $bundledPython; Arguments = @() }
+            }
+        }
+    }
+
+    throw "Python 3.11+ was not found. Install 'python', install the 'py' launcher, or run from a Codex environment with a discoverable bundled runtime."
+}
+
+function Invoke-Python {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject]$Launcher,
+
+        [Parameter(Mandatory)]
+        [string[]]$Arguments
+    )
+    & $Launcher.Command @($Launcher.Arguments) @Arguments
+}
+
+if ($Smoke -and $Verify) {
+    Write-Error "Choose either -Smoke (protocol checks) or -Verify (full automated gate), not both."
+    exit 2
+}
+
+if (($Smoke -or $Verify) -and ($Mock -or $WatchNative -or $Only -ne "all")) {
+    Write-Error "-Smoke and -Verify cannot be combined with -Only, -Mock, or -WatchNative."
+    exit 2
+}
 
 function Start-Ui {
     $createdDevMutex = $false
@@ -71,13 +135,19 @@ function Start-Voice {
 }
 
 if ($Smoke) {
-    python "$root\shared\smoke_test.py"
+    $python = Resolve-PythonLauncher
+    Invoke-Python -Launcher $python -Arguments @("$root\shared\smoke_test.py")
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    python "$root\shared\phase1_check.py"
+    Invoke-Python -Launcher $python -Arguments @("$root\shared\phase1_check.py")
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    python "$root\shared\phase2_check.py"
+    Invoke-Python -Launcher $python -Arguments @("$root\shared\phase2_check.py")
+    exit $LASTEXITCODE
+}
+
+if ($Verify) {
+    & "$root\verify.ps1"
     exit $LASTEXITCODE
 }
 

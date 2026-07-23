@@ -30,7 +30,7 @@ ROOT = Path(tempfile.mkdtemp(prefix="halo-files-root-")).resolve()
 OUT = Path(tempfile.mkdtemp(prefix="halo-files-out-")).resolve()
 
 store.connect()
-store.set_setting("project_roots", [str(ROOT)])
+store.set_setting("project_roots", [str(ROOT), str(Path.cwd().resolve())])
 
 FRAMES: list[tuple[str, dict]] = []
 
@@ -114,6 +114,17 @@ async def check_create_undo() -> None:
     await _undo(act["undo_token"])
     assert not p.exists(), "undo didn't delete the created file"
     assert any(t == "activity" for t, _ in FRAMES), "no reversal activity"
+
+    raced = ROOT / "raced.txt"
+    assert gate.classify("file_create", {"path": str(raced), "content": "halo"}) == 2
+    raced.write_text("other writer", encoding="utf-8")
+    FRAMES.clear()
+    result = await gate._execute_tail(
+        "file_create", {"path": str(raced), "content": "halo"}, 2, "files-test", broadcast
+    )
+    assert result["pending_tool_result"]["status"].startswith("error"), result
+    assert raced.read_text(encoding="utf-8") == "other writer"
+    assert not any(t == "activity" for t, _ in FRAMES), FRAMES
     print("[check 2] file_create: writes, redacts content, undo deletes it (trusted hash-guarded inverse): OK")
 
 
@@ -201,10 +212,16 @@ async def check_readonly_cmd() -> None:
     assert status == "ok", status
     status = await _run("run_readonly_cmd", {"cmd": "del foo"})
     assert status.startswith("error") and "not allowed" in status, status
-    for sneaky in ("dir > pwned.txt", "git log --output=pwned.txt"):
+    for sneaky in (
+        "dir > pwned.txt",
+        "git log --output=pwned.txt",
+        f"dir {OUT.as_posix()}",
+        f"git diff --no-index -- NUL {OUT.as_posix()}",
+        "git diff --ext-diff",
+    ):
         status = await _run("run_readonly_cmd", {"cmd": sneaky})
         assert status.startswith("error") and "not allowed" in status, (sneaky, status)
-    print("[check 6] run_readonly_cmd: git status runs; del, redirection, --output refused: OK")
+    print("[check 6] run_readonly_cmd: allowed git works; outside roots and dangerous options refused: OK")
 
 
 def check_resolve() -> None:
@@ -241,9 +258,43 @@ async def check_search() -> None:
     )
     empty = res["messages"][0]["content"]
     assert "[]" in empty and "no matches" in empty, empty
+
+    escaped = await gate.gated_execute(
+        "file_search", {"path": str(ROOT), "pattern": "../*"},
+        conversation_id="files-test", task_id=None, broadcast=broadcast,
+    )
+    assert escaped["pending_tool_result"]["status"].startswith("error"), escaped
     (ROOT / "needle.pdf").unlink()
     print("[check 9] file_search: finds a known file and its name reaches the tool message; "
           "empty result reads as explicit 'no matches': OK")
+
+
+async def check_delete_undo_does_not_overwrite_replacement() -> None:
+    p = ROOT / "deleted-then-replaced.txt"
+    p.write_text("original", encoding="utf-8")
+    FRAMES.clear()
+    result = await gate._execute_tail(
+        "file_delete", {"path": str(p)}, 3, "files-test", broadcast
+    )
+    assert result["pending_tool_result"]["status"] == "ok", result
+    token = _activity()["undo_token"]
+    p.write_text("replacement", encoding="utf-8")
+
+    await _undo(token)
+    assert p.read_text(encoding="utf-8") == "replacement"
+    errors = [payload for msg_type, payload in FRAMES if msg_type == "error"]
+    assert errors and errors[-1]["code"] == "undo_precondition_failed", FRAMES
+    assert store.get_action_by_undo_token(token)["consumed"] == 0
+    print("[check 10] delete undo refuses an occupied restore path without consuming its token: OK")
+
+
+def check_bounded_read_and_hash() -> None:
+    p = ROOT / "large.txt"
+    p.write_bytes(b"a" * (files._READ_CAP + 4096))
+    text = files._file_read({"path": str(p)})
+    assert "truncated at 64KB" in text
+    assert files._sha(p) == _sha(p)
+    print("[check 11] file reads truncate and streaming hash preserves the digest: OK")
 
 
 def check_traversal() -> None:
@@ -262,6 +313,8 @@ async def main() -> None:
     await check_readonly_cmd()
     check_resolve()
     await check_search()
+    await check_delete_undo_does_not_overwrite_replacement()
+    check_bounded_read_and_hash()
     check_traversal()
     print("[brain.files] self-check OK")
 

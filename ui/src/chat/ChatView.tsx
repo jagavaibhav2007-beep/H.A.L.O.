@@ -41,12 +41,13 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   const titleFromMessage = useHaloStore((s) => s.titleFromMessage);
   const chats = useHaloStore(selectChats);
 
-  const [input, setInput] = useState("");
-  const lastSentRef = useRef("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const lastSentRef = useRef<Record<string, string>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true); // autoscroll only while the user sits at the bottom (rule 6)
 
   const turns = conv?.turns ?? [];
+  const input = drafts[conversationId] ?? "";
   // Live voice transcript for THIS conversation, still being spoken -> ghost text.
   const ghost =
     voice.transcript && !voice.transcript.final && voice.transcript.conversationId === conversationId
@@ -57,11 +58,11 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
     (text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
-      lastSentRef.current = trimmed;
+      lastSentRef.current[conversationId] = trimmed;
       appendUserTurn(conversationId, trimmed, crypto.randomUUID());
       titleFromMessage(conversationId, trimmed); // no-ops unless still untitled
       sendUserMsg(conversationId, trimmed);
-      setInput("");
+      setDrafts((current) => ({ ...current, [conversationId]: "" }));
     },
     [appendUserTurn, titleFromMessage, conversationId, sendUserMsg],
   );
@@ -71,7 +72,11 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   // acknowledge so it fires once.
   useEffect(() => {
     if (!conv?.needsInputRestore) return;
-    setInput((cur) => (cur ? cur : lastSentRef.current));
+    setDrafts((current) =>
+      current[conversationId]
+        ? current
+        : { ...current, [conversationId]: lastSentRef.current[conversationId] ?? "" },
+    );
     acknowledgeInputRestore(conversationId);
   }, [conv?.needsInputRestore, conversationId, acknowledgeInputRestore]);
 
@@ -103,9 +108,28 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   // replays past turns on connect. Say so plainly rather than render a blank
   // panel that reads as data loss.
   const restored = empty && chats.all.find((c) => c.id === conversationId)?.restored;
+  const latestAssistant = [...turns].reverse().find((turn): turn is AssistantTurn => turn.role === "assistant");
+  const connectionStatus =
+    connState === "reconnecting"
+      ? "Halo is reconnecting. Messages will send when reconnected."
+      : connState === "connecting"
+        ? "Halo is connecting. Messages will send when connected."
+        : latestAssistant?.status === "streaming"
+          ? "Halo is thinking."
+          : latestAssistant?.status === "done"
+            ? "Halo response complete."
+            : "";
+  const latestError =
+    latestAssistant?.status === "error" ? latestAssistant.error?.message ?? "Halo could not answer." : "";
 
   return (
     <div className="chat-view">
+      <div className="halo-sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {connectionStatus}
+      </div>
+      <div className="halo-sr-only" role="alert" aria-live="assertive" aria-atomic="true">
+        {latestError}
+      </div>
       <ChatTabs />
       <div className="halo-scroll chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {empty ? (
@@ -138,6 +162,7 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
       </div>
 
       <div className="chat-input-bar">
+        <label className="halo-sr-only" htmlFor={inputId}>Message Halo</label>
         <button
           type="button"
           className="chat-input-mic"
@@ -152,7 +177,10 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
           id={inputId}
           className="chat-input"
           value={input}
-          onChange={(e) => setInput(e.currentTarget.value)}
+          onChange={(event) => {
+            const value = event.currentTarget.value;
+            setDrafts((current) => ({ ...current, [conversationId]: value }));
+          }}
           onKeyDown={onKeyDown}
           placeholder="Message Halo…"
           rows={1}
@@ -185,7 +213,7 @@ function AssistantRow({ turn, activities }: { turn: AssistantTurn; activities: A
     <div className="chat-turn chat-turn-halo">
       <div className="chat-bubble chat-bubble-halo">
         {thinking ? (
-          <span className="chat-thinking" aria-label="Halo is thinking">
+          <span className="chat-thinking" aria-hidden="true">
             <span />
             <span />
             <span />

@@ -9,7 +9,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Activity as ActivityIcon, ArrowDown, RotateCcw, ShieldAlert } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
-import { useHaloStore, selectActivities } from "../state/store";
+import { useHaloStore, selectActivities, selectOperationErrors } from "../state/store";
+import { operationCorrelationKey } from "../ipc/contract";
 import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
 import type { ActivityMsg } from "../ipc/contract";
 import { activitiesAfterBoundary } from "./activityBoundary";
@@ -29,6 +30,8 @@ interface ActivityFeedProps {
 
 export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
   const activities = useHaloStore(selectActivities);
+  const operationErrors = useHaloStore(selectOperationErrors);
+  const [undoError, setUndoError] = useState<string>();
 
   const [tier, setTier] = useState<TierFilter>("all");
   const [lane, setLane] = useState<LaneFilter>("all");
@@ -66,6 +69,17 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
   }, [activities, tier, lane, task, undoableOnly, query]);
 
   // Resolve any pending undo whose reversal has now landed (see comment above).
+  useEffect(() => {
+    const failed = Object.keys(pending).find((token) => operationErrors[operationCorrelationKey("undo", token)]);
+    if (!failed) return;
+    setUndoError(operationErrors[operationCorrelationKey("undo", failed)].message);
+    setPending((prev) => {
+      const next = { ...prev };
+      delete next[failed];
+      return next;
+    });
+  }, [operationErrors, pending]);
+
   useEffect(() => {
     const resolved = Object.entries(pending)
       .filter(([, info]) =>
@@ -125,6 +139,7 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
 
   return (
     <div className="feed">
+      {undoError && <p role="alert">{undoError}</p>}
       <div className="feed-filters">
         <select aria-label="Filter by tier" className="halo-input feed-select" value={tier} onChange={(e) => setTier(e.target.value as TierFilter)}>
           <option value="all">All tiers</option>

@@ -16,8 +16,11 @@ For a fixed-capacity collection such as the 10,000-entry activity ring buffer, c
 ## Native Windows capsule: transparent WebView plus HWND region - 2026-07-17
 For a non-rectangular Tauri window on Windows, combine `transparent:true` and `backgroundColor:"#00000000"` with a native `SetWindowRgn` region. `ui/src-tauri/src/windows.rs::clip_window_to_capsule` creates a round-rect region whose corner ellipse equals the physical window height, applies it after enforcing the 360x52 logical size, and reapplies it on resize or DPI scale changes. Keep the `windows` crate dependency target-specific and enable only `Win32_Graphics_Gdi`.
 
-## Single-source-of-truth IPC contract with a drift check — 2026-07-10
-`shared/ipc-contract.json` is the canonical schema (message types + required fields). `ui/src/ipc/contract.ts` and `brain/brain/ipc/contract.py` are hand-mirrored from it. `shared/check_contract_sync.py` fails the build if TS/Python/schema diverge. Run it after editing any of the three. Chosen over codegen for simplicity at this scale.
+## Single-source-of-truth IPC contract with a drift check — 2026-07-10, hardened 2026-07-22
+`shared/ipc-contract.json` is canonical for message directions, required/optional fields, types, enums, and allowed shape. The TypeScript/Python mirrors runtime-validate at the boundary, and `shared/check_contract_sync.py` compares all 25 complete schemas. Run sync plus both runtime self-checks after edits; name/required-field parity alone is insufficient.
+
+## Full repository gate is broader than protocol smoke - 2026-07-22
+Use `./dev.ps1 -Smoke` only for Phase 0/1/2 protocol checks. Use `./dev.ps1 -Verify` before a repository-green claim. A partial run proves only the steps reached; require the final success marker.
 
 ## Backoff/pure-logic extraction for testability — 2026-07-10
 `ui/src-tauri/src/supervisor.rs`'s `backoff_delay(attempt) -> Option<Duration>` is a standalone pure function (1s/5s/30s/None) covered by one deterministic `#[test]`, separate from the actual process-spawning loop that calls it. Prefer extracting the pure decision logic out of anything that touches processes/IO so it's unit-testable without spawning.

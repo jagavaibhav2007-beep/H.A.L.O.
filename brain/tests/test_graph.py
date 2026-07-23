@@ -184,6 +184,72 @@ async def check_interrupt(port: int, token: str) -> None:
     print("[check 4] interrupt mid-stream -> prompt stop + done; next turn carries redirect note: OK")
 
 
+async def check_interrupt_stalled_stream(port: int, token: str) -> None:
+    """A real provider may stop yielding while its socket remains open. Stop
+    must cancel that blocked read rather than wait for the 120s HTTP timeout."""
+    ws = await _connect_auth(port, token)
+    real_stream = llm.stream_chat
+    closed = asyncio.Event()
+
+    async def stalled_stream(*args, **kwargs):
+        try:
+            yield "first"
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    llm.stream_chat = stalled_stream
+    try:
+        cid = "g-stop-stalled"
+        await _send_msg(ws, cid, "please wait forever")
+        first = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        assert first["type"] == "token" and first["conversation_id"] == cid, first
+        await ws.send(json.dumps(_frame("interrupt", conversation_id=cid)))
+
+        deadline = asyncio.get_running_loop().time() + 2
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            assert remaining > 0, "stalled stream ignored interrupt for more than 2s"
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
+            if frame["type"] == "done" and frame.get("conversation_id") == cid:
+                break
+        await asyncio.wait_for(closed.wait(), timeout=0.5)
+    finally:
+        llm.stream_chat = real_stream
+        await ws.close()
+    print("[check 4b] interrupt cancels a stalled provider stream and closes it within 2s: OK")
+
+
+async def check_midstream_error_honesty(port: int, token: str) -> None:
+    """Tokens already shown remain, but an in-band provider failure closes the
+    turn with error rather than marking a truncated answer done."""
+    ws = await _connect_auth(port, token)
+    real_stream = llm.stream_chat
+
+    async def failed_stream(*args, **kwargs):
+        yield "partial"
+        raise llm.OpenRouterStreamError("openrouter stream error 502: provider disconnected")
+
+    llm.stream_chat = failed_stream
+    try:
+        cid = "g-midstream-error"
+        await _send_msg(ws, cid, "trigger provider failure")
+        token_frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        assert token_frame["type"] == "token" and token_frame["text"] == "partial", token_frame
+        error = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        assert error["type"] == "error" and error["conversation_id"] == cid, error
+        assert "provider disconnected" in error["message"], error
+        try:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.3))
+            assert not (frame["type"] == "done" and frame.get("conversation_id") == cid), frame
+        except asyncio.TimeoutError:
+            pass
+    finally:
+        llm.stream_chat = real_stream
+        await ws.close()
+    print("[check 4c] partial stream failure -> token then honest error, never done: OK")
+
+
 async def check_no_api_key(port: int, token: str) -> None:
     del os.environ["HALO_LLM_STUB"]  # real path; HALO_KEYRING_DIR is empty -> no key
     ws = await _connect_auth(port, token)
@@ -221,6 +287,8 @@ async def main() -> None:
         await check_interleave_and_serialize(port, token)
         await check_restart_persistence(port, token)
         await check_interrupt(port, token)
+        await check_interrupt_stalled_stream(port, token)
+        await check_midstream_error_honesty(port, token)
         await check_no_api_key(port, token)
     finally:
         server.close()

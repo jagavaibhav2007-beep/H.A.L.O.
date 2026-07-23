@@ -54,7 +54,7 @@ def _parse_hello_ack(raw: str | bytes) -> dict:
     return frame
 
 
-async def run(uri: str, token: str) -> None:
+async def run(uri: str, token: str, *, authenticated: asyncio.Event | None = None) -> None:
     """Connect, authenticate, then idle-heartbeat until the Brain disconnects."""
     async with connect(uri) as ws:
         await ws.send(json.dumps(_hello_frame(token)))
@@ -64,6 +64,8 @@ async def run(uri: str, token: str) -> None:
         except (TimeoutError, ValueError, websockets.exceptions.ConnectionClosed):
             logger.info("brain authentication failed, exiting cleanly")
             return
+        if authenticated is not None:
+            authenticated.set()
         logger.info("brain authentication acknowledged")
 
         while True:

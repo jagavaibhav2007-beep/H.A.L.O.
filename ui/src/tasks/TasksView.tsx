@@ -15,7 +15,7 @@ import type { LucideIcon } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
-import { useHaloStore, selectTasks, selectStream } from "../state/store";
+import { useHaloStore, selectTasks, selectStream, selectOperationErrors } from "../state/store";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
 import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
 import type { TaskStateMsg } from "../ipc/contract";
@@ -39,14 +39,20 @@ interface TasksViewProps {
 
 export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
   const tasks = useHaloStore(selectTasks);
-  const { pending, begin } = usePendingConfirm(tasks);
+  const operationErrors = useHaloStore(selectOperationErrors);
+  const { pending, failures, begin } = usePendingConfirm(tasks, operationErrors);
 
   const op = (task: TaskStateMsg, kind: "pause" | "resume" | "stop", label: string) => {
-    if (begin(task.task_id, label)) sendTaskOp(kind, task.task_id);
+    const confirms = (value: TaskStateMsg | undefined) => {
+      if (kind === "pause") return value?.state === "paused";
+      if (kind === "resume") return value?.state === "running";
+      return value == null || value.state === "done" || value.state === "failed";
+    };
+    if (begin(task.task_id, label, confirms, "task_op")) sendTaskOp(kind, task.task_id);
   };
   const pin = (task: TaskStateMsg, lane: 1 | 2 | 3) => {
     if (lane === task.lane) return;
-    if (begin(task.task_id, "pinning")) sendLanePin(task.task_id, lane);
+    if (begin(task.task_id, "pinning", (value) => value?.lane === lane, "lane_pin")) sendLanePin(task.task_id, lane);
   };
 
   // Done cards collapse out after 24h (by ts display logic only — plan edge case).
@@ -65,7 +71,7 @@ export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
       <ul className="halo-list tasks-list">
         {ordered.map((t) => (
           <li key={t.task_id}>
-            <TaskCard task={t} pending={pending[t.task_id]} op={op} pin={pin} />
+            <TaskCard task={t} pending={pending[t.task_id]} failure={failures[t.task_id]} op={op} pin={pin} />
           </li>
         ))}
       </ul>
@@ -76,11 +82,12 @@ export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
 interface CardProps {
   task: TaskStateMsg;
   pending: string | undefined;
+  failure: string | undefined;
   op: (task: TaskStateMsg, kind: "pause" | "resume" | "stop", label: string) => void;
   pin: (task: TaskStateMsg, lane: 1 | 2 | 3) => void;
 }
 
-function TaskCard({ task, pending, op, pin }: CardProps) {
+function TaskCard({ task, pending, failure, op, pin }: CardProps) {
   const { title, state, lane, step, steps_total, step_label, reason } = task;
   const stream = useHaloStore(selectStream(task.task_id));
   const busy = pending !== undefined;
@@ -97,6 +104,7 @@ function TaskCard({ task, pending, op, pin }: CardProps) {
 
       {!collapsed && (
         <>
+          {failure && <p className="task-reason" role="alert">{failure}</p>}
           {hasProgress && (
             <div className="task-progress">
               <div className="halo-meter task-progress-bar">

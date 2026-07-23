@@ -8,12 +8,17 @@ import type {
   ActivityMsg,
   ApprovalRequestMsg,
   BeliefStateMsg,
+  ErrorMsg,
   IpcMessage,
   SkillStateMsg,
   StreamFrameMsg,
   TaskStateMsg,
   VoiceStateMsg,
 } from "../ipc/contract";
+
+// Keep this pure reducer runtime-dependency-free so its standalone Node
+// self-check works without a bundler/TS module resolver.
+const operationCorrelationKey = (kind: string, id: string) => `${kind}:${id}`;
 
 // ---- Slice types ----
 
@@ -68,6 +73,13 @@ export interface SpendState {
   monthUsd: number;
 }
 
+interface SnapshotState {
+  pending: boolean;
+  taskIds: Record<string, true>;
+  approvalIds: Record<string, true>;
+  activityCounts: Record<string, number>;
+}
+
 // Keyed by settings key (only "openrouter_key" exists so far) so the reducer
 // stays total if Settings grows more server-confirmed keys later.
 export type SettingsState = Record<string, "set" | "missing" | "invalid" | "unverified">;
@@ -84,6 +96,10 @@ export interface HaloState {
   voice: VoiceState;
   spend: SpendState;
   settings: SettingsState;
+  operationErrors: Record<string, ErrorMsg>;
+  /** Connect snapshots end at spend_update. While one is pending, entity IDs
+   * are collected so absence can reconcile stale reconnect state. */
+  snapshot: SnapshotState;
 }
 
 export const ACTIVITY_CAP = 10_000;
@@ -100,6 +116,8 @@ export const initialState: HaloState = {
   voice: { state: "idle", transcript: null },
   spend: { sessionUsd: 0, monthUsd: 0 },
   settings: {},
+  operationErrors: {},
+  snapshot: { pending: false, taskIds: {}, approvalIds: {}, activityCounts: {} },
 };
 
 // ---- Helpers ----
@@ -120,10 +138,14 @@ function getConversation(state: HaloState, conversationId: string): Conversation
   );
 }
 
-/** The last turn, if it's an assistant turn still streaming — undefined otherwise. */
+/** The newest assistant turn still streaming. A queued user follow-up may sit
+ * after it while the Brain finishes the current serialized turn. */
 function openTurn(conv: ConversationState): AssistantTurn | undefined {
-  const last = conv.turns[conv.turns.length - 1];
-  return last?.role === "assistant" && last.status === "streaming" ? last : undefined;
+  for (let i = conv.turns.length - 1; i >= 0; i -= 1) {
+    const turn = conv.turns[i];
+    if (turn.role === "assistant" && turn.status === "streaming") return turn;
+  }
+  return undefined;
 }
 
 /** Record the user's own outgoing message as a turn (see UserTurn comment).
@@ -153,6 +175,67 @@ function pushActivity(state: HaloState, activity: ActivityMsg): HaloState {
   const next = [...state.activities, activity];
   if (next.length > ACTIVITY_CAP) next.splice(0, next.length - ACTIVITY_CAP); // drop oldest
   return { ...state, activities: next };
+}
+
+function activityIdentity(activity: ActivityMsg): string {
+  // Snapshot replays get fresh envelope ids/timestamps and may change
+  // undoable/token after an undo. The stable action shape plus occurrence
+  // count lets a repeated identical action remain distinct.
+  return JSON.stringify([
+    activity.task_id,
+    activity.text,
+    activity.narrate,
+    activity.tier ?? null,
+    activity.lane ?? null,
+  ]);
+}
+
+function reconcileSnapshotActivity(state: HaloState, activity: ActivityMsg): HaloState {
+  const key = activityIdentity(activity);
+  const occurrence = state.snapshot.activityCounts[key] ?? 0;
+  let matched = -1;
+  let found = 0;
+  for (let i = 0; i < state.activities.length; i += 1) {
+    if (activityIdentity(state.activities[i]) !== key) continue;
+    if (found === occurrence) {
+      matched = i;
+      break;
+    }
+    found += 1;
+  }
+
+  const snapshot = {
+    ...state.snapshot,
+    activityCounts: { ...state.snapshot.activityCounts, [key]: occurrence + 1 },
+  };
+  if (matched < 0) {
+    const withActivity = pushActivity(state, activity);
+    return { ...withActivity, snapshot };
+  }
+
+  const activities = [...state.activities];
+  activities[matched] = { ...activity, id: activities[matched].id, ts: activities[matched].ts };
+  return { ...state, activities, snapshot };
+}
+
+function finishSnapshot(state: HaloState): HaloState {
+  if (!state.snapshot.pending) return state;
+  const tasks = Object.fromEntries(
+    Object.entries(state.tasks).filter(([id]) => state.snapshot.taskIds[id]),
+  );
+  const approvals = Object.fromEntries(
+    Object.entries(state.approvals).filter(([id]) => state.snapshot.approvalIds[id]),
+  );
+  const streams = Object.fromEntries(
+    Object.entries(state.streams).filter(([taskId]) => state.snapshot.taskIds[taskId]),
+  );
+  return {
+    ...state,
+    tasks,
+    approvals,
+    streams,
+    snapshot: { pending: false, taskIds: {}, approvalIds: {}, activityCounts: {} },
+  };
 }
 
 function upsert<T>(record: Record<string, T>, key: string, value: T): Record<string, T> {
@@ -195,27 +278,55 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
     }
 
     case "error": {
+      if (frame.operation_kind && frame.operation_id) {
+        const key = operationCorrelationKey(frame.operation_kind, frame.operation_id);
+        const approvals = frame.operation_kind === "approval_response"
+          ? Object.fromEntries(Object.entries(state.approvals).filter(([id]) => id !== frame.operation_id))
+          : state.approvals;
+        return { ...state, approvals, operationErrors: upsert(state.operationErrors, key, frame) };
+      }
       if (!frame.conversation_id) return state;
       const conv = getConversation(state, frame.conversation_id);
       const open = openTurn(conv);
       const error = { code: frame.code, message: frame.message, recoverable: frame.recoverable };
-      const turns = open ? patchOpenTurn(conv.turns, open, { status: "error", error }) : conv.turns;
+      const turns: Turn[] = open
+        ? patchOpenTurn(conv.turns, open, { status: "error", error })
+        : [...conv.turns, { id: frame.id, role: "assistant", status: "error", text: "", error }];
       // rule 8: a turn is never lost — flag the input for restore regardless
       // of whether a turn had started streaming yet.
       return replaceConversation(state, { ...conv, turns, needsInputRestore: true });
     }
 
     case "activity": {
+      if (state.snapshot.pending) return reconcileSnapshotActivity(state, frame);
       const withActivity = pushActivity(state, frame);
       return resolveApprovalsForTask(withActivity, frame.task_id);
     }
 
-    case "approval_request":
-      return { ...state, approvals: upsert(state.approvals, frame.approval_id, frame) };
+    case "approval_request": {
+      const next = { ...state, approvals: upsert(state.approvals, frame.approval_id, frame) };
+      if (!state.snapshot.pending) return next;
+      return {
+        ...next,
+        snapshot: {
+          ...state.snapshot,
+          approvalIds: { ...state.snapshot.approvalIds, [frame.approval_id]: true },
+        },
+      };
+    }
 
     case "task_state": {
       // Unknown task_id -> create it; the reconnect snapshot may race deltas.
-      const next = { ...state, tasks: upsert(state.tasks, frame.task_id, frame) };
+      let next = { ...state, tasks: upsert(state.tasks, frame.task_id, frame) };
+      if (state.snapshot.pending) {
+        next = {
+          ...next,
+          snapshot: {
+            ...state.snapshot,
+            taskIds: { ...state.snapshot.taskIds, [frame.task_id]: true },
+          },
+        };
+      }
       return frame.state === "waiting_approval" ? next : resolveApprovalsForTask(next, frame.task_id);
     }
 
@@ -234,7 +345,10 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       return { ...state, skills: upsert(state.skills, frame.skill_name, frame) };
 
     case "spend_update":
-      return { ...state, spend: { sessionUsd: frame.session_usd, monthUsd: frame.month_usd } };
+      return finishSnapshot({
+        ...state,
+        spend: { sessionUsd: frame.session_usd, monthUsd: frame.month_usd },
+      });
 
     case "settings_state":
       return { ...state, settings: upsert(state.settings, frame.key, frame.status) };
@@ -285,7 +399,14 @@ export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): 
       return { ...state, connection: { ...state.connection, wsStatus: "connecting" } };
 
     case "authenticated":
-      return { ...state, connection: { ...state.connection, wsStatus: "connected" } };
+      // The Brain sends a complete state snapshot immediately after hello_ack.
+      // Start reconciliation here so ordinary live events are never mistaken
+      // for snapshot backlog before a connection has authenticated.
+      return {
+        ...state,
+        connection: { ...state.connection, wsStatus: "connected" },
+        snapshot: { pending: true, taskIds: {}, approvalIds: {}, activityCounts: {} },
+      };
 
     case "ws_closed": {
       // Close open streaming turns with an interrupted marker (a turn is
@@ -304,7 +425,12 @@ export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): 
             }
           : conv;
       }
-      return { ...state, conversations, connection: { ...state.connection, wsStatus: "reconnecting" } };
+      return {
+        ...state,
+        conversations,
+        connection: { ...state.connection, wsStatus: "reconnecting" },
+        snapshot: { pending: true, taskIds: {}, approvalIds: {}, activityCounts: {} },
+      };
     }
 
     case "sidecar_state": {

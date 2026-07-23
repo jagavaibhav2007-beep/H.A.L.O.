@@ -2,7 +2,7 @@
 """Fails (non-zero exit) if the TS and Python IPC contracts have drifted
 from each other or from shared/ipc-contract.json.
 
-Compares message names + required-field lists across all three:
+Compares the complete runtime schema across all three:
   - shared/ipc-contract.json      (schema, authoritative)
   - ui/src/ipc/contract.ts        (via `node`, which runs .ts natively)
   - brain/brain/ipc/contract.py   (via direct import)
@@ -13,6 +13,7 @@ Usage: python shared/check_contract_sync.py
 from __future__ import annotations
 
 import json
+import difflib
 import subprocess
 import sys
 from pathlib import Path
@@ -22,23 +23,23 @@ SCHEMA_PATH = ROOT / "shared" / "ipc-contract.json"
 TS_CONTRACT_PATH = ROOT / "ui" / "src" / "ipc" / "contract.ts"
 
 
-def load_schema() -> dict[str, list[str]]:
+def load_schema() -> dict:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    return {name: spec["required"] for name, spec in schema["messages"].items()}
+    return {"envelope": schema["envelope"], "messages": schema["messages"]}
 
 
-def load_python_contract() -> dict[str, list[str]]:
+def load_python_contract() -> dict:
     sys.path.insert(0, str(ROOT / "brain"))
-    from brain.ipc.contract import REQUIRED_FIELDS  # noqa: PLC0415
+    from brain.ipc.contract import CONTRACT_SPEC  # noqa: PLC0415
 
-    return {k: list(v) for k, v in REQUIRED_FIELDS.items()}
+    return CONTRACT_SPEC
 
 
-def load_ts_contract() -> dict[str, list[str]]:
+def load_ts_contract() -> dict:
     rel_path = TS_CONTRACT_PATH.relative_to(ROOT).as_posix()
     script = (
-        f"import {{ REQUIRED_FIELDS }} from './{rel_path}';"
-        "console.log(JSON.stringify(REQUIRED_FIELDS));"
+        f"import {{ CONTRACT_SPEC }} from './{rel_path}';"
+        "console.log(JSON.stringify(CONTRACT_SPEC));"
     )
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -54,20 +55,20 @@ def load_ts_contract() -> dict[str, list[str]]:
     return json.loads(result.stdout)
 
 
-def diff(label_a: str, a: dict[str, list[str]], label_b: str, b: dict[str, list[str]]) -> list[str]:
-    problems = []
-    names_a, names_b = set(a), set(b)
-    for missing in names_a - names_b:
-        problems.append(f'"{missing}" is in {label_a} but missing from {label_b}')
-    for missing in names_b - names_a:
-        problems.append(f'"{missing}" is in {label_b} but missing from {label_a}')
-    for name in names_a & names_b:
-        if set(a[name]) != set(b[name]):
-            problems.append(
-                f'"{name}" required fields differ: {label_a}={sorted(a[name])} '
-                f"vs {label_b}={sorted(b[name])}"
-            )
-    return problems
+def diff(label_a: str, a: dict, label_b: str, b: dict) -> list[str]:
+    if a == b:
+        return []
+    details = difflib.unified_diff(
+        json.dumps(a, indent=2, sort_keys=True).splitlines(),
+        json.dumps(b, indent=2, sort_keys=True).splitlines(),
+        fromfile=label_a,
+        tofile=label_b,
+        lineterm="",
+    )
+    return [
+        f"complete schemas differ ({label_a} vs {label_b}):\n"
+        + "\n".join(details)
+    ]
 
 
 def main() -> int:
@@ -86,7 +87,10 @@ def main() -> int:
             print(f"  - {p}")
         return 1
 
-    print(f"[check_contract_sync] OK - {len(schema)} message types in sync across schema/ts/python.")
+    print(
+        f"[check_contract_sync] OK - {len(schema['messages'])} complete message schemas "
+        "in sync across schema/ts/python."
+    )
     return 0
 
 

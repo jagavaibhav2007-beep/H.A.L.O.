@@ -13,6 +13,7 @@ Rule 2: every path out of run_turn ends in exactly one `done` or `error`.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from operator import add
@@ -195,7 +196,38 @@ def _prompt_messages(state: State) -> list[dict]:
 def _tokens(messages: list[dict]) -> int:
     # ponytail: chars//4 estimate, no tokenizer dependency -- swap in the real
     # count if the threshold ever needs to be tight rather than a safety net.
-    return sum(len(m.get("content") or "") for m in messages) // 4
+    # Count the complete provider payload: assistant tool-call arguments can be
+    # much larger than content (often empty) and are sent back on every round.
+    serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"), default=str)
+    return len(serialized) // 4
+
+
+async def _stream_until_stopped(stream, stop: asyncio.Event):
+    """Yield from an async stream while racing every blocked read against stop.
+
+    Cancelling the pending anext() unwinds llm._stream_once's response context,
+    closing the HTTP stream instead of waiting for its 120-second read timeout.
+    """
+    iterator = stream.__aiter__()
+    stop_task = asyncio.create_task(stop.wait())
+    try:
+        while True:
+            next_task = asyncio.create_task(anext(iterator))
+            done, _ = await asyncio.wait({next_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            if stop_task in done:
+                next_task.cancel()
+                await asyncio.gather(next_task, return_exceptions=True)
+                return
+            try:
+                yield next_task.result()
+            except StopAsyncIteration:
+                return
+    finally:
+        stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
 
 
 async def _maybe_summarize(state: State, ctx: dict) -> dict:
@@ -223,11 +255,12 @@ async def _maybe_summarize(state: State, ctx: dict) -> dict:
         excerpt = f"Summary so far:\n{prior}\n\n{excerpt}"
     try:
         parts: list[str] = []
-        async for delta in llm.stream_chat(
+        stream = llm.stream_chat(
             [{"role": "system", "content": _SUMMARY_SYSTEM}, {"role": "user", "content": excerpt}],
             llm.LIGHT,
             ctx["api_key"],
-        ):
+        )
+        async for delta in _stream_until_stopped(stream, ctx["stop"]):
             parts.append(delta)
         summary = "".join(parts).strip()
     except GraphInterrupt:
@@ -250,6 +283,9 @@ async def _respond_node(state: State, config) -> dict:
     cid = config["configurable"]["thread_id"]
     ctx = _turn_ctx[cid]
     update: dict = await _maybe_summarize(state, ctx)
+    if ctx["stop"].is_set():
+        update["redirected"] = True
+        return update
     history = _prompt_messages({**state, **update})
     parts: list[str] = []
     calls: list[dict] = []
@@ -263,17 +299,15 @@ async def _respond_node(state: State, config) -> dict:
         # Retrieved beliefs prepend at stream time only -- never into graph
         # state, so they're recomputed per turn (no-double-injection rule).
         system = {"role": "system", "content": _SYSTEM_PROMPT + _roots_note()}
-        async for delta in llm.stream_chat(
+        stream = llm.stream_chat(
             [system] + ctx.get("memory", []) + history,
             state["model"],
             ctx["api_key"],
             ctx["usage"],
             tools=tools,
             tool_calls_out=calls,
-        ):
-            if ctx["stop"].is_set():
-                update["redirected"] = True
-                break
+        )
+        async for delta in _stream_until_stopped(stream, ctx["stop"]):
             parts.append(delta)
             await ctx["broadcast"]("token", {"text": delta, "conversation_id": cid})
     except GraphInterrupt:
@@ -287,6 +321,8 @@ async def _respond_node(state: State, config) -> dict:
             # ponytail: any mid-LIGHT-stream exception escalates the next turn
             # to HEAVY -- a quality/parse-failure heuristic can refine this later.
             update["escalated"] = True
+    if ctx["stop"].is_set():
+        update["redirected"] = True
     if calls and not ctx["stop"].is_set():
         # The assistant message MUST carry its tool_calls verbatim -- it's what
         # the following `tool` messages answer.
@@ -354,10 +390,13 @@ async def aclose() -> None:
     need it -- SQLite WAL survives a kill, which is the restart semantics:
     history persists, a dead half-streamed turn is never auto-resumed)."""
     global _graph, _saver_conn
-    if _saver_conn is not None:
-        await _saver_conn.close()
-    _graph = None
-    _saver_conn = None
+    try:
+        if _saver_conn is not None:
+            await _saver_conn.close()
+    finally:
+        _graph = None
+        _saver_conn = None
+        await llm.aclose()
 
 
 def _spend_sync(cost: float) -> float:
@@ -460,7 +499,21 @@ async def snapshot(send) -> None:
 
     `spend_update` is always last -- the same "snapshot done" sentinel the mock
     established, which tests drain against."""
-    await send("settings_state", {"key": "openrouter_key", "status": secrets_store.key_status()})
+    try:
+        key_status = await asyncio.to_thread(secrets_store.key_status)
+    except Exception as exc:  # noqa: BLE001 - snapshot must resolve Settings honestly
+        logger.warning("openrouter key status read failed (%s)", type(exc).__name__)
+        await send("settings_state", {"key": "openrouter_key", "status": "invalid"})
+        await send(
+            "error",
+            {
+                "code": "keystore_unavailable",
+                "message": "the system credential store is unavailable; retry from Settings",
+                "recoverable": True,
+            },
+        )
+    else:
+        await send("settings_state", {"key": "openrouter_key", "status": key_status})
 
     store.connect()
     tasks = await asyncio.to_thread(store.list_tasks, _SNAPSHOT_TASK_STATES)
@@ -583,7 +636,8 @@ async def resume_turn(approval_id: str, decision: str, edited_args: dict | None,
         logger.exception("resume failed for approval_id=%s", approval_id)
         await broadcast(
             "error",
-            {"code": "turn_failed", "message": str(exc), "recoverable": True, "conversation_id": cid},
+            {"code": "turn_failed", "message": str(exc), "recoverable": True, "conversation_id": cid,
+             "operation_kind": "approval_response", "operation_id": approval_id},
         )
     return True
 
@@ -601,7 +655,8 @@ async def handle_approval_response(msg: dict, send, broadcast, locks: dict[str, 
     if not handled:
         await send(
             "error",
-            {"code": "approval_already_handled", "message": "This approval was already handled.", "recoverable": True},
+            {"code": "approval_already_handled", "message": "This approval was already handled.", "recoverable": True,
+             "operation_kind": "approval_response", "operation_id": approval_id},
         )
 
 

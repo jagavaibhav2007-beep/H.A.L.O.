@@ -190,6 +190,31 @@ async def check_precondition_failure(ws) -> None:
     print("[check 5] precondition failure: recoverable error, no forced overwrite, connection usable: OK")
 
 
+async def check_failed_inverse_releases_token(ws) -> None:
+    token = store.record_action(
+        tool="broken_inverse_source",
+        args_redacted={},
+        tier=2,
+        lane=1,
+        result="ok",
+        undoable=True,
+        inverse_json={"tool": "no_such_inverse", "args": {}},
+        task_id="u-failed",
+    )[1]
+    assert token
+
+    await ws.send(json.dumps(_frame("undo", undo_token=token)))
+    err = await _recv_type(ws, "error")
+    assert err["code"] == "undo_failed" and err["recoverable"] is True, err
+    assert store.get_action_by_undo_token(token)["consumed"] == 0
+    try:
+        frame = await _recv(ws, timeout=0.2)
+        assert frame["type"] != "activity", frame
+    except asyncio.TimeoutError:
+        pass
+    print("[check 6] failed inverse reports error, emits no success activity, and releases token: OK")
+
+
 async def check_connect_backlog(ws, port: int, token: str) -> None:
     # One fresh undoable action whose token is never consumed.
     live = await _run_undoable(ws, "u-log", "file_create", {"path": str(FILES / "d.txt"), "content": "dee"})
@@ -218,7 +243,7 @@ async def check_connect_backlog(ws, port: int, token: str) -> None:
         assert consumed and not (set(consumed) & set(tokens)), (consumed, tokens)
     finally:
         await ws2.close()
-    print("[check 6] connect-time backlog: recent actions replayed oldest-first; live token re-armed, consumed ones not: OK")
+    print("[check 7] connect-time backlog: recent actions replayed oldest-first; live token re-armed, consumed ones not: OK")
 
 
 async def main() -> None:
@@ -231,6 +256,7 @@ async def main() -> None:
         await check_double_undo(ws)
         await check_unknown_token(ws)
         await check_precondition_failure(ws)
+        await check_failed_inverse_releases_token(ws)
         await check_connect_backlog(ws, port, token)
     finally:
         await ws.close()

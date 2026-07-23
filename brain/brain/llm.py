@@ -20,6 +20,48 @@ _API_URL = "https://openrouter.ai/api/v1/chat/completions"
 _MODELS_URL = "https://openrouter.ai/api/v1/models"
 _TIMEOUT = httpx.Timeout(connect=10, read=120, write=10, pool=10)
 _PLAN_VERBS = ("plan", "organize", "refactor", "design", "migrate")
+_client: httpx.AsyncClient | None = None
+
+
+class OpenRouterStreamError(RuntimeError):
+    """An HTTP-200 OpenRouter stream terminated with an in-band error."""
+
+
+def _get_client() -> httpx.AsyncClient:
+    """One process-wide pool for the hot chat/tool loop.
+
+    Construction contains no await, so concurrent tasks on the one event loop
+    cannot interleave between the check and assignment.
+    """
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=_TIMEOUT)
+    return _client
+
+
+async def aclose() -> None:
+    """Close the shared HTTP pool during Brain/test shutdown."""
+    global _client
+    client, _client = _client, None
+    if client is not None and not client.is_closed:
+        await client.aclose()
+
+
+def _raise_for_stream_error(chunk: dict) -> None:
+    """OpenRouter cannot change HTTP status after streaming has started, so
+    provider failures arrive as a terminal HTTP-200 SSE chunk. Treat both the
+    documented top-level error and finish_reason=error as failed generations.
+    """
+    error = chunk.get("error")
+    choices = chunk.get("choices") or []
+    finish_error = any(choice.get("finish_reason") == "error" for choice in choices)
+    if not error and not finish_error:
+        return
+    if isinstance(error, dict):
+        code = error.get("code", "unknown")
+        message = error.get("message") or "generation failed"
+        raise OpenRouterStreamError(f"openrouter stream error {code}: {message}")
+    raise OpenRouterStreamError("openrouter stream ended with finish_reason=error")
 
 
 def route(text: str, escalated: bool = False) -> str:
@@ -116,31 +158,32 @@ async def _stream_once(messages, model, api_key, usage_out, tools=None, tool_acc
         body["tool_choice"] = "auto"
     if tool_acc is not None:
         tool_acc.clear()  # a retry re-streams from scratch; never double-count
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        async with client.stream("POST", _API_URL, headers=headers, json=body) as resp:
-            if resp.status_code == 401:
-                raise RuntimeError("openrouter key rejected — check Settings")
-            if resp.status_code >= 400:
-                text = await resp.aread()
-                snippet = text.decode("utf-8", "replace")[:200]
-                resp_ = httpx.Response(resp.status_code, request=resp.request, content=text)
-                raise httpx.HTTPStatusError(
-                    f"openrouter {resp.status_code}: {snippet}", request=resp.request, response=resp_
-                )
-            async for data in _sse_lines(resp):
-                if data.strip() == "[DONE]":
-                    continue
-                chunk = json.loads(data)
-                usage = chunk.get("usage")
-                if usage and usage_out is not None:
-                    usage_out["cost"] = float(usage.get("cost", 0.0) or 0.0)
-                choices = chunk.get("choices") or []
-                if choices:
-                    delta = choices[0].get("delta") or {}
-                    if tool_acc is not None:
-                        accumulate_tool_call_deltas(tool_acc, delta.get("tool_calls"))
-                    if delta.get("content"):
-                        yield delta["content"]
+    client = _get_client()
+    async with client.stream("POST", _API_URL, headers=headers, json=body) as resp:
+        if resp.status_code == 401:
+            raise RuntimeError("openrouter key rejected — check Settings")
+        if resp.status_code >= 400:
+            text = await resp.aread()
+            snippet = text.decode("utf-8", "replace")[:200]
+            resp_ = httpx.Response(resp.status_code, request=resp.request, content=text)
+            raise httpx.HTTPStatusError(
+                f"openrouter {resp.status_code}: {snippet}", request=resp.request, response=resp_
+            )
+        async for data in _sse_lines(resp):
+            if data.strip() == "[DONE]":
+                continue
+            chunk = json.loads(data)
+            usage = chunk.get("usage")
+            if usage and usage_out is not None:
+                usage_out["cost"] = float(usage.get("cost", 0.0) or 0.0)
+            _raise_for_stream_error(chunk)
+            choices = chunk.get("choices") or []
+            if choices:
+                delta = choices[0].get("delta") or {}
+                if tool_acc is not None:
+                    accumulate_tool_call_deltas(tool_acc, delta.get("tool_calls"))
+                if delta.get("content"):
+                    yield delta["content"]
 
 
 def _stub_tool_calls(messages: list[dict]) -> list[dict] | None:
@@ -233,8 +276,7 @@ async def validate_key(api_key: str) -> bool:
     if os.environ.get("HALO_LLM_STUB"):
         return True
     headers = {"Authorization": f"Bearer {api_key}"}
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.get(_MODELS_URL, headers=headers)
+    resp = await _get_client().get(_MODELS_URL, headers=headers)
     if resp.status_code == 200:
         return True
     if resp.status_code in (401, 403):

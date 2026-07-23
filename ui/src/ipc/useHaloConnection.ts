@@ -41,10 +41,25 @@ interface Session {
 }
 
 export type ConnState = "connecting" | "connected" | "reconnecting";
+export type SidecarStatus = "unknown" | "starting" | "running" | "restarting" | "error";
+
+export interface SidecarSnapshot {
+  revision: number;
+  brain: SidecarStatus;
+  voice: SidecarStatus;
+}
+
+interface SidecarEvent {
+  process: "brain" | "voice";
+  state: Exclude<SidecarStatus, "unknown">;
+  revision: number;
+}
+
+const UNKNOWN_SIDECARS: SidecarSnapshot = { revision: 0, brain: "unknown", voice: "unknown" };
 
 export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const [connState, setConnState] = useState<ConnState>("connecting");
-  const [sidecarError, setSidecarError] = useState(false);
+  const [sidecars, setSidecars] = useState<SidecarSnapshot>(UNKNOWN_SIDECARS);
   const wsRef = useRef<WebSocket | null>(null);
   const authenticatedRef = useRef(false);
   const queueRef = useRef<Outbound[]>([]);
@@ -129,16 +144,30 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
 
     connect();
 
-    const unlisten = listen<{ process: string; state: string }>("sidecar-state", (e) => {
-      if (e.payload.process === "brain" && e.payload.state === "error") {
-        setSidecarError(true);
-      }
+    const unlisten = listen<SidecarEvent>("sidecar-state", (e) => {
+      setSidecars((current) =>
+        e.payload.revision > current.revision
+          ? { ...current, revision: e.payload.revision, [e.payload.process]: e.payload.state }
+          : current,
+      );
     });
+    // Register for deltas first, then hydrate. Revisions prevent an older
+    // command response from overwriting an event that arrived in between.
+    void unlisten
+      .then(() => invoke<SidecarSnapshot>("sidecar_snapshot"))
+      .then((snapshot) => {
+        if (!torndown) {
+          setSidecars((current) => (snapshot.revision > current.revision ? snapshot : current));
+        }
+      })
+      .catch((error) => {
+        if (!torndown) console.error("halo: failed to hydrate sidecar state", error);
+      });
 
     return () => {
       torndown = true;
       if (retryTimer) clearTimeout(retryTimer);
-      unlisten.then((f) => f());
+      void unlisten.then((f) => f()).catch(() => {});
       const ws = wsRef.current;
       if (ws) {
         // Clear handlers first so the intentional teardown close doesn't
@@ -237,7 +266,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
 
   return {
     connState,
-    sidecarError,
+    sidecars,
     sendUserMsg,
     sendTaskOp,
     sendUndo,

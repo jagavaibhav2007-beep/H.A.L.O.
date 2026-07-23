@@ -303,4 +303,64 @@ function token(text: string, conversation_id: string): TokenMsg {
   assert(state.conversations["cA"].needsInputRestore === false, "multi: A's input is not disturbed by B's error");
 }
 
+// ---- Scenario 12: a pre-token error is visible and restorable ----
+{
+  let state: HaloState = appendUserTurn(initialState, "c-error", "hello", "u-error");
+  state = applyFrame(state, {
+    type: "error",
+    ...envelope(),
+    code: "no_api_key",
+    message: "Add an OpenRouter key in Settings.",
+    recoverable: true,
+    conversation_id: "c-error",
+  });
+  const conv = state.conversations["c-error"];
+  const errorTurn = assistantTurn(conv.turns[1], "pre-token error: assistant error turn is created");
+  assert(errorTurn.status === "error", "pre-token error: turn is visibly terminal");
+  assert(errorTurn.error?.code === "no_api_key", "pre-token error: cause is retained");
+  assert(conv.needsInputRestore, "pre-token error: failed input is marked for restoration");
+}
+
+// ---- Scenario 13: a rapid follow-up does not split an active stream ----
+{
+  let state: HaloState = appendUserTurn(initialState, "c-fast", "first", "u-fast-1");
+  state = applyFrame(state, token("Hello", "c-fast"));
+  state = appendUserTurn(state, "c-fast", "second", "u-fast-2");
+  state = applyFrame(state, token(" world", "c-fast"));
+  state = applyFrame(state, { type: "done", ...envelope(), conversation_id: "c-fast" });
+  const conv = state.conversations["c-fast"];
+  assert(conv.turns.length === 3, "rapid follow-up: no extra assistant bubble is created");
+  const reply = assistantTurn(conv.turns[1], "rapid follow-up: original assistant turn remains addressable");
+  assert(reply.text === "Hello world" && reply.status === "done", "rapid follow-up: stream remains contiguous");
+  assert(conv.turns[2].role === "user" && conv.turns[2].text === "second", "rapid follow-up: queued user turn remains intact");
+}
+
+// ---- Scenario 14: snapshot absence reconciles and backlog is idempotent ----
+{
+  let state: HaloState = applyFrame(initialState, {
+    type: "task_state", ...envelope(), task_id: "stale-task", state: "running", lane: 1,
+  });
+  state = applyFrame(state, {
+    type: "activity", ...envelope(), text: "Created a file.", narrate: false,
+    task_id: "shared-task", undoable: true, undo_token: "undo-live", tier: 2, lane: 1,
+  });
+  state = applyConnectionEvent(state, { type: "ws_closed" });
+  state = applyConnectionEvent(state, { type: "authenticated" });
+  state = applyFrame(state, {
+    type: "task_state", ...envelope(), task_id: "shared-task", state: "waiting_approval", lane: 1,
+  });
+  state = applyFrame(state, {
+    type: "approval_request", ...envelope(), approval_id: "pending-after-reconnect",
+    tool: "file_delete", args_redacted: { path: "***" }, tier: 3, task_id: "shared-task",
+  });
+  state = applyFrame(state, {
+    type: "activity", ...envelope(), text: "Created a file.", narrate: false,
+    task_id: "shared-task", undoable: true, undo_token: "undo-snapshot", tier: 2, lane: 1,
+  });
+  state = applyFrame(state, { type: "spend_update", ...envelope(), session_usd: 0, month_usd: 0 });
+  assert(state.tasks["stale-task"] === undefined, "snapshot: absent stale task is removed");
+  assert(state.activities.length === 1, "snapshot: replayed activity is deduplicated");
+  assert(state.approvals["pending-after-reconnect"] !== undefined, "snapshot: backlog does not erase pending approval");
+}
+
 console.log("[reducer.selfcheck] OK");

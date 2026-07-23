@@ -2,22 +2,32 @@
 
 Status: **Phase 1 COMPLETE** — automated gate passed, native checklist
 user-confirmed complete on 2026-07-13.
-Status: **Phase 2 automated gate green (2026-07-21); its native checklist
-below is NOT yet user-run** — it needs a real OpenRouter key, so only you
-can complete it.
+Status: **Phase 2 and the 2026-07-22 automated audit hardening are integration-verified.**
+`./dev.ps1 -Verify` reached `FULL AUTOMATED VERIFICATION PASSED`. App-scoped
+native mock startup confirmed Brain/Voice authentication, and forced death of
+the exact Tauri PID reaped its exact Brain/Voice child PIDs. Human visual,
+keyboard/NVDA, minimum-size, and real-OpenRouter-key checks remain unchecked.
+See [AUDIT_PLAN.md](AUDIT_PLAN.md).
 
-Run the automated gate first, then start the native app with
-`./dev.ps1 -Mock`. The normal launcher uses the Phase 0 echo Brain and does
-not respond to `demo ...` triggers.
+Run the full automated gate first. Use `./dev.ps1 -Mock` for the scripted
+Phase-1 visual scenarios (`demo ...`). Use the normal `./dev.ps1` launcher for
+the real Phase-2 Brain and real OpenRouter verification; it intentionally does
+not respond to mock demo triggers.
 
-## Automated gate
+## Automated gates
 
-- [ ] Run `./dev.ps1 -Smoke` from the repository root.
-- [ ] Confirm the Phase 0 transport smoke passes before Phase 1 starts.
-- [ ] Confirm Phase 1 reports snapshot idempotence, approval branches, undo,
-      the full walkthrough, and remaining scenarios as passing.
-- [ ] Run `npx tsc --noEmit` and `npm run build` from `ui/`.
-- [ ] Run `cargo test` from `ui/src-tauri/`.
+- [x] Run `./dev.ps1 -Verify` from the repository root. This is the full
+      automated gate: IPC contract sync, every Brain and Voice Python test,
+      UI self-checks, Vitest, the UI production build, Rust tests, and all
+      three phase protocol checks.
+- [x] Confirm the final line says `FULL AUTOMATED VERIFICATION PASSED`
+      (2026-07-22: all Python/Voice scripts, five TS self-checks, Vitest 16/16,
+      production build, Rust 7/7, and Phase 0/1/2 gates).
+- [x] Confirm both gate scripts parse in Windows PowerShell and resolve Python
+      3.11+ via `python`, `py -3`, or a discoverable bundled Codex runtime.
+- [x] During focused protocol work, `./dev.ps1 -Smoke` may be used as the
+      faster Phase 0/1/2 protocol-only check. A green `-Smoke` is not a
+      substitute for `-Verify` before declaring the repository gate green.
 
 ## Render matrix
 
@@ -67,18 +77,29 @@ focus must remain visible, and no panel may clip at the minimum window size.
 - [ ] After Tauri restarts Brain on a new port, the queued turn sends once, the
       badge clears, and snapshot-backed state does not duplicate.
 - [ ] Quit from the tray; no Tauri, Brain, or Voice process remains.
+- [x] Force-kill the Tauri parent; its exact Brain and Voice children are reaped
+      (2026-07-22 app-scoped run: UI 28628, Voice 10088, Brain 35148; all gone
+      within three seconds). Tray-quit remains a separate human interaction check.
 
 ## Phase 2 native checklist
 
-The automated gate (`./dev.ps1 -Smoke`, now Phase 0 -> Phase 1 -> Phase 2) proves
-the real Brain's protocol paths offline, against `HALO_LLM_STUB`/`HALO_EXTRACT_STUB`.
+The full automated gate (`./dev.ps1 -Verify`) includes the Phase 0 -> Phase 1 ->
+Phase 2 protocol checks. Those protocol checks prove the real Brain's paths
+offline, against `HALO_LLM_STUB`/`HALO_EXTRACT_STUB`.
 It cannot prove a real model reply looks right, a real router escalation reads as
 intended, or that the UI's rendering of a real multi-step task/undo/memory round-trip
 holds up outside a script. Run the plain (non-`-Mock`) app with a real OpenRouter key
 set in Settings for all of the below.
 
-- [ ] Run `./dev.ps1 -Smoke` and confirm Phase 0, Phase 1, and Phase 2 all report
-      green in one run.
+All validated P0/P1 audit findings are resolved and one complete `-Verify` run
+is green. Real task controls now fail honestly with exact correlated errors
+instead of hanging; global operation failures unlock the correct control;
+memory correction is transactional; admission is bounded; and the Skills/chat
+accessibility regressions pass. The checks below still require a human and, for
+provider behavior, a real key that must never be pasted into source or logs.
+
+- [x] Run `./dev.ps1 -Verify` and confirm the complete repository gate, including
+      Phase 0, Phase 1, and Phase 2, reports green in one run.
 - [ ] Add a real OpenRouter key in Settings; send a normal chat message and watch
       a real streamed reply render token-by-token into one assistant bubble.
 - [ ] Send a reasoning-heavy prompt (a multi-step plan, a stack trace, or "think

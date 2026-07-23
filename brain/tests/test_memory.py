@@ -148,6 +148,28 @@ async def check_provenance_matrix() -> None:
     print("[check 3] provenance matrix: inferred refused, user supersedes with chain + narration: OK")
 
 
+async def check_candidate_failure_rolls_back() -> None:
+    old_id = store.add_belief("my formatter is black okay", "preference", "inferred")
+    before_ids = {row["belief_id"] for row in store.list_beliefs()}
+    sink = Sink()
+    original_index = store._index_embedding
+
+    def fail_after_supersession(*_args) -> None:
+        raise RuntimeError("injected vector bookkeeping failure")
+
+    store._index_embedding = fail_after_supersession
+    try:
+        await _extract("remember: my formatter is ruff okay", sink)
+    finally:
+        store._index_embedding = original_index
+
+    assert {row["belief_id"] for row in store.list_beliefs()} == before_ids
+    old = store.get_belief(old_id)
+    assert old["status"] == "active" and old["superseded_by"] is None, old
+    assert not sink.frames, sink.frames
+    print("[check 4] failed candidate transaction leaves no belief delta or partial supersession: OK")
+
+
 async def check_retrieval() -> None:
     # Small store: retrieve returns seeded beliefs, bumps salience, caps at 1.0.
     rows = await asyncio.to_thread(memory.retrieve, "what shell and package manager do I use")
@@ -224,6 +246,7 @@ async def main() -> None:
         await check_extraction_e2e(port, token)
         await check_dedupe()
         await check_provenance_matrix()
+        await check_candidate_failure_rolls_back()
         await check_retrieval()
         await check_decay()
         await check_memory_edit()

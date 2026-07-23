@@ -1,6 +1,26 @@
 # Decisions
 _Architectural, structural, and system design choices._
 
+## Real task controls fail honestly until Phase 3 provides a task runtime - 2026-07-22
+**What:** the real Phase-2 Brain responds to `task_op` and `lane_pin` with a correlated `operation_unsupported` error. The UI unlocks the exact pending control and shows the failure; it does not fabricate a local task transition.
+**Why:** Phase 2 has durable task state but not the Phase-3 orchestration runtime needed to pause, resume, stop, reprioritize, or stream cooperative progress truthfully. Pretending success would make frontend state diverge from backend execution.
+**Trade-off:** controls visible in the implemented shell can report unsupported in real mode until Phase 3. `dir_organize` remains bounded and off-loop, but live stepped progress/cooperative cancellation is deferred with the same boundary.
+
+## Bound real-turn concurrency and reclaim conversation locks - 2026-07-22
+**What:** the Brain admits at most four concurrent real turns globally and obtains per-conversation serialization through reference-counted lock leases that are removed when no holder or waiter remains.
+**Why:** unlimited model/tool turns can exhaust local/provider resources, while a permanent lock map grows with every conversation ID. The lease design preserves strict arrival ordering within one conversation without retaining idle IDs forever.
+**Trade-off:** a fifth independent conversation waits for capacity. Four is an explicit conservative local-desktop default, not an adaptive throughput target; change it only with measured provider/local evidence.
+
+## Operation errors use paired correlation fields in the shared contract - 2026-07-22
+**What:** `error` frames may carry `operation_kind` and `operation_id`, but the pair is all-or-nothing and both mirrors reject malformed or extra fields.
+**Why:** a generic conversation-level error cannot identify which Pause/Delete/Pin/etc. control should unlock, especially with multiple pending actions. Pairing avoids ambiguous partial correlation and lets reducers terminate only the matching operation.
+**Trade-off:** the hand-mirrored schema and validators gained another invariant. `shared/check_contract_sync.py` compares complete schemas, and all contract self-checks must run after changes.
+
+## Security-sensitive degraded logs expose exception class only - 2026-07-22
+**What:** expected embedding fallback and secret/backend failure logs identify the exception class but omit exception text and local cache/credential details.
+**Why:** exception strings from libraries can contain machine paths, backend metadata, or provider detail that is useful for local diagnosis but inappropriate in routine logs.
+**Trade-off:** routine logs contain less diagnosis. Unexpected failures should be investigated through controlled local debugging, not by broadening default production log content.
+
 ## Multi-conversation chat: registry is UI-only state, persisted by ONE window — 2026-07-21
 **What:** the chat panel became a browser-style tab strip. Each tab is one `conversation_id` = one LangGraph `thread_id`, so two tabs share no context (the user's actual complaint: unrelated questions polluting each other's context). Backend needed no change — the whole blocker was `useHaloConnection`'s hardcoded `conversationIdRef`. The registry (`{all, open, activeId}`) lives in `state/conversations.ts` as pure functions with `conversations.selfcheck.ts`, held and persisted by `store.ts`, mirroring the existing `reducer.ts`/`store.ts` split.
 **Why UI-only:** no frame tells us what the tab strip should look like — it's the same reasoning that keeps `activeView` out of the pure reducer. `reducer.ts` was already keyed per conversation and needed no edit at all.

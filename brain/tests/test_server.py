@@ -27,7 +27,7 @@ os.environ["HALO_KEYRING_DIR"] = str(Path(_TMP) / "keys")  # secrets_store test 
 
 import websockets
 
-from brain import server
+from brain import graph, secrets_store, server
 from brain.server import (
     BrainAlreadyRunning,
     _frame_visible_to,
@@ -258,7 +258,45 @@ async def check_snapshot_not_interleaved() -> None:
         assert len(ws.sent) == 2, ws.sent
     finally:
         server._deferred.pop(ws, None)
+        server._deferred_bytes.pop(ws, None)
     print("[check 11] broadcast during a snapshot is held, then flushed in order: OK")
+
+
+async def check_sends_and_deferred_queue_are_bounded() -> None:
+    class StalledWS:
+        async def send(self, raw: str) -> None:
+            await asyncio.Event().wait()
+
+        async def close(self, *args, **kwargs) -> None:
+            return None
+
+    stalled = StalledWS()
+    old_timeout = server._SEND_TIMEOUT_S
+    old_frames = server._DEFERRED_MAX_FRAMES
+    old_bytes = server._DEFERRED_MAX_BYTES
+    server._SEND_TIMEOUT_S = 0.02
+    server._DEFERRED_MAX_FRAMES = 1
+    server._DEFERRED_MAX_BYTES = 1024
+    try:
+        try:
+            await server._send(stalled, "settings_state", {"key": "openrouter_key", "status": "set"})
+            raise AssertionError("a stalled direct/snapshot send was allowed to hang")
+        except asyncio.TimeoutError:
+            pass
+
+        authenticated = {stalled: "ui"}
+        server._deferred[stalled] = []
+        await server._broadcast(authenticated, "spend_update", {"session_usd": 1.0, "month_usd": 1.0})
+        assert stalled in authenticated and len(server._deferred[stalled]) == 1
+        await server._broadcast(authenticated, "spend_update", {"session_usd": 2.0, "month_usd": 2.0})
+        assert stalled not in authenticated, "overflowing snapshot client remained routable"
+        assert stalled not in server._deferred, "overflowing deferred queue remained allocated"
+    finally:
+        server._SEND_TIMEOUT_S = old_timeout
+        server._DEFERRED_MAX_FRAMES = old_frames
+        server._DEFERRED_MAX_BYTES = old_bytes
+        server._deferred.pop(stalled, None)
+    print("[check 12] direct sends time out and deferred snapshot queues are bounded: OK")
 
 
 async def check_settings_update_round_trip(port: int, token: str) -> None:
@@ -283,6 +321,194 @@ async def check_settings_update_round_trip(port: int, token: str) -> None:
     finally:
         await ws.close()
     print("[check 10] settings_update -> settings_state reply (set, then missing on clear): OK")
+
+
+async def check_settings_failures_and_status_persistence(port: int, token: str) -> None:
+    frames: list[tuple[str, dict]] = []
+
+    async def capture(msg_type: str, payload: dict) -> None:
+        frames.append((msg_type, payload))
+
+    real_set = secrets_store.set_key
+    real_delete = secrets_store.delete_key
+    real_validate = graph.llm.validate_key
+    real_status = secrets_store.key_status
+    try:
+        def fail_set(value: str) -> None:
+            raise RuntimeError("sentinel-set-failure")
+
+        secrets_store.set_key = fail_set
+        await server._handle_settings_update({"key": "openrouter_key", "value": "must-not-leak"}, capture)
+        assert [kind for kind, _ in frames] == ["settings_state", "error"], frames
+        assert frames[0][1]["status"] == "invalid" and frames[1][1]["recoverable"] is True
+        assert "must-not-leak" not in json.dumps(frames)
+
+        frames.clear()
+
+        def fail_delete() -> None:
+            raise RuntimeError("sentinel-delete-failure")
+
+        secrets_store.delete_key = fail_delete
+        await server._handle_settings_update({"key": "openrouter_key", "value": ""}, capture)
+        assert [kind for kind, _ in frames] == ["settings_state", "error"], frames
+        assert frames[0][1]["status"] == "invalid"
+
+        secrets_store.set_key = real_set
+        secrets_store.delete_key = real_delete
+
+        async def reject_key(value: str) -> bool:
+            return False
+
+        graph.llm.validate_key = reject_key
+        frames.clear()
+        await server._handle_settings_update({"key": "openrouter_key", "value": "rejected"}, capture)
+        assert frames == [("settings_state", {"key": "openrouter_key", "status": "invalid"})], frames
+        assert secrets_store.key_status() == "invalid"
+
+        async def validation_offline(value: str) -> bool:
+            raise OSError("offline")
+
+        graph.llm.validate_key = validation_offline
+        frames.clear()
+        await server._handle_settings_update({"key": "openrouter_key", "value": "unverified"}, capture)
+        assert frames == [("settings_state", {"key": "openrouter_key", "status": "unverified"})], frames
+        assert secrets_store.key_status() == "unverified"
+
+        def fail_status() -> str:
+            raise RuntimeError("sentinel-status-failure")
+
+        secrets_store.key_status = fail_status
+        ws = await _connect(port)
+        try:
+            await _authenticate(ws, token)
+            status = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+            error = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+            assert status["type"] == "settings_state" and status["status"] == "invalid", status
+            assert error["type"] == "error" and error["recoverable"] is True, error
+            await _drain_snapshot(ws)
+        finally:
+            await ws.close()
+    finally:
+        secrets_store.set_key = real_set
+        secrets_store.delete_key = real_delete
+        graph.llm.validate_key = real_validate
+        secrets_store.key_status = real_status
+        secrets_store.delete_key()
+    print("[check 13] keyring failures report invalid+error; invalid/unverified survive snapshots: OK")
+
+
+async def check_tasks_are_supervised_and_cancelled_on_close() -> None:
+    real_handler = server._handle_settings_update
+    raised = asyncio.Event()
+
+    async def explode(msg: dict, send_fn) -> None:
+        raised.set()
+        raise RuntimeError("sentinel-handler-failure")
+
+    server._handle_settings_update = explode
+    managed, token = await start()
+    port = managed.sockets[0].getsockname()[1]
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        await _drain_snapshot(ws)
+        await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="secret")))
+        await asyncio.wait_for(raised.wait(), timeout=1)
+        reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+        assert reply["type"] == "error" and reply["code"] == "request_failed", reply
+    finally:
+        await ws.close()
+        managed.close()
+        await managed.wait_closed()
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def block(msg: dict, send_fn) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    server._handle_settings_update = block
+    managed, token = await start()
+    port = managed.sockets[0].getsockname()[1]
+    ws = await _connect(port)
+    try:
+        await _authenticate(ws, token)
+        await _drain_snapshot(ws)
+        await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="secret")))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        managed.close()
+        await managed.wait_closed()
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        assert server._decay_task is not None and server._decay_task.done()
+    finally:
+        server._handle_settings_update = real_handler
+        await ws.close()
+    print("[check 14] detached handlers are observed; close cancels handlers and decay work: OK")
+
+
+async def check_real_task_controls_fail_honestly() -> None:
+    frames = []
+    async def send(kind, payload):
+        frames.append((kind, payload))
+    await server._send_unsupported_operation(_frame("task_op", task_id="task-1", op="pause"), send)
+    await server._send_unsupported_operation(_frame("lane_pin", task_id="task-2", lane=3), send)
+    assert frames[0][1]["operation_kind"] == "task_op" and frames[0][1]["operation_id"] == "task-1", frames
+    assert frames[1][1]["operation_kind"] == "lane_pin" and frames[1][1]["operation_id"] == "task-2", frames
+    assert all(payload["code"] == "operation_unsupported" for _, payload in frames), frames
+    print("[check 15] real task controls return exact correlated unsupported errors: OK")
+
+
+async def check_turn_admission_and_lock_reclamation() -> None:
+    """Distinct real conversations are capped and completed lock entries vanish."""
+    real_run_turn = graph.run_turn
+    locks = server._ConversationLocks()
+    slots = asyncio.Semaphore(2)
+    active = 0
+    peak = 0
+    order: list[str] = []
+
+    async def fake_run_turn(msg, _broadcast):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        order.append(msg["text"])
+        await asyncio.sleep(0.02)
+        active -= 1
+
+    async def sink(*_args):
+        return None
+
+    graph.run_turn = fake_run_turn
+    try:
+        distinct = [
+            asyncio.create_task(server._serialize_user_msg(
+                _frame("user_msg", text=str(i), conversation_id=f"c-{i}", source="ui"),
+                locks, slots, sink, sink, False,
+            ))
+            for i in range(12)
+        ]
+        await asyncio.gather(*distinct)
+        assert peak == 2, peak
+        assert len(locks) == 0, "idle conversation locks were retained"
+
+        order.clear()
+        same = [
+            asyncio.create_task(server._serialize_user_msg(
+                _frame("user_msg", text=str(i), conversation_id="same", source="ui"),
+                locks, slots, sink, sink, False,
+            ))
+            for i in range(5)
+        ]
+        await asyncio.gather(*same)
+        assert order == ["0", "1", "2", "3", "4"], order
+        assert len(locks) == 0
+    finally:
+        graph.run_turn = real_run_turn
+    print("[check 16] real turns cap at 2 in the test; same-conversation order holds; idle locks reclaim: OK")
 
 
 def check_frame_visible_to_routing() -> None:
@@ -313,7 +539,9 @@ async def main() -> None:
         await check_malformed_frame_rejected(port, token)
         await check_conversation_order(port, token)
         await check_settings_update_round_trip(port, token)
+        await check_settings_failures_and_status_persistence(port, token)
         await check_snapshot_not_interleaved()
+        await check_sends_and_deferred_queue_are_bounded()
     finally:
         server.close()
         await server.wait_closed()
@@ -321,6 +549,9 @@ async def main() -> None:
     check_session_file_is_atomic_and_private()
     check_second_brain_lock_is_rejected()
     check_frame_visible_to_routing()
+    await check_tasks_are_supervised_and_cancelled_on_close()
+    await check_real_task_controls_fail_honestly()
+    await check_turn_admission_and_lock_reclamation()
     print("[brain.server] self-check OK")
 
 

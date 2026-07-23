@@ -1,32 +1,138 @@
 {
-  "$comment": "Single source of truth for the Halo IPC message set (systemdesign/11-ipc-contract.md). ui/src/ipc/contract.ts and brain/brain/ipc/contract.py are hand-mirrored from this file. Run `python shared/check_contract_sync.py` after editing either side or this file — it fails the build if the message names / required fields diverge.",
-  "envelope_fields": ["type", "id", "ts"],
+  "$comment": "Single source of truth for Halo IPC runtime validation. ui/src/ipc/contract.ts and brain/brain/ipc/contract.py are hand-mirrored from this file. Run `python shared/check_contract_sync.py` after editing any copy; it compares directions, required and optional fields, runtime types, and enums.",
+  "envelope": {
+    "required": ["type", "id", "ts"],
+    "fields": {
+      "type": { "type": "string" },
+      "id": { "type": "string" },
+      "ts": { "type": "string" }
+    }
+  },
   "messages": {
-    "hello": { "direction": "inbound", "required": ["token"] },
-    "user_msg": { "direction": "inbound", "required": ["text", "conversation_id", "source"] },
-    "interrupt": { "direction": "inbound", "required": ["conversation_id"] },
-    "approval_response": { "direction": "inbound", "required": ["reply_to", "decision"] },
-    "memory_edit": { "direction": "inbound", "required": ["belief_id", "op"] },
-    "skill_op": { "direction": "inbound", "required": ["skill_name", "op"] },
-    "lane_pin": { "direction": "inbound", "required": ["task_id", "lane"] },
-    "task_op": { "direction": "inbound", "required": ["op"] },
-    "mic": { "direction": "inbound", "required": ["op"] },
-    "settings_update": { "direction": "inbound", "required": ["key", "value"] },
-    "undo": { "direction": "inbound", "required": ["undo_token"] },
+    "hello": {
+      "direction": "inbound", "required": ["token"],
+      "fields": { "token": { "type": "string" }, "role": { "type": "string", "enum": ["ui", "voice"] } }
+    },
+    "user_msg": {
+      "direction": "inbound", "required": ["text", "conversation_id", "source"],
+      "fields": { "text": { "type": "string" }, "conversation_id": { "type": "string" }, "source": { "type": "string", "enum": ["ui", "voice"] } }
+    },
+    "interrupt": {
+      "direction": "inbound", "required": ["conversation_id"],
+      "fields": { "conversation_id": { "type": "string" } }
+    },
+    "approval_response": {
+      "direction": "inbound", "required": ["reply_to", "decision"],
+      "fields": { "reply_to": { "type": "string" }, "decision": { "type": "string", "enum": ["approve", "deny", "edit"] }, "edited_args": { "type": "object" } }
+    },
+    "memory_edit": {
+      "direction": "inbound", "required": ["belief_id", "op"],
+      "fields": { "belief_id": { "type": "string" }, "op": { "type": "string", "enum": ["edit", "delete", "restore"] }, "text": { "type": "string" } }
+    },
+    "skill_op": {
+      "direction": "inbound", "required": ["skill_name", "op"],
+      "fields": { "skill_name": { "type": "string" }, "op": { "type": "string", "enum": ["trial", "disable", "restore", "delete"] } }
+    },
+    "lane_pin": {
+      "direction": "inbound", "required": ["task_id", "lane"],
+      "fields": { "task_id": { "type": "string" }, "lane": { "type": "integer", "enum": [1, 2, 3] } }
+    },
+    "task_op": {
+      "direction": "inbound", "required": ["op"],
+      "fields": { "task_id": { "type": "string" }, "op": { "type": "string", "enum": ["pause", "resume", "stop"] } }
+    },
+    "mic": {
+      "direction": "inbound", "required": ["op"],
+      "fields": { "op": { "type": "string", "enum": ["mute", "unmute"] } }
+    },
+    "settings_update": {
+      "direction": "inbound", "required": ["key", "value"],
+      "fields": { "key": { "type": "string" }, "value": { "type": "json" } }
+    },
+    "undo": {
+      "direction": "inbound", "required": ["undo_token"],
+      "fields": { "undo_token": { "type": "string" } }
+    },
 
-    "hello_ack": { "direction": "outbound", "required": [] },
-    "token": { "direction": "outbound", "required": ["text", "conversation_id"] },
-    "activity": { "direction": "outbound", "required": ["text", "narrate", "task_id", "undoable"] },
-    "approval_request": { "direction": "outbound", "required": ["approval_id", "tool", "args_redacted", "tier", "task_id"] },
-    "done": { "direction": "outbound", "required": ["conversation_id"] },
-    "error": { "direction": "outbound", "required": ["code", "message", "recoverable"] },
-    "task_state": { "direction": "outbound", "required": ["task_id", "state", "lane"] },
-    "stream_frame": { "direction": "outbound", "required": ["task_id", "jpeg_b64", "seq"] },
-    "voice_state": { "direction": "outbound", "required": ["state"] },
-    "transcript": { "direction": "outbound", "required": ["text", "final", "conversation_id"] },
-    "spend_update": { "direction": "outbound", "required": ["session_usd", "month_usd"] },
-    "settings_state": { "direction": "outbound", "required": ["key", "status"] },
-    "belief_state": { "direction": "outbound", "required": ["belief_id", "text", "kind", "provenance", "salience", "status"] },
-    "skill_state": { "direction": "outbound", "required": ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"] }
+    "hello_ack": { "direction": "outbound", "required": [], "fields": {} },
+    "token": {
+      "direction": "outbound", "required": ["text", "conversation_id"],
+      "fields": { "text": { "type": "string" }, "conversation_id": { "type": "string" } }
+    },
+    "activity": {
+      "direction": "outbound", "required": ["text", "narrate", "task_id", "undoable"],
+      "fields": {
+        "text": { "type": "string" }, "narrate": { "type": "boolean" }, "task_id": { "type": "string" }, "undoable": { "type": "boolean" },
+        "undo_token": { "type": "string" }, "tier": { "type": "integer", "enum": [1, 2, 3] }, "lane": { "type": "integer", "enum": [1, 2, 3] }
+      }
+    },
+    "approval_request": {
+      "direction": "outbound", "required": ["approval_id", "tool", "args_redacted", "tier", "task_id"],
+      "fields": {
+        "approval_id": { "type": "string" }, "tool": { "type": "string" }, "args_redacted": { "type": "object" },
+        "tier": { "type": "integer", "enum": [1, 2, 3] }, "task_id": { "type": "string" }, "summary": { "type": "string" },
+        "destructive": { "type": "boolean" }, "conversation_id": { "type": "string" }
+      }
+    },
+    "done": {
+      "direction": "outbound", "required": ["conversation_id"],
+      "fields": { "conversation_id": { "type": "string" }, "task_id": { "type": "string" } }
+    },
+    "error": {
+      "direction": "outbound", "required": ["code", "message", "recoverable"],
+      "fields": {
+        "code": { "type": "string" }, "message": { "type": "string" }, "recoverable": { "type": "boolean" },
+        "conversation_id": { "type": "string" },
+        "operation_kind": { "type": "string", "enum": ["undo", "memory_edit", "approval_response", "task_op", "lane_pin"] },
+        "operation_id": { "type": "string" }
+      }
+    },
+    "task_state": {
+      "direction": "outbound", "required": ["task_id", "state", "lane"],
+      "fields": {
+        "task_id": { "type": "string" }, "state": { "type": "string", "enum": ["running", "paused", "waiting_approval", "done", "failed"] },
+        "lane": { "type": "integer", "enum": [1, 2, 3] }, "title": { "type": "string" }, "step": { "type": "integer" },
+        "steps_total": { "type": "integer" }, "step_label": { "type": "string" }, "reason": { "type": "string" }
+      }
+    },
+    "stream_frame": {
+      "direction": "outbound", "required": ["task_id", "jpeg_b64", "seq"],
+      "fields": { "task_id": { "type": "string" }, "jpeg_b64": { "type": "string" }, "seq": { "type": "integer" } }
+    },
+    "voice_state": {
+      "direction": "outbound", "required": ["state"],
+      "fields": { "state": { "type": "string", "enum": ["idle", "wake", "listening", "thinking", "speaking", "muted"] } }
+    },
+    "transcript": {
+      "direction": "outbound", "required": ["text", "final", "conversation_id"],
+      "fields": { "text": { "type": "string" }, "final": { "type": "boolean" }, "conversation_id": { "type": "string" } }
+    },
+    "spend_update": {
+      "direction": "outbound", "required": ["session_usd", "month_usd"],
+      "fields": { "session_usd": { "type": "number" }, "month_usd": { "type": "number" } }
+    },
+    "settings_state": {
+      "direction": "outbound", "required": ["key", "status"],
+      "fields": { "key": { "type": "string" }, "status": { "type": "string", "enum": ["set", "missing", "invalid", "unverified"] } }
+    },
+    "belief_state": {
+      "direction": "outbound", "required": ["belief_id", "text", "kind", "provenance", "salience", "status"],
+      "fields": {
+        "belief_id": { "type": "string" }, "text": { "type": "string" },
+        "kind": { "type": "string", "enum": ["preference", "project", "workflow", "decision", "lesson"] },
+        "provenance": { "type": "string", "enum": ["user", "inferred"] }, "salience": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "archived", "superseded"] },
+        "superseded_by": { "type": "string" }, "used_at": { "type": "string" }
+      }
+    },
+    "skill_state": {
+      "direction": "outbound", "required": ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"],
+      "fields": {
+        "skill_name": { "type": "string" }, "origin": { "type": "string", "enum": ["auto", "user"] },
+        "kind": { "type": "string", "enum": ["skill", "playbook"] }, "uses": { "type": "integer" },
+        "success_rate": { "type": "number" }, "status": { "type": "string", "enum": ["active", "paused", "retired"] },
+        "born_at": { "type": "string" }, "reason": { "type": "string" }
+      }
+    }
   }
 }

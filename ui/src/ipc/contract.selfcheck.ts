@@ -1,7 +1,36 @@
 // Round-trips a user_msg and confirms bad frames are rejected.
 // Run via `node ui/src/ipc/contract.selfcheck.ts` (Node runs .ts natively;
 // no test framework needed for this one-shot check).
-import { parseIpcMessage, type UserMsg } from "./contract.ts";
+import {
+  CONTRACT_SPEC,
+  parseIpcMessage,
+  type RuntimeFieldSpec,
+  type UserMsg,
+} from "./contract.ts";
+
+function sampleValue(spec: RuntimeFieldSpec): unknown {
+  if (spec.enum !== undefined) return spec.enum[0];
+  return {
+    string: "x",
+    boolean: true,
+    integer: 1,
+    number: 1.5,
+    object: { key: "value" },
+    json: ["x", 1, true, null],
+  }[spec.type];
+}
+
+function invalidValue(spec: RuntimeFieldSpec): unknown {
+  if (spec.enum !== undefined) return spec.type === "string" ? "__invalid_enum__" : 999;
+  return {
+    string: [],
+    boolean: "false",
+    integer: 1.5,
+    number: "1.5",
+    object: [],
+    json: undefined,
+  }[spec.type];
+}
 
 const sample: UserMsg = {
   type: "user_msg",
@@ -17,9 +46,13 @@ if (JSON.stringify(parsed) !== JSON.stringify(sample)) {
   throw new Error("round-trip changed the message");
 }
 
-function expectRejected(raw: unknown, why: string) {
+function expectRejected(
+  raw: unknown,
+  why: string,
+  direction?: "inbound" | "outbound",
+) {
   try {
-    parseIpcMessage(raw);
+    parseIpcMessage(raw, direction);
   } catch {
     return;
   }
@@ -87,6 +120,22 @@ expectRejected(
   { type: "mic", id: "x", ts: "x", op: "explode" },
   "invalid mic operation",
 );
+expectRejected(
+  { type: "activity", id: "x", ts: "x", text: "did it", narrate: "false", task_id: "task", undoable: true },
+  "activity narrate must be boolean",
+);
+expectRejected(
+  { type: "activity", id: "x", ts: "x", text: "did it", narrate: false, task_id: [], undoable: true },
+  "activity task_id must be string",
+);
+expectRejected(
+  { type: "activity", id: "x", ts: "x", text: "did it", narrate: false, task_id: "task", undoable: "yes" },
+  "activity undoable must be boolean",
+);
+expectRejected(
+  { type: "error", id: "x", ts: "x", code: "x", message: "x", recoverable: true, operation_kind: "undo" },
+  "operation correlation fields must be paired",
+);
 
 function expectAccepted(raw: unknown, why: string) {
   try {
@@ -117,5 +166,27 @@ expectAccepted(
   { type: "task_op", id: "x", ts: "x", op: "stop", task_id: undefined },
   "task_op with an explicit-but-undefined task_id key",
 );
+
+parseIpcMessage(sample, "inbound");
+expectRejected(sample, "user_msg rejected as outbound", "outbound");
+
+// Exhaust every required and optional payload field from the mirrored runtime
+// metadata with one valid generated value and one invalid type/enum value.
+for (const [type, spec] of Object.entries(CONTRACT_SPEC.messages)) {
+  const frame: Record<string, unknown> = { type, id: "x", ts: "x" };
+  for (const [field, fieldSpec] of Object.entries(spec.fields)) {
+    frame[field] = sampleValue(fieldSpec);
+  }
+  expectAccepted(frame, `generated complete ${type}`);
+  for (const [field, fieldSpec] of Object.entries(spec.fields)) {
+    expectRejected({ ...frame, [field]: invalidValue(fieldSpec) }, `${type}.${field} invalid value`);
+  }
+  parseIpcMessage(frame, spec.direction);
+  expectRejected(
+    frame,
+    `${type} rejected for opposite direction`,
+    spec.direction === "inbound" ? "outbound" : "inbound",
+  );
+}
 
 console.log("[contract.selfcheck.ts] self-check OK");

@@ -4,11 +4,23 @@
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+#[cfg(windows)]
+use windows::core::PCWSTR;
+#[cfg(windows)]
+use windows::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
 
 /// Shared handle to a sidecar's `Child` so the shutdown path (main thread) and
 /// the supervision loop (background thread) can both see/kill the same process.
@@ -18,11 +30,111 @@ type Shared = Arc<Mutex<Option<Child>>>;
 struct SidecarState {
     process: &'static str,
     state: &'static str,
+    revision: u64,
 }
 
-fn emit_state(app: &AppHandle, process: &'static str, state: &'static str) {
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct SidecarSnapshot {
+    pub revision: u64,
+    pub brain: &'static str,
+    pub voice: &'static str,
+}
+
+struct SidecarStatuses {
+    current: Mutex<SidecarSnapshot>,
+}
+
+impl SidecarStatuses {
+    fn new() -> Self {
+        Self {
+            current: Mutex::new(SidecarSnapshot {
+                revision: 0,
+                brain: "unknown",
+                voice: "unknown",
+            }),
+        }
+    }
+
+    fn record(&self, process: &'static str, state: &'static str) -> SidecarState {
+        let mut current = self.current.lock().unwrap();
+        current.revision += 1;
+        match process {
+            "brain" => current.brain = state,
+            "voice" => current.voice = state,
+            _ => unreachable!("only known sidecars may publish state"),
+        }
+        SidecarState {
+            process,
+            state,
+            revision: current.revision,
+        }
+    }
+
+    fn snapshot(&self) -> SidecarSnapshot {
+        *self.current.lock().unwrap()
+    }
+}
+
+#[cfg(windows)]
+struct ProcessJob {
+    handle: OwnedHandle,
+}
+
+#[cfg(windows)]
+impl ProcessJob {
+    fn new() -> Result<Self, String> {
+        let raw = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
+            .map_err(|error| format!("failed to create sidecar job object: {error}"))?;
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw.0) };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                HANDLE(handle.as_raw_handle()),
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const std::ffi::c_void,
+                std::mem::size_of_val(&limits) as u32,
+            )
+        }
+        .map_err(|error| format!("failed to configure sidecar job object: {error}"))?;
+        Ok(Self { handle })
+    }
+
+    fn assign(&self, child: &Child) -> Result<(), String> {
+        unsafe {
+            AssignProcessToJobObject(
+                HANDLE(self.handle.as_raw_handle()),
+                HANDLE(child.as_raw_handle()),
+            )
+        }
+        .map_err(|error| format!("failed to assign sidecar to job object: {error}"))
+    }
+}
+
+#[cfg(not(windows))]
+struct ProcessJob;
+
+#[cfg(not(windows))]
+impl ProcessJob {
+    fn new() -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    fn assign(&self, _child: &Child) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn emit_state(
+    app: &AppHandle,
+    statuses: &SidecarStatuses,
+    process: &'static str,
+    state: &'static str,
+) {
+    let event = statuses.record(process, state);
     // ponytail: emit() failures (no listeners yet) are not actionable here, drop them.
-    let _ = app.emit("sidecar-state", SidecarState { process, state });
+    // The managed snapshot retains the same revision for late/reloaded listeners.
+    let _ = app.emit("sidecar-state", event);
 }
 
 /// 1s / 5s / 30s ladder; `None` means exhausted -> caller surfaces `error`.
@@ -75,16 +187,21 @@ fn voice_cmd() -> Command {
 /// One rung of the ladder: sleeps and returns true to retry, or emits the
 /// persistent "error" state and returns false once the ladder is exhausted.
 /// (Control flow only — `backoff_delay` stays a separate pure fn for its test.)
-fn backoff_or_error(app: &AppHandle, name: &'static str, attempt: &mut u32) -> bool {
+fn backoff_or_error(
+    app: &AppHandle,
+    statuses: &SidecarStatuses,
+    name: &'static str,
+    attempt: &mut u32,
+) -> bool {
     match backoff_delay(*attempt) {
         Some(d) => {
             *attempt += 1;
-            emit_state(app, name, "restarting");
+            emit_state(app, statuses, name, "restarting");
             thread::sleep(d);
             true
         }
         None => {
-            emit_state(app, name, "error");
+            emit_state(app, statuses, name, "error");
             false
         }
     }
@@ -111,6 +228,8 @@ fn supervise(
     mk_cmd: fn() -> Command,
     shared: Shared,
     shutdown: Arc<AtomicBool>,
+    statuses: Arc<SidecarStatuses>,
+    process_job: Arc<ProcessJob>,
 ) {
     thread::spawn(move || {
         let mut attempt: u32 = 0;
@@ -118,21 +237,38 @@ fn supervise(
             if shutdown.load(Ordering::SeqCst) {
                 return;
             }
-            emit_state(&app, name, "starting");
-            let child = match mk_cmd().spawn() {
+            emit_state(&app, &statuses, name, "starting");
+            let mut child = match mk_cmd().spawn() {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("halo: failed to spawn {name}: {e}");
-                    if backoff_or_error(&app, name, &mut attempt) {
+                    if backoff_or_error(&app, &statuses, name, &mut attempt) {
                         continue;
                     }
                     return;
                 }
             };
+            if let Err(error) = process_job.assign(&child) {
+                eprintln!("halo: {error}");
+                match child.kill() {
+                    Ok(()) => {
+                        let _ = child.wait();
+                        if backoff_or_error(&app, &statuses, name, &mut attempt) {
+                            continue;
+                        }
+                    }
+                    Err(kill_error) => {
+                        eprintln!("halo: failed to terminate unowned {name}: {kill_error}");
+                        *shared.lock().unwrap() = Some(child);
+                        emit_state(&app, &statuses, name, "error");
+                    }
+                }
+                return;
+            }
             if !publish_child(&shared, &shutdown, child) {
                 return;
             }
-            emit_state(&app, name, "running");
+            emit_state(&app, &statuses, name, "running");
             let start = Instant::now();
             let mut wait_errors = 0;
 
@@ -189,7 +325,7 @@ fn supervise(
             if start.elapsed() > HEALTHY_UPTIME {
                 attempt = 0;
             }
-            if !backoff_or_error(&app, name, &mut attempt) {
+            if !backoff_or_error(&app, &statuses, name, &mut attempt) {
                 return;
             }
         }
@@ -203,15 +339,19 @@ pub struct Sidecars {
     shutdown: Arc<AtomicBool>,
     brain: Shared,
     voice: Shared,
+    statuses: Arc<SidecarStatuses>,
+    process_job: Arc<ProcessJob>,
 }
 
 impl Sidecars {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self, String> {
+        Ok(Self {
             shutdown: Arc::new(AtomicBool::new(false)),
             brain: Arc::new(Mutex::new(None)),
             voice: Arc::new(Mutex::new(None)),
-        }
+            statuses: Arc::new(SidecarStatuses::new()),
+            process_job: Arc::new(ProcessJob::new()?),
+        })
     }
 
     pub fn start(&self, app: AppHandle) {
@@ -221,8 +361,22 @@ impl Sidecars {
             brain_cmd,
             self.brain.clone(),
             self.shutdown.clone(),
+            self.statuses.clone(),
+            self.process_job.clone(),
         );
-        supervise(app, "voice", voice_cmd, self.voice.clone(), self.shutdown.clone());
+        supervise(
+            app,
+            "voice",
+            voice_cmd,
+            self.voice.clone(),
+            self.shutdown.clone(),
+            self.statuses.clone(),
+            self.process_job.clone(),
+        );
+    }
+
+    pub fn snapshot(&self) -> SidecarSnapshot {
+        self.statuses.snapshot()
     }
 
     /// Set the shutdown flag BEFORE killing children — otherwise the
@@ -262,5 +416,59 @@ mod tests {
 
         assert!(!publish_child(&shared, &shutdown, child));
         assert!(shared.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn sidecar_snapshot_retains_latest_states_and_revision() {
+        let statuses = SidecarStatuses::new();
+        assert_eq!(statuses.snapshot().revision, 0);
+        assert_eq!(statuses.snapshot().brain, "unknown");
+        assert_eq!(statuses.snapshot().voice, "unknown");
+
+        let first = statuses.record("brain", "starting");
+        let second = statuses.record("voice", "running");
+        let snapshot = statuses.snapshot();
+
+        assert_eq!(first.revision, 1);
+        assert_eq!(second.revision, 2);
+        assert_eq!(snapshot.revision, 2);
+        assert_eq!(snapshot.brain, "starting");
+        assert_eq!(snapshot.voice, "running");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn job_object_kills_an_assigned_child_when_dropped() {
+        if std::env::var_os("HALO_JOB_OBJECT_TEST_CHILD").is_some() {
+            thread::sleep(Duration::from_secs(30));
+            return;
+        }
+
+        let job = ProcessJob::new().expect("create kill-on-close job");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "supervisor::tests::job_object_kills_an_assigned_child_when_dropped",
+                "--nocapture",
+            ])
+            .env("HALO_JOB_OBJECT_TEST_CHILD", "1")
+            .spawn()
+            .expect("spawn test child");
+        job.assign(&child).expect("assign test child to job");
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(child.try_wait().unwrap().is_none(), "fixture child exited before the job was dropped");
+        drop(job);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("assigned child survived after the final job handle closed");
     }
 }

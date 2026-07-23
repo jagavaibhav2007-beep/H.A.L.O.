@@ -21,7 +21,13 @@ const FALLBACK_HOTKEY: &str = "ctrl+alt+space";
 /// Which hotkey ended up registered (primary or fallback) — read by the
 /// `active_hotkey` command so a later step's status strip can show it
 /// (edge case: primary already taken by another app).
-pub struct ActiveHotkey(pub Mutex<&'static str>);
+pub struct ActiveHotkey(pub Mutex<HotkeyStatus>);
+
+#[derive(Clone, Serialize)]
+pub struct HotkeyStatus {
+    shortcut: &'static str,
+    notice: Option<&'static str>,
+}
 
 #[derive(Clone, Serialize)]
 struct WorkspaceAnchor {
@@ -31,7 +37,12 @@ struct WorkspaceAnchor {
 
 #[tauri::command]
 pub fn active_hotkey(state: tauri::State<ActiveHotkey>) -> String {
-    (*state.0.lock().unwrap()).to_string()
+    state.0.lock().unwrap().shortcut.to_string()
+}
+
+#[tauri::command]
+pub fn hotkey_status(state: tauri::State<ActiveHotkey>) -> HotkeyStatus {
+    state.0.lock().unwrap().clone()
 }
 
 /// Show+focus the workspace if hidden, hide it if visible. `orb_x`/`orb_y`
@@ -55,12 +66,12 @@ pub fn show_orb_menu(app: AppHandle) -> Result<(), String> {
 fn toggle_workspace_impl(app: &AppHandle, orb_x: f64, orb_y: f64) -> Result<(), String> {
     let workspace = app.get_webview_window("main").ok_or("no main window")?;
     let visible = workspace.is_visible().map_err(|e| e.to_string())?;
-    if visible {
+    let minimized = workspace.is_minimized().map_err(|e| e.to_string())?;
+    if should_hide_workspace(visible, minimized) {
         workspace.hide().map_err(|e| e.to_string())?;
     } else {
         let _ = app.emit_to("main", "workspace-anchor", WorkspaceAnchor { x: orb_x, y: orb_y });
-        workspace.show().map_err(|e| e.to_string())?;
-        workspace.set_focus().map_err(|e| e.to_string())?; // D3: focus goes to the workspace, never the orb
+        restore_workspace(&workspace)?;
     }
     Ok(())
 }
@@ -81,8 +92,20 @@ fn open_workspace(app: &AppHandle) {
     if let Some((x, y)) = orb_position(app) {
         let _ = app.emit_to("main", "workspace-anchor", WorkspaceAnchor { x, y });
     }
-    let _ = workspace.show();
-    let _ = workspace.set_focus();
+    let _ = restore_workspace(&workspace);
+}
+
+fn should_hide_workspace(visible: bool, minimized: bool) -> bool {
+    visible && !minimized
+}
+
+fn restore_workspace(workspace: &tauri::WebviewWindow<Wry>) -> Result<(), String> {
+    if workspace.is_minimized().map_err(|e| e.to_string())? {
+        workspace.unminimize().map_err(|e| e.to_string())?;
+    }
+    workspace.show().map_err(|e| e.to_string())?;
+    workspace.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn orb_position(app: &AppHandle) -> Option<(f64, f64)> {
@@ -93,7 +116,7 @@ fn orb_position(app: &AppHandle) -> Option<(f64, f64)> {
 
 /// Registers the global hotkey, falling back to a secondary combo if the
 /// primary is already taken by another app. Returns the combo that won.
-fn register_hotkey(app: &AppHandle) -> &'static str {
+fn register_hotkey(app: &AppHandle) -> HotkeyStatus {
     fn on_press(app: &AppHandle, _shortcut: &tauri_plugin_global_shortcut::Shortcut, event: ShortcutEvent) {
         if event.state != ShortcutState::Pressed {
             return;
@@ -103,15 +126,21 @@ fn register_hotkey(app: &AppHandle) -> &'static str {
     }
 
     if app.global_shortcut().on_shortcut(PRIMARY_HOTKEY, on_press).is_ok() {
-        return PRIMARY_HOTKEY;
+        return HotkeyStatus { shortcut: PRIMARY_HOTKEY, notice: None };
     }
     // ponytail: one fallback combo, not a search over N candidates — matches
     // the plan's stated edge case exactly, nothing more speculative.
     match app.global_shortcut().on_shortcut(FALLBACK_HOTKEY, on_press) {
-        Ok(()) => FALLBACK_HOTKEY,
+        Ok(()) => HotkeyStatus {
+            shortcut: FALLBACK_HOTKEY,
+            notice: Some("Alt+Space is already in use. Halo is using Ctrl+Alt+Space instead."),
+        },
         Err(e) => {
             eprintln!("halo: failed to register both hotkeys: {e}");
-            "none"
+            HotkeyStatus {
+                shortcut: "none",
+                notice: Some("Halo could not register a summon hotkey. Open the workspace from the tray."),
+            }
         }
     }
 }
@@ -119,8 +148,6 @@ fn register_hotkey(app: &AppHandle) -> &'static str {
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     MenuBuilder::new(app)
         .text("open_workspace", "Open workspace")
-        .text("mute_mic", "Mute mic")
-        .text("pause_tasks", "Pause all tasks")
         .separator()
         .text("quit", "Quit")
         .build()
@@ -129,10 +156,6 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
     match event.id().as_ref() {
         "open_workspace" => open_workspace(app),
-        // ponytail: mic mute / pause-all wiring needs the UI's live WS
-        // connection, which ui/src/ipc owns and this step doesn't touch.
-        // Steps 11 (tasks) / 14 (voice) send the real `task_op`/`mic` frames.
-        "mute_mic" | "pause_tasks" => {}
         "quit" => app.exit(0),
         _ => {}
     }
@@ -279,7 +302,7 @@ pub fn teardown(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::clamp_axis;
+    use super::{clamp_axis, should_hide_workspace};
 
     #[test]
     fn oversized_window_clamps_to_monitor_origin_without_panicking() {
@@ -291,5 +314,12 @@ mod tests {
     fn ordinary_offscreen_window_clamps_to_nearest_edge() {
         assert_eq!(clamp_axis(2_000, 0, 1_920, 1_000), 920);
         assert_eq!(clamp_axis(-2_000, -1_920, 1_920, 1_000), -1_920);
+    }
+
+    #[test]
+    fn minimized_workspace_is_restored_instead_of_hidden() {
+        assert!(should_hide_workspace(true, false));
+        assert!(!should_hide_workspace(true, true));
+        assert!(!should_hide_workspace(false, false));
     }
 }

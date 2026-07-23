@@ -11,7 +11,7 @@ import { Archive, ChevronDown, ChevronRight, Pencil, RotateCcw, Sparkles, Trash2
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
-import { useHaloStore, selectBeliefs } from "../state/store";
+import { useHaloStore, selectBeliefs, selectOperationErrors } from "../state/store";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
 import type { BeliefStateMsg, MemoryEditMsg } from "../ipc/contract";
 import "./MemoryView.css";
@@ -33,11 +33,12 @@ interface MemoryViewProps {
 
 export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
   const beliefs = useHaloStore(selectBeliefs);
+  const operationErrors = useHaloStore(selectOperationErrors);
   const all = useMemo(() => Object.values(beliefs), [beliefs]);
 
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const { pending, begin } = usePendingConfirm(beliefs);
+  const { pending, failures, begin } = usePendingConfirm(beliefs, operationErrors);
   const [pendingDelete, setPendingDelete] = useState<{ id: string; text: string } | null>(null);
   const deleteTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -50,7 +51,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
   const matches = (b: BeliefStateMsg) => !q || b.text.toLowerCase().includes(q);
 
   const saveEdit = (id: string, text: string) => {
-    if (begin(id, "Saving…")) sendMemoryEdit(id, "edit", text);
+    if (begin(id, "Saving…", (value) => value?.status === "superseded", "memory_edit")) sendMemoryEdit(id, "edit", text);
   };
 
   const requestDelete = (b: BeliefStateMsg) => {
@@ -61,12 +62,16 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
     // silently dropped when a different belief's delete starts (each is
     // explicit intent). Side effect stays outside the setState updater.
     if (pendingDelete && pendingDelete.id !== b.belief_id) {
-      if (begin(pendingDelete.id, "Deleting…")) sendMemoryEdit(pendingDelete.id, "delete");
+      if (begin(pendingDelete.id, "Deleting…", (value) => value?.status === "archived", "memory_edit")) {
+        sendMemoryEdit(pendingDelete.id, "delete");
+      }
     }
     clearTimeout(deleteTimer.current);
     setPendingDelete({ id: b.belief_id, text: b.text });
     deleteTimer.current = setTimeout(() => {
-      if (begin(b.belief_id, "Deleting…")) sendMemoryEdit(b.belief_id, "delete");
+      if (begin(b.belief_id, "Deleting…", (value) => value?.status === "archived", "memory_edit")) {
+        sendMemoryEdit(b.belief_id, "delete");
+      }
       setPendingDelete(null);
     }, DELETE_UNDO_MS);
   };
@@ -77,7 +82,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
   };
 
   const restore = (id: string) => {
-    if (begin(id, "Restoring…")) sendMemoryEdit(id, "restore");
+    if (begin(id, "Restoring…", (value) => value?.status === "active", "memory_edit")) sendMemoryEdit(id, "restore");
   };
 
   const archived = all.filter((b) => b.status === "archived");
@@ -86,6 +91,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
 
   return (
     <div className="memory-view">
+      {Object.values(failures)[0] && <p role="alert">{Object.values(failures)[0]}</p>}
       <div className="memory-toolbar">
         <input
           aria-label="Search memory"

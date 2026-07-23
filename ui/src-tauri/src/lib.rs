@@ -2,7 +2,7 @@ mod supervisor;
 mod windows;
 
 use serde::{Deserialize, Serialize};
-use supervisor::Sidecars;
+use supervisor::{SidecarSnapshot, Sidecars};
 
 #[derive(Serialize, Deserialize)]
 struct Session {
@@ -21,11 +21,19 @@ fn read_session() -> Result<Session, String> {
     serde_json::from_str(&raw).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn sidecar_snapshot(sidecars: tauri::State<'_, std::sync::Arc<Sidecars>>) -> SidecarSnapshot {
+    sidecars.snapshot()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let sidecars = std::sync::Arc::new(Sidecars::new());
+    let sidecars = std::sync::Arc::new(
+        Sidecars::new().expect("failed to establish Windows sidecar process ownership"),
+    );
 
     let app = tauri::Builder::default()
+        .manage(sidecars.clone())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(
@@ -40,8 +48,10 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             read_session,
+            sidecar_snapshot,
             windows::toggle_workspace,
             windows::active_hotkey,
+            windows::hotkey_status,
             windows::show_orb_menu,
             windows::show_workspace
         ])

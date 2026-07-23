@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import uuid
@@ -111,6 +112,11 @@ def summarize(tool: str, args: dict) -> str:
 
 def redact(tool: str, args: dict) -> dict:
     entry = TOOLS.get(tool)
+    if entry is None:
+        # Unknown model-emitted tools fail closed at Tier 3. Their arbitrary
+        # argument shape has no trustworthy redactor, so never echo it into an
+        # approval frame, checkpoint, or action row.
+        return {}
     redactor = entry["redact"] if entry is not None else None
     if redactor is None:
         return dict(args)
@@ -235,9 +241,18 @@ async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broad
         content = f"I couldn't run {tool} — I don't have that tool."
     else:
         try:
-            out = entry["fn"](args)
-            if asyncio.iscoroutine(out):
-                out = await out
+            fn = entry["fn"]
+            if inspect.iscoroutinefunction(fn):
+                out = await fn(args)
+            else:
+                # File tools and run_readonly_cmd use blocking filesystem and
+                # subprocess APIs. Keep them off the server's event loop so
+                # one slow tool cannot stall unrelated conversations.
+                out = await asyncio.to_thread(fn, args)
+                # Be tolerant of a synchronous adapter that returns an
+                # awaitable, while true coroutine functions stay on-loop.
+                if inspect.isawaitable(out):
+                    out = await out
             result = "ok"
             builder = entry["inverse"]
             if builder is not None:
@@ -271,7 +286,7 @@ async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broad
     undo_token = await asyncio.to_thread(
         _record, tool, args_redacted, tier, result, frame_task, inverse is not None, inverse
     )
-    if tier >= 2:
+    if tier >= 2 and result == "ok":
         await broadcast(
             "activity", _activity_frame(tool, args, frame_task, undo_token is not None, tier, 1, undo_token)
         )
@@ -308,6 +323,8 @@ def _precondition_ok(pre: dict | None) -> bool:
     if not pre:
         return True
     p = Path(pre["path"])
+    if pre.get("must_be_absent"):
+        return not p.exists()
     if not p.is_file():
         return False
     want = pre.get("sha256")
@@ -324,7 +341,10 @@ async def handle_undo(msg: dict, broadcast) -> None:
     referencing the SAME task_id as the original."""
 
     async def fail(code: str, message: str) -> None:
-        await broadcast("error", {"code": code, "message": message, "recoverable": True})
+        await broadcast("error", {
+            "code": code, "message": message, "recoverable": True,
+            "operation_kind": "undo", "operation_id": msg["undo_token"],
+        })
 
     token = msg["undo_token"]
     store.connect()
@@ -358,7 +378,14 @@ async def handle_undo(msg: dict, broadcast) -> None:
     # The reversal is just an action: if its tool has an inverse builder it
     # gets its own token (undo-of-an-undo comes free), otherwise it's honestly
     # non-undoable.
-    await _execute_tail(inverse["tool"], inverse["args"], tier, row["task_id"] or "history", broadcast)
+    result = await _execute_tail(
+        inverse["tool"], inverse["args"], tier, row["task_id"] or "history", broadcast
+    )
+    if result["pending_tool_result"]["status"] != "ok":
+        # The claim prevents concurrent double execution, but a failed
+        # filesystem inverse remains retryable and must not look successful.
+        await asyncio.to_thread(store.release_undo_token, token)
+        await fail("undo_failed", f"I couldn't undo {row['tool']} safely.")
 
 
 async def push_activity_backlog(send, limit: int = 100) -> None:

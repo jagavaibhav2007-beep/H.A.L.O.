@@ -5,6 +5,7 @@
 // Spec: phase-1-plan.md Step 6.
 
 import { useEffect, useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { Mic, MicOff } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
@@ -25,6 +26,11 @@ interface StatusStripProps {
   sendTaskOp: (op: "pause" | "resume" | "stop", task_id?: string) => void;
 }
 
+interface HotkeyStatus {
+  shortcut: string;
+  notice: string | null;
+}
+
 export function StatusStrip({ sendTaskOp }: StatusStripProps) {
   const runningTask = useHaloStore(selectRunningTask);
   const voice = useHaloStore(selectVoice);
@@ -32,6 +38,14 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
   // Brain confirms via task_state (the task leaves "running" or vanishes) —
   // never optimistically.
   const [stoppingId, setStoppingId] = useState<string | null>(null);
+  const [hotkeyNotice, setHotkeyNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    void invoke<HotkeyStatus>("hotkey_status")
+      .then((status) => setHotkeyNotice(status.notice))
+      .catch(() => setHotkeyNotice("Halo could not read the summon hotkey. Open the workspace from the tray."));
+  }, []);
 
   useEffect(() => {
     if (!stoppingId) return;
@@ -52,6 +66,7 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
         <Icon icon={voice.state === "muted" ? MicOff : Mic} size={16} />
         <span>{MIC_LABEL[voice.state] ?? voice.state}</span>
       </span>
+      {hotkeyNotice && <span className="status-hotkey-note" role="status">{hotkeyNotice}</span>}
       {runningTask && (
         <div className="status-task-chip">
           <span className="status-task-title">

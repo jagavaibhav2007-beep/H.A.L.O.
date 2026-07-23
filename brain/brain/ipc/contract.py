@@ -11,6 +11,7 @@ Importable by both `brain` and `voice` (voice installs brain in dev via
 
 from __future__ import annotations
 
+import math
 from typing import Literal, NotRequired, TypedDict, Union
 
 
@@ -110,6 +111,7 @@ class ApprovalRequestMsg(IpcEnvelope):
     task_id: str
     summary: NotRequired[str]
     destructive: NotRequired[bool]
+    conversation_id: NotRequired[str]
 
 
 class DoneMsg(IpcEnvelope):
@@ -122,6 +124,8 @@ class ErrorMsg(IpcEnvelope):
     message: str
     recoverable: bool
     conversation_id: NotRequired[str]
+    operation_kind: NotRequired[Literal["undo", "memory_edit", "approval_response", "task_op", "lane_pin"]]
+    operation_id: NotRequired[str]
 
 
 class TaskStateMsg(IpcEnvelope):
@@ -211,62 +215,111 @@ IpcMessage = Union[
     SkillStateMsg,
 ]
 
-# Required payload fields per type (envelope's type/id/ts are checked separately).
-# Keep in lockstep with shared/ipc-contract.json "required" lists.
+def _field(kind: str, enum: list[object] | None = None) -> dict:
+    spec: dict = {"type": kind}
+    if enum is not None:
+        spec["enum"] = enum
+    return spec
+
+
+def _message(direction: str, required: list[str], fields: dict[str, dict]) -> dict:
+    return {"direction": direction, "required": required, "fields": fields}
+
+
+S, B, I, N, O, J = "string", "boolean", "integer", "number", "object", "json"
+IN, OUT = "inbound", "outbound"
+LANES = [1, 2, 3]
+
+# Complete hand mirror of shared/ipc-contract.json. Runtime validation and the
+# drift checker both consume this structure, so optional fields cannot hide in
+# type hints while remaining unchecked at the process boundary.
+CONTRACT_SPEC: dict = {
+    "envelope": {"required": ["type", "id", "ts"], "fields": {
+        "type": _field(S), "id": _field(S), "ts": _field(S),
+    }},
+    "messages": {
+        "hello": _message(IN, ["token"], {"token": _field(S), "role": _field(S, ["ui", "voice"])}),
+        "user_msg": _message(IN, ["text", "conversation_id", "source"], {
+            "text": _field(S), "conversation_id": _field(S), "source": _field(S, ["ui", "voice"]),
+        }),
+        "interrupt": _message(IN, ["conversation_id"], {"conversation_id": _field(S)}),
+        "approval_response": _message(IN, ["reply_to", "decision"], {
+            "reply_to": _field(S), "decision": _field(S, ["approve", "deny", "edit"]),
+            "edited_args": _field(O),
+        }),
+        "memory_edit": _message(IN, ["belief_id", "op"], {
+            "belief_id": _field(S), "op": _field(S, ["edit", "delete", "restore"]), "text": _field(S),
+        }),
+        "skill_op": _message(IN, ["skill_name", "op"], {
+            "skill_name": _field(S), "op": _field(S, ["trial", "disable", "restore", "delete"]),
+        }),
+        "lane_pin": _message(IN, ["task_id", "lane"], {"task_id": _field(S), "lane": _field(I, LANES)}),
+        "task_op": _message(IN, ["op"], {
+            "task_id": _field(S), "op": _field(S, ["pause", "resume", "stop"]),
+        }),
+        "mic": _message(IN, ["op"], {"op": _field(S, ["mute", "unmute"])}),
+        "settings_update": _message(IN, ["key", "value"], {"key": _field(S), "value": _field(J)}),
+        "undo": _message(IN, ["undo_token"], {"undo_token": _field(S)}),
+        "hello_ack": _message(OUT, [], {}),
+        "token": _message(OUT, ["text", "conversation_id"], {
+            "text": _field(S), "conversation_id": _field(S),
+        }),
+        "activity": _message(OUT, ["text", "narrate", "task_id", "undoable"], {
+            "text": _field(S), "narrate": _field(B), "task_id": _field(S), "undoable": _field(B),
+            "undo_token": _field(S), "tier": _field(I, LANES), "lane": _field(I, LANES),
+        }),
+        "approval_request": _message(OUT, ["approval_id", "tool", "args_redacted", "tier", "task_id"], {
+            "approval_id": _field(S), "tool": _field(S), "args_redacted": _field(O),
+            "tier": _field(I, LANES), "task_id": _field(S), "summary": _field(S),
+            "destructive": _field(B), "conversation_id": _field(S),
+        }),
+        "done": _message(OUT, ["conversation_id"], {"conversation_id": _field(S), "task_id": _field(S)}),
+        "error": _message(OUT, ["code", "message", "recoverable"], {
+            "code": _field(S), "message": _field(S), "recoverable": _field(B), "conversation_id": _field(S),
+            "operation_kind": _field(S, ["undo", "memory_edit", "approval_response", "task_op", "lane_pin"]),
+            "operation_id": _field(S),
+        }),
+        "task_state": _message(OUT, ["task_id", "state", "lane"], {
+            "task_id": _field(S),
+            "state": _field(S, ["running", "paused", "waiting_approval", "done", "failed"]),
+            "lane": _field(I, LANES), "title": _field(S), "step": _field(I), "steps_total": _field(I),
+            "step_label": _field(S), "reason": _field(S),
+        }),
+        "stream_frame": _message(OUT, ["task_id", "jpeg_b64", "seq"], {
+            "task_id": _field(S), "jpeg_b64": _field(S), "seq": _field(I),
+        }),
+        "voice_state": _message(OUT, ["state"], {
+            "state": _field(S, ["idle", "wake", "listening", "thinking", "speaking", "muted"]),
+        }),
+        "transcript": _message(OUT, ["text", "final", "conversation_id"], {
+            "text": _field(S), "final": _field(B), "conversation_id": _field(S),
+        }),
+        "spend_update": _message(OUT, ["session_usd", "month_usd"], {
+            "session_usd": _field(N), "month_usd": _field(N),
+        }),
+        "settings_state": _message(OUT, ["key", "status"], {
+            "key": _field(S), "status": _field(S, ["set", "missing", "invalid", "unverified"]),
+        }),
+        "belief_state": _message(OUT, ["belief_id", "text", "kind", "provenance", "salience", "status"], {
+            "belief_id": _field(S), "text": _field(S),
+            "kind": _field(S, ["preference", "project", "workflow", "decision", "lesson"]),
+            "provenance": _field(S, ["user", "inferred"]), "salience": _field(N),
+            "status": _field(S, ["active", "archived", "superseded"]),
+            "superseded_by": _field(S), "used_at": _field(S),
+        }),
+        "skill_state": _message(OUT, ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"], {
+            "skill_name": _field(S), "origin": _field(S, ["auto", "user"]),
+            "kind": _field(S, ["skill", "playbook"]), "uses": _field(I), "success_rate": _field(N),
+            "status": _field(S, ["active", "paused", "retired"]), "born_at": _field(S), "reason": _field(S),
+        }),
+    },
+}
+
 REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
-    "hello": ("token",),
-    "user_msg": ("text", "conversation_id", "source"),
-    "interrupt": ("conversation_id",),
-    "approval_response": ("reply_to", "decision"),
-    "memory_edit": ("belief_id", "op"),
-    "skill_op": ("skill_name", "op"),
-    "lane_pin": ("task_id", "lane"),
-    "task_op": ("op",),
-    "mic": ("op",),
-    "settings_update": ("key", "value"),
-    "undo": ("undo_token",),
-    "hello_ack": (),
-    "token": ("text", "conversation_id"),
-    "activity": ("text", "narrate", "task_id", "undoable"),
-    "approval_request": ("approval_id", "tool", "args_redacted", "tier", "task_id"),
-    "done": ("conversation_id",),
-    "error": ("code", "message", "recoverable"),
-    "task_state": ("task_id", "state", "lane"),
-    "stream_frame": ("task_id", "jpeg_b64", "seq"),
-    "voice_state": ("state",),
-    "transcript": ("text", "final", "conversation_id"),
-    "spend_update": ("session_usd", "month_usd"),
-    "settings_state": ("key", "status"),
-    "belief_state": ("belief_id", "text", "kind", "provenance", "salience", "status"),
-    "skill_state": ("skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"),
+    name: tuple(spec["required"]) for name, spec in CONTRACT_SPEC["messages"].items()
 }
-
-_STRING_FIELDS = {
-    "hello": ("token",),
-    "user_msg": ("text", "conversation_id", "source"),
-    "interrupt": ("conversation_id",),
-    "approval_response": ("reply_to", "decision"),
-    "memory_edit": ("belief_id", "op"),
-    "skill_op": ("skill_name", "op"),
-    "lane_pin": ("task_id",),
-    "task_op": ("op",),
-    "mic": ("op",),
-    "settings_update": ("key",),
-    "undo": ("undo_token",),
-    "token": ("text", "conversation_id"),
-    "done": ("conversation_id",),
-    "error": ("code", "message"),
-    "settings_state": ("key",),
-}
-
-_ENUM_FIELDS = {
-    "user_msg": {"source": {"ui", "voice"}},
-    "approval_response": {"decision": {"approve", "deny", "edit"}},
-    "memory_edit": {"op": {"edit", "delete", "restore"}},
-    "skill_op": {"op": {"trial", "disable", "restore", "delete"}},
-    "task_op": {"op": {"pause", "resume", "stop"}},
-    "mic": {"op": {"mute", "unmute"}},
-    "settings_state": {"status": {"set", "missing", "invalid", "unverified"}},
+DIRECTIONS: dict[str, str] = {
+    name: spec["direction"] for name, spec in CONTRACT_SPEC["messages"].items()
 }
 
 
@@ -274,7 +327,44 @@ class IpcValidationError(ValueError):
     """Raised when a decoded frame doesn't match the IPC contract."""
 
 
-def parse_ipc_message(raw: object) -> IpcMessage:
+def _is_json_value(value: object) -> bool:
+    if value is None or isinstance(value, (str, bool)):
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _is_json_value(item) for key, item in value.items())
+    return False
+
+
+def _value_matches(value: object, field_spec: dict) -> bool:
+    kind = field_spec["type"]
+    matches = {
+        S: isinstance(value, str),
+        B: isinstance(value, bool),
+        I: isinstance(value, int) and not isinstance(value, bool),
+        N: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value),
+        O: isinstance(value, dict) and _is_json_value(value),
+        J: _is_json_value(value),
+    }.get(kind, False)
+    return matches and ("enum" not in field_spec or value in field_spec["enum"])
+
+
+def _sample_value(field_spec: dict) -> object:
+    if "enum" in field_spec:
+        return field_spec["enum"][0]
+    return {S: "x", B: True, I: 1, N: 1.5, O: {"key": "value"}, J: ["x", 1, True, None]}[field_spec["type"]]
+
+
+def _invalid_value(field_spec: dict) -> object:
+    if "enum" in field_spec:
+        return "__invalid_enum__" if field_spec["type"] == S else 999
+    return {S: [], B: "false", I: 1.5, N: "1.5", O: [], J: object()}[field_spec["type"]]
+
+
+def parse_ipc_message(raw: object, expected_direction: Literal["inbound", "outbound"] | None = None) -> IpcMessage:
     """Validate an arbitrary decoded-JSON frame against the contract.
 
     Raises IpcValidationError on an unknown `type` or a missing required
@@ -287,43 +377,33 @@ def parse_ipc_message(raw: object) -> IpcMessage:
     if not isinstance(msg_type, str) or msg_type not in REQUIRED_FIELDS:
         raise IpcValidationError(f"ipc: unknown message type {msg_type!r}")
 
-    if not isinstance(raw.get("id"), str) or not isinstance(raw.get("ts"), str):
-        raise IpcValidationError("ipc: envelope missing id/ts")
+    message_spec = CONTRACT_SPEC["messages"][msg_type]
+    if expected_direction is not None and message_spec["direction"] != expected_direction:
+        raise IpcValidationError(
+            f'ipc: "{msg_type}" is {message_spec["direction"]}, expected {expected_direction}'
+        )
 
-    for field in REQUIRED_FIELDS[msg_type]:
+    envelope = CONTRACT_SPEC["envelope"]
+    for field in envelope["required"]:
         if field not in raw:
-            raise IpcValidationError(
-                f'ipc: "{msg_type}" missing required field "{field}"'
-            )
+            raise IpcValidationError(f'ipc: envelope missing required field "{field}"')
+    for field in message_spec["required"]:
+        if field not in raw:
+            raise IpcValidationError(f'ipc: "{msg_type}" missing required field "{field}"')
 
-    for field in _STRING_FIELDS.get(msg_type, ()):
-        if not isinstance(raw[field], str):
-            raise IpcValidationError(
-                f'ipc: "{msg_type}" field "{field}" must be a string'
-            )
+    allowed = set(envelope["fields"]) | set(message_spec["fields"])
+    extras = set(raw) - allowed
+    if extras:
+        raise IpcValidationError(f'ipc: "{msg_type}" has unknown field "{sorted(extras)[0]}"')
 
-    for field, allowed in _ENUM_FIELDS.get(msg_type, {}).items():
-        if raw[field] not in allowed:
-            choices = ", ".join(sorted(allowed))
-            raise IpcValidationError(
-                f'ipc: "{msg_type}" field "{field}" must be one of: {choices}'
-            )
-    if msg_type == "hello" and "role" in raw and (
-        not isinstance(raw["role"], str) or raw["role"] not in {"ui", "voice"}
-    ):
-        raise IpcValidationError('ipc: "hello" field "role" must be one of: ui, voice')
-    if msg_type == "memory_edit" and "text" in raw and not isinstance(raw["text"], str):
-        raise IpcValidationError('ipc: "memory_edit" field "text" must be a string')
-    if msg_type == "lane_pin" and (
-        isinstance(raw["lane"], bool) or raw["lane"] not in (1, 2, 3)
-    ):
-        raise IpcValidationError('ipc: "lane_pin" field "lane" must be 1, 2, or 3')
-    if msg_type == "task_op" and "task_id" in raw and not isinstance(raw["task_id"], str):
-        raise IpcValidationError('ipc: "task_op" field "task_id" must be a string')
-    if msg_type == "error" and not isinstance(raw["recoverable"], bool):
-        raise IpcValidationError('ipc: "error" field "recoverable" must be a boolean')
-    if msg_type == "error" and "conversation_id" in raw and not isinstance(raw["conversation_id"], str):
-        raise IpcValidationError('ipc: "error" field "conversation_id" must be a string')
+    for field, field_spec in envelope["fields"].items():
+        if not _value_matches(raw[field], field_spec):
+            raise IpcValidationError(f'ipc: envelope field "{field}" has an invalid value')
+    for field, field_spec in message_spec["fields"].items():
+        if field in raw and not _value_matches(raw[field], field_spec):
+            raise IpcValidationError(f'ipc: "{msg_type}" field "{field}" has an invalid value')
+    if msg_type == "error" and (("operation_kind" in raw) != ("operation_id" in raw)):
+        raise IpcValidationError('ipc: "error" operation_kind and operation_id must appear together')
 
     return raw  # type: ignore[return-value]
 
@@ -366,6 +446,48 @@ def _self_check() -> None:
             pass
         else:
             raise AssertionError("expected non-scalar lane to be rejected")
+
+    # Regression: these malformed outbound values previously passed because
+    # runtime validation covered only a small inbound-oriented field subset.
+    for malformed in (
+        {"type": "activity", "id": "x", "ts": "x", "text": "did it", "narrate": "false",
+         "task_id": "task", "undoable": True},
+        {"type": "activity", "id": "x", "ts": "x", "text": "did it", "narrate": False,
+         "task_id": [], "undoable": True},
+        {"type": "activity", "id": "x", "ts": "x", "text": "did it", "narrate": False,
+         "task_id": "task", "undoable": "yes"},
+    ):
+        try:
+            parse_ipc_message(malformed)
+        except IpcValidationError:
+            pass
+        else:
+            raise AssertionError(f"expected malformed outbound frame to be rejected: {malformed}")
+
+    # Every declared required and optional field gets one valid generated
+    # frame and one wrong-type/enum mutation. This prevents future executable
+    # fields from silently joining the type hints without runtime validation.
+    for msg_type, spec in CONTRACT_SPEC["messages"].items():
+        frame = {"type": msg_type, "id": "x", "ts": "x"}
+        for field, field_spec in spec["fields"].items():
+            frame[field] = _sample_value(field_spec)
+        parse_ipc_message(frame, spec["direction"])
+        opposite = "outbound" if spec["direction"] == "inbound" else "inbound"
+        try:
+            parse_ipc_message(frame, opposite)
+        except IpcValidationError:
+            pass
+        else:
+            raise AssertionError(f"expected {msg_type} to be rejected as {opposite}")
+        for field, field_spec in spec["fields"].items():
+            bad = dict(frame)
+            bad[field] = _invalid_value(field_spec)
+            try:
+                parse_ipc_message(bad)
+            except IpcValidationError:
+                pass
+            else:
+                raise AssertionError(f'expected {msg_type}.{field} invalid value to be rejected')
 
     print("[brain.ipc.contract] self-check OK")
 

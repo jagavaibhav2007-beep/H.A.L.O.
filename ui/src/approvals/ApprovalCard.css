@@ -15,7 +15,12 @@
   align-items: center;
   gap: 12px;
   padding: 0 16px;
-  pointer-events: none;
+  max-height: calc(100% - 32px);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  pointer-events: auto;
 }
 
 .approval-card {
@@ -46,7 +51,7 @@
   padding: 0;
   border: none;
   background: none;
-  color: var(--tier-3);
+  color: var(--tier-3-text);
   font-family: var(--font-sans);
   font-size: var(--text-xs);
   text-decoration: underline;

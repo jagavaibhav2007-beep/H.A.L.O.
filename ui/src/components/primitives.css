@@ -89,7 +89,7 @@
   background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 .halo-chip-tier3 {
-  color: var(--tier-3);
+  color: var(--tier-3-text);
   border-color: color-mix(in srgb, var(--tier-3) 50%, transparent);
   background: color-mix(in srgb, var(--tier-3) 12%, transparent);
 }
@@ -99,7 +99,7 @@
   background: color-mix(in srgb, var(--destructive) 12%, transparent);
 }
 .halo-chip-success {
-  color: var(--success);
+  color: var(--success-text);
   border-color: color-mix(in srgb, var(--success) 50%, transparent);
   background: color-mix(in srgb, var(--success) 12%, transparent);
 }

@@ -20,8 +20,6 @@ interface SettingsViewProps {
 // ponytail: no `model_config` frame exists in the contract (nothing to fetch
 // IDs from yet) — a real model picker is a Phase 2 concern once there's a
 // real Brain choosing models. This stays a static, honestly-labeled list.
-const MOCK_MODELS = ["Chat: halo-mock-1", "Vision: halo-mock-vision-1"];
-
 // Copy per status - plain, no jargon (design language rule 10).
 const KEY_STATUS_COPY: Record<string, string> = {
   set: "connected",
@@ -135,11 +133,10 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
 
         <section className="settings-group">
           <h3 className="halo-group-title settings-group-title">Models</h3>
-          {MOCK_MODELS.map((m) => (
-            <div className="settings-row" key={m}>
-              <span className="settings-value">{m}</span>
-            </div>
-          ))}
+          <div className="settings-row">
+            <span className="settings-label">Routing</span>
+            <span className="settings-value">Selected automatically by the Brain</span>
+          </div>
           <div className="settings-row">
             <span className="settings-label">This month</span>
             <span className="settings-value">${spend.monthUsd.toFixed(2)}</span>
@@ -166,8 +163,8 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
             </Button>
           </div>
           <div className="settings-row">
-            <span className="settings-value" data-key-status={keyStatus ?? "missing"}>
-              {keyPending ?? (keyStatus ? KEY_STATUS_COPY[keyStatus] : KEY_STATUS_COPY.missing)}
+            <span className="settings-value" role="status" data-key-status={keyStatus ?? "unknown"}>
+              {keyPending ?? (keyStatus ? KEY_STATUS_COPY[keyStatus] : "checking stored status…")}
             </span>
             {keyStatus === "set" && (
               <Button variant="ghost" onClick={removeKey} disabled={!!keyPending}>

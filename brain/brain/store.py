@@ -4,8 +4,8 @@ One module, no ORM, raw SQL. Owns beliefs/actions/tasks/spend/settings.
 LangGraph's checkpointer gets its own file (checkpoints.db) -- not here.
 
 Callers (async code) must wrap calls in asyncio.to_thread; this module is
-plain sync sqlite3 with check_same_thread=False so a single thread-pool
-call can use the shared connection safely (writes serialize via `with conn:`).
+plain sync sqlite3 with check_same_thread=False. A module-level re-entrant
+lock serializes complete operations and transaction boundaries across workers.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ import logging
 import os
 import sqlite3
 import uuid
+from functools import wraps
+from threading import RLock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,6 +31,16 @@ _conn: sqlite3.Connection | None = None
 _embedder = None  # lazy fastembed.TextEmbedding singleton
 _vec_ok = False  # whether belief_vec is usable this session
 _embed_failed = False  # memoize a failed embedder init so we don't retry every call mid-turn
+_OP_LOCK = RLock()  # one shared sqlite3 connection: serialize complete operations/transactions
+
+
+def _serialized(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _OP_LOCK:
+            return fn(*args, **kwargs)
+
+    return wrapped
 
 
 def _default_db_path() -> Path:
@@ -36,6 +48,7 @@ def _default_db_path() -> Path:
     return base / "Halo" / "halo.db"
 
 
+@_serialized
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     """Idempotent per-path: returns the existing connection if already open."""
     global _conn, _vec_ok
@@ -50,20 +63,38 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
 
+    extension_loaded = False
     try:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
-        _vec_ok = True
-    except Exception:
-        logger.warning("sqlite-vec unavailable; belief search will fall back to recency", exc_info=True)
+        extension_loaded = True
+    except Exception as exc:
+        logger.warning(
+            "sqlite-vec unavailable (%s); belief search will fall back to recency",
+            type(exc).__name__,
+        )
         _vec_ok = False
 
     _run_migrations(conn)
+    if extension_loaded:
+        try:
+            with conn:
+                conn.execute(
+                    f"CREATE VIRTUAL TABLE IF NOT EXISTS belief_vec USING vec0(embedding float[{EMBED_DIM}])"
+                )
+            _vec_ok = True
+        except Exception as exc:
+            logger.warning(
+                "could not create belief_vec virtual table (%s); search will fall back to recency",
+                type(exc).__name__,
+            )
+            _vec_ok = False
     _conn = conn
     return conn
 
 
+@_serialized
 def close() -> None:
     global _conn
     if _conn is not None:
@@ -135,13 +166,6 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         )
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
-    try:
-        with conn:
-            conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS belief_vec USING vec0(embedding float[{EMBED_DIM}])")
-    except Exception:
-        logger.warning("could not create belief_vec virtual table; search will fall back to recency", exc_info=True)
-
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -159,11 +183,18 @@ def _embed(text: str) -> list[float] | None:
             _embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
         vec = next(iter(_embedder.embed([text])))
         return [float(x) for x in vec]
-    except Exception:
+    except Exception as exc:
         # ponytail: memoize the failure so a mid-turn offline blip doesn't retry
         # a slow download on every belief write -- next Brain start tries again.
         _embed_failed = True
-        logger.warning("embedding unavailable; belief search will fall back to recency", exc_info=True)
+        # This is an expected degraded mode (for example, first launch while
+        # offline), not a crash.  Do not dump provider/cache paths from the
+        # exception into normal logs; the exception class is enough to make
+        # the fallback diagnosable without exposing a user's local path.
+        logger.warning(
+            "embedding unavailable (%s); belief search will fall back to recency",
+            type(exc).__name__,
+        )
         return None
 
 
@@ -171,23 +202,23 @@ def _index_embedding(conn: sqlite3.Connection, belief_id: str, text: str) -> Non
     vec = _embed(text)
     if vec is None:
         return
-    with conn:
-        # delete belief_vec first -- its subquery depends on belief_map still
-        # having the old row (deleting map first orphans the old vec row).
-        conn.execute(
-            "DELETE FROM belief_vec WHERE rowid IN (SELECT rowid FROM belief_map WHERE belief_id=?)", (belief_id,)
-        )
-        conn.execute("DELETE FROM belief_map WHERE belief_id=?", (belief_id,))
-        cur = conn.execute("INSERT INTO belief_map(belief_id) VALUES (?)", (belief_id,))
-        rowid = cur.lastrowid
-        conn.execute(
-            "INSERT INTO belief_vec(rowid, embedding) VALUES (?, ?)", (rowid, sqlite_vec.serialize_float32(vec))
-        )
+    # Caller owns the transaction, so belief text + vector index commit or
+    # roll back together.
+    conn.execute(
+        "DELETE FROM belief_vec WHERE rowid IN (SELECT rowid FROM belief_map WHERE belief_id=?)", (belief_id,)
+    )
+    conn.execute("DELETE FROM belief_map WHERE belief_id=?", (belief_id,))
+    cur = conn.execute("INSERT INTO belief_map(belief_id) VALUES (?)", (belief_id,))
+    rowid = cur.lastrowid
+    conn.execute(
+        "INSERT INTO belief_vec(rowid, embedding) VALUES (?, ?)", (rowid, sqlite_vec.serialize_float32(vec))
+    )
 
 
 # ---------------------------------------------------------------- beliefs --
 
 
+@_serialized
 def add_belief(text: str, kind: str, provenance: str, salience: float = 0.6) -> str:
     conn = connect()
     belief_id = str(uuid.uuid4())
@@ -198,16 +229,70 @@ def add_belief(text: str, kind: str, provenance: str, salience: float = 0.6) -> 
             "VALUES (?,?,?,?,?,'active',?,?)",
             (belief_id, text, kind, provenance, salience, now, now),
         )
-    _index_embedding(conn, belief_id, text)
+        _index_embedding(conn, belief_id, text)
     return belief_id
 
 
+@_serialized
+def add_candidate_belief(
+    text: str,
+    kind: str,
+    provenance: str,
+    *,
+    supersede_id: str | None = None,
+    salience: float = 0.6,
+) -> tuple[str, bool]:
+    """Atomically insert an extracted belief and optionally supersede one.
+
+    The belief row, provenance decision, supersession relationship, and vector
+    bookkeeping share one transaction. An inferred candidate is retained but
+    cannot displace a user-stated belief, matching the existing rule.
+    """
+    conn = connect()
+    belief_id = str(uuid.uuid4())
+    now = _now()
+    superseded = False
+    with conn:
+        old = None
+        if supersede_id is not None:
+            old = conn.execute(
+                "SELECT provenance, status FROM belief WHERE belief_id=?", (supersede_id,)
+            ).fetchone()
+            if old is None:
+                raise ValueError("add_candidate_belief: unknown supersede_id")
+            if old["status"] != "active":
+                raise ValueError("add_candidate_belief: belief to supersede is not active")
+
+        conn.execute(
+            "INSERT INTO belief(belief_id, text, kind, provenance, salience, status, created_at, last_used_at) "
+            "VALUES (?,?,?,?,?,'active',?,?)",
+            (belief_id, text, kind, provenance, salience, now, now),
+        )
+
+        if old is not None and not (old["provenance"] == "user" and provenance == "inferred"):
+            cur = conn.execute(
+                "UPDATE belief SET status='superseded', superseded_by=? "
+                "WHERE belief_id=? AND status='active'",
+                (belief_id, supersede_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("add_candidate_belief: belief changed before supersession")
+            superseded = True
+
+        # Kept last so a vector/index failure rolls back both the candidate
+        # and any supersession update made above.
+        _index_embedding(conn, belief_id, text)
+    return belief_id, superseded
+
+
+@_serialized
 def get_belief(belief_id: str) -> dict | None:
     conn = connect()
     row = conn.execute("SELECT * FROM belief WHERE belief_id=?", (belief_id,)).fetchone()
     return dict(row) if row else None
 
 
+@_serialized
 def list_beliefs(status: str | None = None) -> list[dict]:
     conn = connect()
     if status is None:
@@ -219,6 +304,7 @@ def list_beliefs(status: str | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+@_serialized
 def update_belief(belief_id: str, text: str, provenance: str | None = None) -> None:
     conn = connect()
     with conn:
@@ -228,31 +314,36 @@ def update_belief(belief_id: str, text: str, provenance: str | None = None) -> N
             conn.execute(
                 "UPDATE belief SET text=?, provenance=? WHERE belief_id=?", (text, provenance, belief_id)
             )
-    _index_embedding(conn, belief_id, text)
+        _index_embedding(conn, belief_id, text)
 
 
+@_serialized
 def set_belief_status(belief_id: str, status: str) -> None:
     conn = connect()
     with conn:
         conn.execute("UPDATE belief SET status=? WHERE belief_id=?", (status, belief_id))
 
 
+@_serialized
 def supersede(old_id: str, new_id: str) -> None:
     """Enforces the provenance rule (cross-cutting rule 6): a user-stated
     belief can never be superseded by an inferred one."""
     conn = connect()
-    old = get_belief(old_id)
-    new = get_belief(new_id)
-    if old is None or new is None:
-        raise ValueError("supersede: unknown belief_id")
-    if old["provenance"] == "user" and new["provenance"] == "inferred":
-        raise ValueError("user-stated beliefs can only be superseded by a newer user statement")
     with conn:
-        conn.execute(
+        old = conn.execute("SELECT provenance FROM belief WHERE belief_id=?", (old_id,)).fetchone()
+        new = conn.execute("SELECT provenance FROM belief WHERE belief_id=?", (new_id,)).fetchone()
+        if old is None or new is None:
+            raise ValueError("supersede: unknown belief_id")
+        if old["provenance"] == "user" and new["provenance"] == "inferred":
+            raise ValueError("user-stated beliefs can only be superseded by a newer user statement")
+        cur = conn.execute(
             "UPDATE belief SET status='superseded', superseded_by=? WHERE belief_id=?", (new_id, old_id)
         )
+        if cur.rowcount != 1:
+            raise ValueError("supersede: old belief changed before update")
 
 
+@_serialized
 def search_beliefs(query_text: str, k: int = 15) -> list[dict]:
     """Vector similarity over active beliefs; falls back to recency if the
     embedder/vec table is unavailable (memory degrades, never breaks)."""
@@ -280,6 +371,7 @@ def search_beliefs(query_text: str, k: int = 15) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+@_serialized
 def bump_salience(belief_ids: list[str]) -> None:
     conn = connect()
     now = _now()
@@ -291,6 +383,7 @@ def bump_salience(belief_ids: list[str]) -> None:
             )
 
 
+@_serialized
 def decay(half_life_days: float = 30, archive_below: float = 0.2, now: datetime | None = None) -> list[str]:
     """salience *= 0.5 ** (days_unused / half_life); archives below threshold."""
     conn = connect()
@@ -318,6 +411,7 @@ def decay(half_life_days: float = 30, archive_below: float = 0.2, now: datetime 
 # ----------------------------------------------------------------- actions --
 
 
+@_serialized
 def record_action(
     tool: str,
     args_redacted: dict,
@@ -352,12 +446,14 @@ def record_action(
     return action_id, undo_token
 
 
+@_serialized
 def get_action_by_undo_token(token: str) -> dict | None:
     conn = connect()
     row = conn.execute("SELECT * FROM action WHERE undo_token=?", (token,)).fetchone()
     return dict(row) if row else None
 
 
+@_serialized
 def consume_undo_token(token: str) -> bool:
     """Idempotent: False if the token is missing or already consumed."""
     conn = connect()
@@ -368,6 +464,18 @@ def consume_undo_token(token: str) -> bool:
         return cur.rowcount > 0
 
 
+@_serialized
+def release_undo_token(token: str) -> bool:
+    """Release a claimed token after its filesystem inverse failed."""
+    conn = connect()
+    with conn:
+        cur = conn.execute(
+            "UPDATE action SET consumed=0 WHERE undo_token=? AND consumed=1", (token,)
+        )
+        return cur.rowcount > 0
+
+
+@_serialized
 def recent_actions(limit: int = 100) -> list[dict]:
     conn = connect()
     rows = conn.execute("SELECT * FROM action ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
@@ -377,6 +485,7 @@ def recent_actions(limit: int = 100) -> list[dict]:
 # ------------------------------------------------------------------- tasks --
 
 
+@_serialized
 def upsert_task(task_id: str, **fields) -> None:
     conn = connect()
     fields = {**fields, "task_id": task_id, "updated_at": _now()}
@@ -391,6 +500,7 @@ def upsert_task(task_id: str, **fields) -> None:
         )
 
 
+@_serialized
 def list_tasks(states: list[str] | None = None) -> list[dict]:
     conn = connect()
     if not states:
@@ -406,6 +516,7 @@ def list_tasks(states: list[str] | None = None) -> list[dict]:
 # ------------------------------------------------------------------- spend --
 
 
+@_serialized
 def add_spend(usd: float) -> None:
     conn = connect()
     day = datetime.now(timezone.utc).date().isoformat()
@@ -416,6 +527,7 @@ def add_spend(usd: float) -> None:
         )
 
 
+@_serialized
 def month_spend() -> float:
     conn = connect()
     month_prefix = datetime.now(timezone.utc).date().isoformat()[:7]
@@ -428,6 +540,7 @@ def month_spend() -> float:
 # ---------------------------------------------------------------- settings --
 
 
+@_serialized
 def get_setting(key: str, default=None):
     conn = connect()
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
@@ -436,6 +549,7 @@ def get_setting(key: str, default=None):
     return json.loads(row["value"])
 
 
+@_serialized
 def set_setting(key: str, value) -> None:
     conn = connect()
     with conn:

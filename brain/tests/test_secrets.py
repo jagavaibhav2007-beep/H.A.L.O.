@@ -119,8 +119,12 @@ def test_broken_keystore_is_not_reported_as_missing():
     try:
         with unittest.mock.patch("keyring.get_password", side_effect=RuntimeError("vault unavailable")):
             assert not keystore_available(), "a raising backend must not report itself available"
-            status = key_status()
-            assert status == "invalid", f"broken keystore reported as {status!r}, must be 'invalid'"
+            try:
+                key_status()
+            except RuntimeError as exc:
+                assert "vault unavailable" in str(exc)
+            else:
+                raise AssertionError("strict key_status hid an unavailable keystore as credential state")
             assert get_key() is None, "get_key must still degrade to None for value callers"
     finally:
         if saved is not None:
