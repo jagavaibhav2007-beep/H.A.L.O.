@@ -1,6 +1,12 @@
 # Patterns
 _Established code patterns and conventions for this project._
 
+## Compute expensive work before taking a lock, lock only the critical section — 2026-07-23
+`store.py`'s `add_belief`/`update_belief`/`search_beliefs` used to run embedding inference (including first-run model load) *inside* `_OP_LOCK`, serializing every store-touching turn behind it. Fixed by computing the embedding first (unlocked), then taking the lock only around the SQL, passing the precomputed vector in. Reuse this shape any time a locked section does one cheap deterministic op (SQL write) plus one expensive/variable-latency op (model inference, network call, file I/O): split them, lock only the cheap deterministic part.
+
+## Global semaphore lives at the single choke point, not at every call site — 2026-07-23
+`llm.py` added a module-level `asyncio.Semaphore(4)` around `_stream_once`'s HTTP call — the one function every caller (live turns AND background memory consolidation's `_llm_span_candidates`/`_llm_decide`/`_llm_summary`) already routes through. No call-site edits needed in `memory.py`. When adding a resource-wide cap (rate limit, concurrency limit), find the existing single choke point a capability already funnels through rather than adding the guard at each caller — if a real choke point doesn't exist yet, that's the gate.py pattern to copy, not a reason to scatter the check.
+
 ## Gate/tool-registry: one choke point every capability passes through — 2026-07-21 (Phase 2, D4)
 `brain/brain/gate.py` is the single place tool calls get classified and executed: a plain-dict `TOOLS` registry (`gate.register(name, fn, tier=, destructive=, redact=, summary=, inverse=)`) plus one `classify(tool, args) -> {1,2,3}` pure function (int or `callable(args)->int`, so a tool can vary tier by its actual arguments — e.g. `file_move` inside project roots is Tier 2, an overwrite/outside-roots move is Tier 3) and one `gated_execute()`/`_execute_tail()` pair every caller routes through. Unknown tool, an out-of-range tier, or a classification exception all fail closed to Tier 3 — never fail open. An edited Tier-3 call is *always* re-classified from the edited args, never assumed to keep or lower the original tier (test proof: `test_gate.py` check 6, `shared/phase2_check.py`'s edit checks). Reuse this shape for any new gated capability rather than adding a per-tool permission check somewhere else in the codebase — scattering the check is the exact anti-pattern this closes off.
 

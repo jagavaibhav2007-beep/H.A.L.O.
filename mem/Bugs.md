@@ -1,5 +1,26 @@
 # Bugs
 
+## Mic/skill_op sent to the real Brain were silently dropped, no confirmation, no error - 2026-07-23
+**Severity:** High (misleading privacy affordance). Found during the Phase 3 readiness audit's whole-repo bug scan.
+**Symptom:** the chat mic mute/unmute button and skill-panel actions call `sendMic`/`skill_op` unconditionally; the real (non-mock) Brain's dispatch only ever handled `user_msg`/`settings_update`/`interrupt`/`approval_response`/`memory_edit`/`undo` and fell through to nothing for `mic`/`skill_op` — no reply frame at all. `voice_state` (the only thing that would confirm a mute toggle) is emitted exclusively by `mock.py`. Against the real Brain the mic button looked functional and did nothing, with zero user-visible feedback.
+**Root cause:** `task_op`/`lane_pin` had already been given honest `operation_unsupported` handling in the 2026-07-22 audit, but that fix was never extended to every UI-sendable inbound type — `mic`/`skill_op` were added to the contract later without a matching real-dispatch branch.
+**Fix:** `server.py`'s `_REAL_UNSUPPORTED_OPS` now includes `mic`/`skill_op`, routed through the same `operation_unsupported` correlation path; `operation_kind` enum extended in all three contract mirrors; ChatView disables the mic control with an honest reason once the error lands. A new test (`test_server.py`) enumerates every inbound type in the contract spec and asserts the real dispatch answers all of them — not just the mock.
+**Never do:** add a new inbound IPC type without wiring (or explicitly, honestly refusing) it in the REAL dispatch table, not just the mock. "Mock handles it" is not evidence the real Brain does.
+
+## `note_turn` spawned as a bare unretained `asyncio.create_task` - 2026-07-23
+**Severity:** Medium (silent data loss, low trigger rate). Found during the Phase 3 readiness audit.
+**Symptom:** `graph.py`'s post-turn hook fired `asyncio.create_task(memory.note_turn(...))` directly — the one background task in the codebase not held by any tracking set. asyncio only keeps a weak reference to an unretained task; if garbage-collected before it completes, the conversation silently never gets marked dirty and its memory extraction is lost, with no error anywhere.
+**Root cause:** `memory._spawn()` (a set + done-callback, used everywhere else for idle/pressure consolidation tasks) already existed and was the established pattern — this one call site was added without going through it, breaking the "every task has an explicit owner" rule from the 2026-07-22 audit.
+**Fix:** changed to `memory._spawn(memory.note_turn(...))`. Added `check_note_turn_triggers` to `test_memory.py`, which asserts the armed idle timer is present in `memory._bg_tasks` — this specific assertion is what would fail if the bare-`create_task` regression recurred.
+**Never do:** call `asyncio.create_task` directly in `brain/`. Always route through the module's existing `_spawn`/task-tracking helper so every background task has retention + a done-callback.
+
+## v1→v2 belief-table migration could brick Brain startup after a crash - 2026-07-23
+**Severity:** Medium (low real-world trigger rate; needs a pre-existing v1 DB + a crash in a narrow window). Found during the Phase 3 readiness audit.
+**Symptom:** the `version < 2` migration branch ran `ALTER TABLE belief ADD COLUMN valid_at/invalid_at` then `conn.executescript(_V2_NEW_TABLES)` inside what looked like one `with conn:` transaction — but `executescript()` implicitly commits first. A crash after that implicit commit but before `PRAGMA user_version=2` left the columns added with `user_version` still `1`; the next Brain start re-entered the same branch and re-ran the `ALTER`, raising an uncaught `sqlite3.OperationalError: duplicate column name` that failed `store.connect()` — Brain would not start at all.
+**Root cause:** treated `executescript` as participating in the surrounding transaction the same way plain `execute` calls do; it does not.
+**Fix:** the branch now checks `PRAGMA table_info(belief)` for each column before its `ALTER TABLE`, making a re-entry into a half-migrated state a no-op instead of a crash. Test added: hand-build the half-migrated state (columns present, `user_version` still 1) and assert `connect()` succeeds.
+**Never do:** assume `executescript()` shares the transaction of surrounding `execute()` calls inside a `with conn:` block — it commits implicitly. Any multi-step SQLite migration must be safe to re-enter after a crash between its own statements, not just written once and trusted to run atomically.
+
 ## Audit: permission-boundary and undo races in Lane-1 file tools - 2026-07-22
 **Severity:** High. **Cause:** search trusted glob patterns, Tier-1 commands accepted outside-root operands, create classification raced an overwriting write, and delete undo restored without an absence precondition. **Fix:** validate resolved patterns/results/CWD/operands, reject dangerous Git modes, create exclusively, and require the restore target to remain absent. `brain/tests/test_files.py` passed. **Prevention:** NEVER treat a command name or pre-execution classification as the filesystem boundary; validate every resolved operand and re-check destructive preconditions at execution.
 

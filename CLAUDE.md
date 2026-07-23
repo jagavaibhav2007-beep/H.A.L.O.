@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-**H.A.L.O.** — a local resident desktop AI companion built with Tauri/React, a Python/LangGraph Brain, and a Python Voice worker over authenticated loopback WebSocket. Phase 0, Phase 1, and the Phase 2 feature set are implemented; the default non-`--mock` Brain is the real Phase 2 backend. The 2026-07-22 evidence-driven hardening audit is complete for automatable scope: `./dev.ps1 -Verify` is green, app-scoped native startup/authentication and forced-parent cleanup pass, and no validated P0/P1 finding remains. Human visual/NVDA and real-key OpenRouter walkthroughs remain in [VERIFY.md](VERIFY.md); findings and deferrals are in [AUDIT_PLAN.md](AUDIT_PLAN.md). Phase 3 has not started.
+**H.A.L.O.** — a local resident desktop AI companion built with Tauri/React, a Python/LangGraph Brain, and a Python Voice worker over authenticated loopback WebSocket. Phase 0, Phase 1, and the Phase 2 feature set are implemented; the default non-`--mock` Brain is the real Phase 2 backend. The 2026-07-22 evidence-driven hardening audit is complete for automatable scope: `./dev.ps1 -Verify` is green, app-scoped native startup/authentication and forced-parent cleanup pass, and no validated P0/P1 finding remains. Human visual/NVDA and real-key OpenRouter walkthroughs remain in [VERIFY.md](VERIFY.md); findings and deferrals are in [AUDIT_PLAN.md](AUDIT_PLAN.md). Phase 3 has not started, but a 2026-07-23 readiness audit ([PHASE3_READINESS_AUDIT.md](PHASE3_READINESS_AUDIT.md)) found and closed 6 correctness gaps that would have broken under Phase 3 load (contract versioning, honest `mic`/`skill_op` handling, task retention, embedding-lock contention, LLM rate-limit handling, an idempotent v2 migration — `./dev.ps1 -Verify` green after) and designed the task-runtime split (`systemdesign/12-task-runtime.md`) that must be implemented before Phase 3a starts — read that doc before building any long-running-task feature.
 
 The repo has two layers: design docs (source of truth for *behavior* and *architecture*) and the code that implements them.
 
 - **[Halo-PRD.md](Halo-PRD.md)** — product spec: *what* Halo is and *how it behaves* (capabilities, control lanes, permissions, memory, self-improvement). Stack-agnostic by design — keep tech choices out of it.
-- **[systemdesign/](systemdesign/00-overview.md)** — architecture per feature. **[11-ipc-contract.md](systemdesign/11-ipc-contract.md) is the canonical spec for the process model and message envelope** — read it before touching any cross-process code.
+- **[systemdesign/](systemdesign/00-overview.md)** — architecture per feature. **[11-ipc-contract.md](systemdesign/11-ipc-contract.md) is the canonical spec for the process model and message envelope** — read it before touching any cross-process code. **[12-task-runtime.md](systemdesign/12-task-runtime.md)** is a design-only doc (not yet implemented) for how long-running tasks detach from interactive chat turns — read it before starting Phase 3a or any feature that runs longer than a turn.
 - **[techstack/](techstack/00-stack-summary.md)** — concrete technology choice per feature.
 - **[ui_ux/](ui_ux/00-design-language.md)** — visual/interaction spec (tokens, motion, copy voice). Check `00-design-language.md` for existing tokens before inventing new ones.
 - **[phases.md](phases.md)** — the phase-by-phase build roadmap (Phase 0 skeleton → Phase 1 front-end shell → Phase 2 backend spine → Phase 3 heavy systems).
@@ -157,7 +157,7 @@ Before doing non-trivial work, check whether an available skill or agent already
 - **[mem/Gotchas.md](mem/Gotchas.md)** — non-obvious traps: port ephemeral, shutdown flag ordering, StrictMode double-invoke, Tauri window-state plugin gotchas.
 - **[mem/Patterns.md](mem/Patterns.md)** — established patterns for common tasks (event store, mock design, etc.).
 - **[mem/Decisions.md](mem/Decisions.md)** — why certain design choices were made (e.g., why orb is user-resizable, why all-edge resize was replaced with corner grip).
-- **[mem/MigrationLog.md](mem/MigrationLog.md)** — database schema changes, newest first (currently records the Phase 2 schema v1 migration).
+- **[mem/MigrationLog.md](mem/MigrationLog.md)** — database schema changes, newest first (currently at v2 — memory v2's consolidation/episodic/bi-temporal columns, upgraded in place from the Phase 2 v1 schema).
 
 **Before implementing or debugging:** check `mem/Bugs.md` for similar symptoms and "Never do" rules. Before starting a new feature, check `mem/Decisions.md` to understand prior reasoning. **Update mem/ at the end of your session** if you:
 - Hit a new bug (add to Bugs.md with root cause and "Never do" rule).
