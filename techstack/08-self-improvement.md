@@ -5,7 +5,7 @@ Design: [systemdesign/08-self-improvement](../systemdesign/08-self-improvement.m
 ## Feature-specific
 | Concern | Choice | Notes |
 |---|---|---|
-| Skill format | markdown file + optional Python helper | `skills/<name>.md` |
+| Skill format | **SKILL.md** (Anthropic Agent Skills standard) | folder + YAML frontmatter (name, description) + markdown body + bundled scripts; ecosystem-portable |
 | Frequency detector | SQL query over the raw activity log | counts task-kind occurrences |
 | Skill drafting | light model | drafts from successful runs |
 | Sandbox eval | run skill in isolated context on held-out/simulated inputs | capability + regression check |

@@ -2,8 +2,8 @@
 
 Halo turns repeated work into tested, reusable skills, and learns from failures.
 
-## Skills are files
-- A skill = a markdown file (`skills/<name>.md`) with a description + steps/prompt + optional helper code. The Brain loads active skills into its tool/prompt space.
+## Skills are files (SKILL.md format)
+- A skill = a folder in `skills/<name>/` containing `SKILL.md` (Anthropic Agent Skills standard: YAML frontmatter with `name` and `description`, markdown body with instructions/steps, optional bundled scripts). The Brain loads active skills into its tool/prompt space. Same format used for Phase 3b browser playbooks — one portable on-disk shape across all generated artifacts.
 
 ## Lifecycle
 ```

@@ -9,10 +9,10 @@ Real-time spoken conversation. A separate process (Pipecat) that feeds the same 
 ## Pipeline (Pipecat, local audio transport — no media server, no Docker)
 ```
 mic → openWakeWord ("Halo") → VAD (speech boundaries)
-    → STT (OpenRouter Whisper) → text
+    → STT (faster-whisper, on-device) → text [cloud Whisper if unavailable]
     → WS to Brain (same graph as chat)
     → Brain streams reply text + narration events
-    → TTS (Deepgram Aura) → speaker
+    → TTS (Kokoro, on-device) → speaker [cloud Aura if unavailable]
 ```
 
 ## Interruption / "stop"
@@ -27,12 +27,15 @@ mic → openWakeWord ("Halo") → VAD (speech boundaries)
 - `Brain → Voice`: `{type:"token"}`, `{type:"activity", narrate:bool}`, `{type:"approval_request"}` (spoken as "I need your OK to …")
 
 ## Failure handling
-- STT low confidence → Halo asks to repeat rather than guessing.
-- TTS/Deepgram down → fall back to on-screen text + a soft chime; don't fail the task.
+- STT low confidence (faster-whisper) → Halo asks to repeat rather than guessing. If local STT unavailable → cloud fallback (OpenRouter Whisper).
+- TTS local unavailable → fall back to cloud (Deepgram Aura) or on-screen text + soft chime as last resort; don't fail the task.
 - Wake-word false positive → VAD finds no real utterance → silently drop.
 
 ## Wake-word reality check
 - openWakeWord ships a fixed pretrained set — **"Halo" is not in it**. A custom "Halo" model must be trained (openWakeWord's synthetic-data training pipeline; a one-time build task, not a config value). Interim fallback during development: a stock word (e.g. "Hey Jarvis") until the custom model is trained.
 
 ## Privacy
-- Wake word runs **fully on-device** (openWakeWord); audio only leaves the machine after wake, and only to STT. See [techstack/02-voice](../techstack/02-voice.md).
+- Wake word runs **fully on-device** (openWakeWord).
+- **STT and TTS run on-device** (faster-whisper, Kokoro) — audio never leaves the machine during local inference.
+- Cloud STT/TTS are fallback only if local models are unavailable; audio leaves the machine only as a fallback, not by default.
+- See [techstack/02-voice](../techstack/02-voice.md).

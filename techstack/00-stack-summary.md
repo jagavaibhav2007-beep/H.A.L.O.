@@ -24,8 +24,8 @@ The global stack. Per-feature files list only what's *specific* to that feature 
 |---|---|---|
 | **Heavy** (reasoning, code, planning) | `deepseek/deepseek-v4-pro` | ✅ confirmed on OpenRouter |
 | **Light** (classify, narrate, memory extract) | `google/gemma-4-26b-a4b-it` | ✅ confirmed live on OpenRouter — **paid variant** ($0.06/M in, $0.33/M out), not the rate-limited `:free` |
-| **STT** | `openai/whisper-large-v3-turbo` (OpenRouter audio endpoint) | ✅ confirmed live |
-| **TTS** | Deepgram **Aura-1** (Deepgram API, not OpenRouter) | as chosen |
+| **STT** | **faster-whisper** (local via CTranslate2) | pip-installable, MIT; cloud fallback: OpenRouter Whisper |
+| **TTS** | **Kokoro** (local, 82M params real-time CPU) | Apache-2.0, hexgrad; cloud fallback: Deepgram Aura |
 
 ## Cost strategy (from agentic-engineering skill)
 - **Default light, escalate on gap.** Most calls (routing, narration, memory extraction, simple chat) → light model. Escalate to heavy only when the task shows real reasoning/coding depth.
@@ -34,4 +34,4 @@ The global stack. Per-feature files list only what's *specific* to that feature 
 - **Cloud only for:** LLM reasoning (OpenRouter), STT (OpenRouter), TTS (Deepgram). These are the only recurring bills.
 
 ## What leaves the machine
-Prompt text + tool payloads → OpenRouter; audio after wake → STT; reply text → Deepgram TTS; MCP/API calls to their services. **Everything else (memory, logs, skills, keys) stays local.**
+Prompt text + tool payloads → OpenRouter; MCP/API calls to their services. **Everything else (memory, logs, skills, keys, STT/TTS audio) stays local.** Cloud TTS/STT are fallback only if local models are unavailable.

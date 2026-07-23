@@ -9,14 +9,14 @@ Design: [systemdesign/02-voice](../systemdesign/02-voice.md). Global stack: [00-
 | Wake word | **openWakeWord** ("Halo" — **custom-trained model**, not stock; stock "Hey Jarvis" as dev interim) | on-device, free |
 | VAD | Silero VAD (bundled with Pipecat) | speech boundaries |
 | Audio I/O | `sounddevice`/PyAudio (via Pipecat) | local devices |
-| STT | OpenRouter `openai/whisper-large-v3-turbo` (audio endpoint) | cloud |
+| STT | **faster-whisper** (local, CTranslate2 int8, SYSTRAN/MIT) | on-device, CPU workable; cloud fallback: OpenRouter Whisper |
 | LLM | same Brain (OpenRouter, tiered) | reuses chat graph |
-| TTS | **Deepgram Aura-1** (Deepgram SDK) | cloud |
+| TTS | **Kokoro** (local, 82M params, Apache-2.0) | on-device real-time CPU; cloud fallback: Deepgram Aura-1 |
 
 ## Cost note
-- **Free/local:** wake word, VAD, audio capture/playback.
-- **Cloud (per use):** Whisper STT (per audio minute), LLM (tiered — light by default), Deepgram Aura TTS (per character/minute).
-- Cascaded pipeline (vs a single realtime model) = **cheaper + model choice**; slightly higher latency, acceptable now.
+- **Free/local:** wake word, VAD, audio capture/playback, STT (faster-whisper), TTS (Kokoro).
+- **Cloud (fallback only):** OpenRouter Whisper STT (if local unavailable), Deepgram Aura TTS (if local unavailable), LLM (tiered — light by default).
+- Cascaded pipeline (vs a single realtime model) = **cheaper + model choice**; on-device first keeps audio private until the wake word.
 
 ## Later upgrade path
 - If sub-second latency becomes the goal, swap the cascade for a native speech-to-speech realtime model (higher cost). Not in initial scope.
