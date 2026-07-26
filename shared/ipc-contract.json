@@ -110,7 +110,7 @@
     },
     "spend_update": {
       "direction": "outbound", "required": ["session_usd", "month_usd"],
-      "fields": { "session_usd": { "type": "number" }, "month_usd": { "type": "number" } }
+      "fields": { "session_usd": { "type": "number" }, "month_usd": { "type": "number" }, "session_tokens": { "type": "integer" }, "last_turn_tokens": { "type": "integer" } }
     },
     "settings_state": {
       "direction": "outbound", "required": ["key", "status"],

@@ -13,6 +13,8 @@ from typing import AsyncIterator
 
 import httpx
 
+from brain import store
+
 LIGHT = "google/gemma-4-26b-a4b-it"
 HEAVY = "deepseek/deepseek-v4-pro"
 
@@ -45,6 +47,55 @@ def _retry_after_seconds(resp: httpx.Response) -> float:
 
 class OpenRouterStreamError(RuntimeError):
     """An HTTP-200 OpenRouter stream terminated with an in-band error."""
+
+
+def is_transport_error(exc: BaseException) -> bool:
+    """A network / 5xx / 429 failure says nothing about whether LIGHT was
+    capable of the task, so callers must NOT escalate the model on it
+    (systemdesign/14 B2). Kept here so graph.py stays transport-agnostic and
+    the httpx types live in one module. A mid-stream OpenRouterStreamError is
+    deliberately NOT counted -- a generation that failed mid-flight may be a
+    quality signal, and escalation now decays after one turn (B1) anyway."""
+    return isinstance(exc, (httpx.TransportError, httpx.HTTPStatusError))
+
+
+# Every outbound LLM call in the process funnels through _stream_once (the same
+# property the semaphore relies on), so accounting lives THERE rather than in
+# each caller. Threading a usage out-param through every call site is what let
+# _maybe_summarize, docs._llm_text and memory's three calls each go unbilled --
+# a caller can no longer make a call invisible by forgetting an argument.
+_USAGE_FIELDS = ("cost", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens")
+_session: dict[str, float] = dict.fromkeys(_USAGE_FIELDS, 0)
+
+
+def session_totals() -> dict[str, float]:
+    """Process-wide usage since start; resets on Brain restart by design."""
+    return dict(_session)
+
+
+def _record_usage(usage: dict, usage_out: dict | None) -> float:
+    """Fold one response's usage into the session totals and (if given) the
+    caller's out-param. ACCUMULATES -- a multi-round turn reuses one usage_out
+    dict, and assigning there is what made `_bill_and_extract` bill only the
+    final round (measured 3.95x undercount on a 6-round turn). A retried round
+    genuinely IS billed twice by the provider, so counting both is correct.
+
+    Pure bookkeeping -- returns the cost and writes no DB, so a retry's partial
+    accounting can't land from inside this function."""
+    details = usage.get("prompt_tokens_details") or {}
+    completion_details = usage.get("completion_tokens_details") or {}
+    values = {
+        "cost": float(usage.get("cost") or 0.0),
+        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+        "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "cached_tokens": int(details.get("cached_tokens") or 0),
+        "reasoning_tokens": int(completion_details.get("reasoning_tokens") or 0),
+    }
+    for key, value in values.items():
+        _session[key] += value
+        if usage_out is not None:
+            usage_out[key] = usage_out.get(key, 0) + value
+    return values["cost"]
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -161,21 +212,27 @@ def finish_tool_calls(acc: dict[int, dict]) -> list[dict]:
     return calls
 
 
-async def _stream_once(messages, model, api_key, usage_out, tools=None, tool_acc=None) -> AsyncIterator[str]:
+async def _stream_once(messages, model, api_key, usage_out, tools=None, tool_acc=None, tool_choice="auto") -> AsyncIterator[str]:
     headers = {"Authorization": f"Bearer {api_key}"}
+    # `usage: {include: true}` was the deprecated spelling; stream_options is
+    # the current one and already returns prompt/completion/cached/reasoning
+    # token counts plus cost on the final chunk, at no extra charge.
     body = {
         "model": model,
         "messages": messages,
         "stream": True,
         "stream_options": {"include_usage": True},
-        "usage": {"include": True},
     }
     if tools:
         # Must ride on EVERY request of the loop, the follow-up after tool
         # results included -- omitting them there makes the model forget it can
-        # call anything and answer from thin air.
+        # call anything and answer from thin air. At the soft cap the caller
+        # passes tool_choice="none": tools STILL serialize (ahead of messages),
+        # so the cached prefix survives, while "none" forces the tools-free
+        # final answer (systemdesign/14 B3). Dropping tools entirely there
+        # invalidated the whole cached prefix on that request.
         body["tools"] = tools
-        body["tool_choice"] = "auto"
+        body["tool_choice"] = tool_choice
     if tool_acc is not None:
         tool_acc.clear()  # a retry re-streams from scratch; never double-count
     client = _get_client()
@@ -196,8 +253,17 @@ async def _stream_once(messages, model, api_key, usage_out, tools=None, tool_acc
                 continue
             chunk = json.loads(data)
             usage = chunk.get("usage")
-            if usage and usage_out is not None:
-                usage_out["cost"] = float(usage.get("cost", 0.0) or 0.0)
+            if usage:
+                # Unconditional: no usage_out is not a reason to lose the call.
+                cost = _record_usage(usage, usage_out)
+                if cost:
+                    # ponytail: bills inline, so this one-row upsert runs while
+                    # still holding an _LLM_SEM slot and an open HTTP stream. The
+                    # usage chunk is the LAST chunk, so the window is tiny; if
+                    # store contention ever shows up (see the Phase 3 readiness
+                    # audit's embedding-lock finding), accumulate into a pending
+                    # total and flush it in stream_chat after the stream closes.
+                    await asyncio.to_thread(store.add_spend, cost)
             _raise_for_stream_error(chunk)
             choices = chunk.get("choices") or []
             if choices:
@@ -247,6 +313,7 @@ async def stream_chat(
     usage_out: dict | None = None,
     tools: list[dict] | None = None,
     tool_calls_out: list[dict] | None = None,
+    tool_choice: str = "auto",
 ) -> AsyncIterator[str]:
     """Yields TEXT deltas only. Any tool calls the model made are appended to
     `tool_calls_out` once the stream finishes (same out-param idiom as
@@ -260,9 +327,11 @@ async def stream_chat(
             if m.get("role") == "user":
                 last_user = m.get("content", "")
                 break
-        if usage_out is not None:
-            usage_out["cost"] = 0.0
-        if tools is not None and tool_calls_out is not None:
+        # Route the stub through the same recorder: assigning cost=0.0 here would
+        # WIPE the accumulation from earlier rounds of the same turn now that
+        # usage_out is additive, and callers rely on the key being present.
+        _record_usage({"cost": 0.0}, usage_out)
+        if tools is not None and tool_calls_out is not None and tool_choice != "none":
             calls = _stub_tool_calls(messages)
             if calls:
                 tool_calls_out.extend(calls)
@@ -276,7 +345,7 @@ async def stream_chat(
     acc: dict[int, dict] = {}
     yielded = False
     try:
-        async for delta in _stream_once(messages, model, api_key, usage_out, tools, acc):
+        async for delta in _stream_once(messages, model, api_key, usage_out, tools, acc, tool_choice):
             yielded = True
             yield delta
     except (httpx.TransportError, httpx.HTTPStatusError) as e:
@@ -287,13 +356,13 @@ async def stream_chat(
         # sent, turn closes with error").
         if not yielded and (isinstance(e, httpx.TransportError) or is_5xx):
             await asyncio.sleep(random.uniform(0.5, 1.5))
-            async for delta in _stream_once(messages, model, api_key, usage_out, tools, acc):
+            async for delta in _stream_once(messages, model, api_key, usage_out, tools, acc, tool_choice):
                 yield delta
         elif not yielded and is_429:
             # A5: one bounded retry honoring Retry-After (capped) instead of
             # failing the turn outright on a rate limit.
             await asyncio.sleep(_retry_after_seconds(e.response))
-            async for delta in _stream_once(messages, model, api_key, usage_out, tools, acc):
+            async for delta in _stream_once(messages, model, api_key, usage_out, tools, acc, tool_choice):
                 yield delta
         else:
             raise

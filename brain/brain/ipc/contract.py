@@ -315,6 +315,7 @@ CONTRACT_SPEC: dict = {
         }),
         "spend_update": _message(OUT, ["session_usd", "month_usd"], {
             "session_usd": _field(N), "month_usd": _field(N),
+            "session_tokens": _field(I), "last_turn_tokens": _field(I),
         }),
         "settings_state": _message(OUT, ["key", "status"], {
             "key": _field(S), "status": _field(S, ["set", "missing", "invalid", "unverified"]),

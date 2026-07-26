@@ -376,9 +376,35 @@ async def check_round_cap(port: int, token: str) -> None:
           "(final call made without tools), no error frame: OK")
 
 
+def check_cost_controls() -> None:
+    """systemdesign/14 cost controls the loop/round-cap checks don't exercise:
+    B1 escalation decay, D1 token-budget reader, D2 identical-call keying."""
+    # B1: _route_node consumes escalated as a one-shot -- HEAVY this turn, but
+    # the returned update clears the flag so it can't latch HEAVY forever.
+    out = graph._route_node({"messages": [{"role": "user", "content": "hi"}], "escalated": True}, {})
+    assert out["model"] == llm.HEAVY and out["escalated"] is False, out
+    out = graph._route_node({"messages": [{"role": "user", "content": "hi"}]}, {})
+    assert out["model"] == llm.LIGHT and out["escalated"] is False, out
+
+    # D1: the ceiling is a real, separate setting defaulting to 40k.
+    assert graph._turn_token_budget() == 40000, graph._turn_token_budget()
+
+    # D2: identical read-only calls key equal regardless of arg order; a
+    # different offset is a different call, and writes are out of scope.
+    a = {"name": "file_read", "args": {"path": "/x", "offset": 1}}
+    b = {"name": "file_read", "args": {"offset": 1, "path": "/x"}}
+    assert graph._call_key(a) == graph._call_key(b), "arg order must not change the key"
+    c = {"name": "file_read", "args": {"path": "/x", "offset": 50}}
+    assert graph._call_key(a) != graph._call_key(c), "different offset is a different call"
+    assert graph._READONLY_TOOLS == {"dir_list", "file_search", "file_read", "run_readonly_cmd"}
+    assert "file_edit" not in graph._READONLY_TOOLS, "writes must never be suppressed"
+    print("[check 2b] cost controls: B1 escalation decays, D1 budget reader, D2 call-keying: OK")
+
+
 async def main() -> None:
     check_accumulator()
     check_tool_specs()
+    check_cost_controls()
     server, token = await start()
     port = server.sockets[0].getsockname()[1]
     try:

@@ -1,6 +1,10 @@
 # Migration Log
 _Database schema changes — newest first._
 
+## v3 (2026-07-24) — doc_digest per-document cache, `brain/brain/store.py`
+`PRAGMA user_version` 2 → 3. Additive only, idempotent (`CREATE TABLE IF NOT EXISTS`, runs on both the fresh-create and every upgrade path):
+- New `digest_cache(path, sha256, digest_version, digest_json, created_at)`, `PRIMARY KEY (path, sha256, digest_version)` — one cached JSON digest per (file content, digest schema version). `doc_digest` (Layer 2, systemdesign/13-document-ingestion.md) checks it before its per-doc map LLM call; an unchanged file digests for ~0. Bumping `DIGEST_VERSION` in `brain/brain/tools/docs.py` invalidates all cached digests without a schema change.
+
 ## v2 (2026-07-23) — memory v2 (consolidation + episodic + bi-temporal), `brain/brain/store.py`
 `PRAGMA user_version` 1 → 2. Incremental upgrade of an existing v1 DB (fresh DBs create at v2 shape directly):
 - `belief` gains `valid_at TEXT`, `invalid_at TEXT` (Graphiti bi-temporal pattern). Backfill: `valid_at = created_at` for all rows; `invalid_at = created_at` for `status='superseded'` rows (dead), left NULL for active/archived. Retrieval + UI hydration filter `invalid_at IS NULL AND status='active'`; `status` stays the derived value for the frozen IPC contract. New supersessions (`add_candidate_belief`, `supersede`, `invalidate_belief`) set `invalid_at=now` on the closed row.

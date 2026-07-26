@@ -11,19 +11,27 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shlex
 import shutil
 import subprocess
 import uuid
-from heapq import nsmallest
+from datetime import datetime
 from itertools import islice
 from pathlib import Path
 
-from brain import gate, store
+from brain import extract, gate, store
 
-_READ_CAP = 64 * 1024
-_LIST_CAP = 500
-_SEARCH_CAP = 200
+_READ_CAP = 8 * 1024  # ponytail: 8KB/~2k tokens (systemdesign/13-document-ingestion.md
+                       # Layer 0); offset/limit below let the model page past it.
+_CMD_HEAD_CAP = 4 * 1024
+_CMD_TAIL_CAP = 4 * 1024
+_LIST_CAP = 500  # max entries a listing may return (limit clamp)
+_LIST_DEFAULT = 50  # default when the model gives no limit
+_LIST_TEXT_CAP = 7 * 1024  # keep listing text under gate._RESULT_CAP after JSON-string escaping
+_SEARCH_CAP = 200  # max search matches returned (limit clamp)
+_SEARCH_SCAN_CAP = 2000  # ponytail: walk at most this many glob matches before sorting by mtime --
+                          # newest-first is over this window, not a million-file tree; raise if a real ask needs deeper
 _BATCH_CAP = 200
 _UNDO_BLOB_CAP = 10 * 1024 * 1024
 
@@ -77,36 +85,132 @@ def _uncollide(p: Path) -> Path:
 
 def _file_read(args: dict) -> str:
     p = _resolve(args["path"])
-    size = p.stat().st_size
-    with p.open("rb") as handle:
-        data = handle.read(_READ_CAP + 1)
-    text = data[:_READ_CAP].decode("utf-8", errors="replace")
-    if len(data) > _READ_CAP or size > _READ_CAP:
-        text += f"\n... [truncated at 64KB of {size} bytes]"
-    return text
+    try:
+        text = extract.extract_text(p)
+    except ValueError:
+        raise  # honest "no extractable text"/unsupported-format error -> the tool error
+    except Exception:
+        # Extraction library choked on a malformed file -- fall back to the
+        # old best-effort raw read rather than losing the file entirely.
+        with p.open("rb") as handle:
+            text = handle.read().decode("utf-8", errors="replace")
+
+    lines = text.splitlines(keepends=True)
+    total_lines = len(lines)
+    offset = int(args["offset"]) if args.get("offset") else 1
+    start = max(offset - 1, 0)
+    limit = int(args["limit"]) if args.get("limit") else None
+    window = lines[start : start + limit] if limit is not None else lines[start:]
+    end = start + len(window)
+
+    body = "".join(window)
+    encoded = body.encode("utf-8")
+    if len(encoded) > _READ_CAP:
+        body = encoded[:_READ_CAP].decode("utf-8", errors="ignore")
+        shown_lines = body.count("\n") + (1 if body and not body.endswith("\n") else 0)
+        next_offset = start + shown_lines + 1
+        remaining = total_lines - (start + shown_lines)
+        body += (
+            f"\n\n... [truncated at {_READ_CAP // 1024}KB; {remaining} more line(s) remain of "
+            f"{total_lines} total in {p.name} -- call file_read again with offset={next_offset} to page on]"
+        )
+        return body
+
+    if start > 0 or end < total_lines:
+        remaining = total_lines - end
+        if remaining > 0:
+            body += (
+                f"\n\n[showing lines {start + 1}-{end} of {total_lines} total in {p.name}; "
+                f"{remaining} more line(s) remain -- call file_read again with offset={end + 1} to page on]"
+            )
+        else:
+            body += f"\n\n[showing lines {start + 1}-{end} of {total_lines} total in {p.name}]"
+    return body
 
 
-def _dir_list(args: dict) -> list[dict]:
+def _clamp_limit(raw, default: int, cap: int) -> int:
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(n, cap))
+
+
+def _fmt_mtime(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _entry_line(display: str, st, is_dir: bool) -> str:
+    size = "-" if is_dir else str(st.st_size)
+    return f"{_fmt_mtime(st.st_mtime)}  {size:>12}  {display}{'/' if is_dir else ''}"
+
+
+def _bounded_listing(rows: list[tuple[float, str]], skipped: int, limit: int, cap: int, kind: str) -> str:
+    """Sort (mtime, line) rows newest-first, take `limit`, then trim to
+    _LIST_TEXT_CAP bytes so a big limit can't overflow the gate result cap and
+    get byte-sliced into garbage. One header line states counts + how to widen."""
+    rows.sort(key=lambda r: r[0], reverse=True)
+    total = len(rows)
+    lines = [line for _, line in rows[:limit]]
+    while lines and len("\n".join(lines)) > _LIST_TEXT_CAP:
+        lines.pop()
+    shown = len(lines)
+    note = f"{shown} of {total} {kind}, newest first"
+    if skipped:
+        note += f", {skipped} unreadable skipped"
+    if shown < total:
+        note += f" — raise limit (max {cap}) or narrow the path for more"
+    body = "\n".join(lines)
+    return f"[{note}]\n{body}" if body else f"[{note}]"
+
+
+def _dir_text(p: Path, limit: int) -> str:
+    """Immediate children of `p`, newest-first, as flat text. Uses os.scandir
+    (caches stat from the walk on Windows) and SKIPS any entry whose stat()
+    raises -- OneDrive placeholders, half-written .crdownload files, broken
+    junctions, or a file deleted mid-walk. One unguarded raise would fail the
+    whole call, and the model answers a tool error by retrying: the exact loop
+    Track A exists to remove (systemdesign/14 A1)."""
+    rows: list[tuple[float, str]] = []
+    skipped = 0
+    with os.scandir(p) as it:
+        for entry in it:
+            try:
+                st = entry.stat()
+                is_dir = entry.is_dir()
+            except OSError:
+                skipped += 1
+                continue
+            rows.append((st.st_mtime, _entry_line(entry.name, st, is_dir)))
+    return _bounded_listing(rows, skipped, limit, _LIST_CAP, "entries")
+
+
+def _dir_list(args: dict) -> str:
     p = _resolve(args["path"])
-    return [
-        {"name": c.name, "is_dir": c.is_dir()}
-        for c in nsmallest(_LIST_CAP, p.iterdir(), key=lambda child: child.name.casefold())
-    ]
+    return _dir_text(p, _clamp_limit(args.get("limit"), _LIST_DEFAULT, _LIST_CAP))
 
 
-def _file_search(args: dict) -> list[str]:
+def _file_search(args: dict) -> str:
     p = _resolve(args["path"])
     pattern = args["pattern"]
     pattern_path = Path(pattern)
     if pattern_path.is_absolute() or ".." in pattern_path.parts:
         raise ValueError("search pattern must stay below the requested directory")
-    matches: list[str] = []
-    for match in islice(p.glob(pattern), _SEARCH_CAP):
+    limit = _clamp_limit(args.get("limit"), _LIST_DEFAULT, _SEARCH_CAP)
+    rows: list[tuple[float, str]] = []
+    skipped = 0
+    for match in islice(p.glob(pattern), _SEARCH_SCAN_CAP):
         resolved = match.resolve()
         if not resolved.is_relative_to(p):
             raise ValueError("search result escaped the requested directory")
-        matches.append(str(match.relative_to(p)))
-    return matches
+        try:
+            st = match.stat()
+            is_dir = match.is_dir()
+        except OSError:
+            skipped += 1  # same stat-guard as _dir_text: skip, never fail the call
+            continue
+        rows.append((st.st_mtime, _entry_line(str(match.relative_to(p)), st, is_dir)))
+    return _bounded_listing(rows, skipped, limit, _SEARCH_CAP, "match(es)")
 
 
 def _run_cmd(args: dict) -> dict:
@@ -137,11 +241,16 @@ def _run_cmd(args: dict) -> dict:
         )
         if not _in_roots(target):
             raise ValueError(f"not allowed: command path is outside project roots ({target})")
+        # A3: one listing code path -- dir/ls returns the SAME newest-first,
+        # mtime+size formatter as dir_list, so no caller can regress to a
+        # timestamp-free listing (systemdesign/14 A3).
         if target.is_dir():
-            names = [entry["name"] for entry in _dir_list({"path": str(target)})]
+            out = _dir_text(target, _LIST_DEFAULT)
         else:
-            names = [target.name]
-        out = "\n".join(names)
+            try:
+                out = _entry_line(target.name, target.stat(), False)
+            except OSError:
+                out = f"[unreadable: {target.name}]"
         return {"code": 0, "stdout": out, "stderr": ""}
 
     dangerous = {"--no-index", "--ext-diff", "--textconv"}
@@ -160,8 +269,11 @@ def _run_cmd(args: dict) -> dict:
                 raise ValueError(f"not allowed: git path is outside project roots ({candidate})")
     r = subprocess.run(parts, cwd=cwd, capture_output=True, text=True, timeout=10, shell=False)
     out = r.stdout
-    if len(out) > _READ_CAP:
-        out = out[:_READ_CAP] + "\n...[truncated]"
+    cap = _CMD_HEAD_CAP + _CMD_TAIL_CAP
+    if len(out) > cap:
+        head, tail = out[:_CMD_HEAD_CAP], out[-_CMD_TAIL_CAP:]
+        elided = len(out) - _CMD_HEAD_CAP - _CMD_TAIL_CAP
+        out = f"{head}\n\n... [{elided} chars elided from the middle of {len(out)} total] ...\n\n{tail}"
     return {"code": r.returncode, "stdout": out, "stderr": r.stderr[:4096]}
 
 
@@ -350,31 +462,66 @@ gate.register(
     "file_read", _file_read, tier=_path_tier("path", 1),
     summary=lambda a: f"I want to read {a['path']}.",
     schema=_schema(
-        "Read a text file and return its contents (truncated at 64KB). Use this "
+        "Read a file and return its contents as markdown/plain text (extracted "
+        "from PDF/DOCX/XLSX/HTML as needed; other text and source files pass "
+        "through as-is). Capped at 8KB per call -- if the response says lines "
+        "remain, call file_read again with offset set to the number it gives you "
+        "to page through the rest instead of assuming the file ended. Use this "
         "before editing a file so you know its exact current text.",
-        {"path": _PATH}, ["path"],
+        {
+            "path": _PATH,
+            "offset": {
+                "type": "integer",
+                "description": "1-based line number to start reading from. Omit to start at line 1.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max number of lines to read from offset. Omit to read to the 8KB cap.",
+            },
+        },
+        ["path"],
     ),
 )
 gate.register(
     "dir_list", _dir_list, tier=_path_tier("path", 1),
     summary=lambda a: f"I want to list {a['path']}.",
     schema=_schema(
-        "List the immediate contents of a directory (names + whether each is a "
-        "directory), up to 500 entries. Not recursive -- use file_search for that.",
-        {"path": _PATH}, ["path"],
+        "List a directory's immediate contents, NEWEST FIRST, one flat line per "
+        "entry: modified time, size in bytes, name (directories end in '/'). "
+        "Returns the `limit` most-recently-modified entries (default 50) with a "
+        "header stating the total -- so to answer 'latest'/'most recent' you do "
+        "NOT need to read anything, the order already answers it. Call again with "
+        "a larger `limit` (max 500) to see older entries. Not recursive -- use "
+        "file_search for that.",
+        {
+            "path": _PATH,
+            "limit": {
+                "type": "integer",
+                "description": "Max entries to return, newest first (default 50, max 500).",
+            },
+        },
+        ["path"],
     ),
 )
 gate.register(
     "file_search", _file_search, tier=_path_tier("path", 1),
     summary=lambda a: f"I want to search {a['path']} for {a['pattern']}.",
     schema=_schema(
-        "Find files by glob pattern under a directory. Matches names/paths, not "
-        "file contents. Returns up to 200 paths relative to the search root.",
+        "Find files by glob pattern under a directory, NEWEST FIRST. Matches "
+        "names/paths, not file contents. Returns the `limit` most-recently-"
+        "modified matches (default 50, max 200) as flat lines: modified time, "
+        "size, path relative to the search root. Use this to find a specific "
+        "file by name (e.g. '*.pdf'); the newest-first order also answers "
+        "'the latest matching file' without reading anything.",
         {
             "path": _PATH,
             "pattern": {
                 "type": "string",
                 "description": "Glob relative to path, e.g. '*.pdf' or '**/*.py' to recurse.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max matches to return, newest first (default 50, max 200).",
             },
         },
         ["path", "pattern"],

@@ -140,8 +140,19 @@ async def _respond(ws, approval_id: str, decision: str, edited_args: dict | None
 
 
 async def check_real_chat_turn(port: int, token: str) -> None:
-    ws = await _connect_ui(port, token)
+    ws = await _connect_ui(port, token, drain=False)
     try:
+        # C4/D1 regression: token accounting rides spend_update through the REAL
+        # Brain. The snapshot's terminal spend_update carries session_tokens (no
+        # last_turn_tokens -- a fresh connect has no "last turn"). Values are 0
+        # under the offline stub; the ACTUAL cumulative-input-token ceiling only
+        # trips with a real key (a manual-test item), but the wiring the ceiling
+        # and the Settings readout depend on is locked here so it can't silently
+        # regress to the pre-Track-C state that undercounted spend ~4x.
+        snap = await _drain_snapshot(ws)
+        assert snap[-1]["type"] == "spend_update" and isinstance(snap[-1].get("session_tokens"), int), snap[-1]
+        assert "last_turn_tokens" not in snap[-1], "snapshot has no 'last turn' to report"
+
         await ws.send(json.dumps(_frame("user_msg", text="ping", conversation_id="p2-chat", source="ui")))
         tokens: list[str] = []
         while True:
@@ -155,9 +166,13 @@ async def check_real_chat_turn(port: int, token: str) -> None:
             else:
                 assert frame["type"] == "spend_update", frame
         assert tokens and "ping" in "".join(tokens), tokens
+        # The per-turn spend_update lands right after done and carries the just-
+        # finished turn's last_turn_tokens (present even at 0 under the stub).
+        after = await _recv(ws)
+        assert after["type"] == "spend_update" and isinstance(after.get("last_turn_tokens"), int), after
     finally:
         await ws.close()
-    print("PASS -- real chat turn: user_msg streams token(s) then done (exit criterion 1)")
+    print("PASS -- real chat turn: streams token(s) then done; spend_update carries session/last-turn tokens (criterion 1, C4)")
 
 
 # --------------------------------------------------------------- criterion 3
@@ -269,6 +284,41 @@ async def check_file_undo_roundtrip(ws) -> None:
     assert rev["task_id"] == act["task_id"], (rev, act)
     assert not p.exists(), "undo didn't reverse the create on disk"
     print("PASS -- Lane-1 file op + undo round-trip: activity carries undo_token, undo reverses it on disk (criteria 4, 5)")
+
+
+# ------------------------------------------------- doc_digest (Layer 2, 13-document-ingestion)
+
+
+async def check_doc_digest(port: int, token: str) -> None:
+    """Digest two files through the real gate: the turn completes, the
+    conversation-visible tool result stays under a token ceiling (the whole
+    point of doc_digest), and a per-doc digest cache row lands in SQLite."""
+    d1 = FILES_DIR / "digest-a.md"
+    d2 = FILES_DIR / "digest-b.md"
+    d1.write_text("# Plan A\n\nShip the ingestion layer. Budget: $500.", encoding="utf-8")
+    d2.write_text("# Plan B\n\nDefer to Phase 3. Headcount: 2.", encoding="utf-8")
+    ws = await _connect_ui(port, token)
+    try:
+        await _call_tool(ws, "p2-digest", "doc_digest", {"paths": [str(d1), str(d2)]})
+        done = await _recv_type(ws, "done", timeout=30)
+        assert done["conversation_id"] == "p2-digest", done
+    finally:
+        await ws.close()
+
+    g = await graph._ensure_graph()
+    snap = await g.aget_state({"configurable": {"thread_id": "p2-digest"}})
+    results = [
+        m["content"] for m in snap.values.get("messages", [])
+        if "I ran doc_digest" in (m.get("content") or "")
+    ]
+    assert results, "no doc_digest tool result in the conversation"
+    assert "digest-a.md" in results[0] and "digest-b.md" in results[0], results[0]
+    tokens_est = len(results[0]) // 4
+    assert tokens_est < 2500, f"conversation-visible digest too big: ~{tokens_est} tokens"
+    rows = store.connect().execute("SELECT COUNT(*) AS n FROM digest_cache").fetchone()["n"]
+    assert rows >= 2, f"expected >=2 digest cache rows, found {rows}"
+    print("PASS -- doc_digest: turn completes, conversation-visible result stays "
+          f"~{tokens_est} tokens (<2500), digest cache rows written (Layer 2, systemdesign/13)")
 
 
 # --------------------------------------------------------------- criterion 2
@@ -474,6 +524,7 @@ async def main() -> None:
             await check_file_undo_roundtrip(ws)
         finally:
             await ws.close()
+        await check_doc_digest(port, token)
         server, token, port = await check_memory_and_restart(server, token, port)
         server, token, port = await check_approval_survives_restart(server, token, port)
         await check_snapshot_idempotence(port, token)

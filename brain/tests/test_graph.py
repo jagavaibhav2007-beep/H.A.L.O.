@@ -154,9 +154,16 @@ async def check_interrupt(port: int, token: str) -> None:
         cid = "g-stop"
         long_text = " ".join(f"w{i}" for i in range(300))  # ~3s of stub stream
         await _send_msg(ws, cid, long_text)
-        for _ in range(5):  # let a few tokens through
+        seen = 0
+        while seen < 5:  # let a few tokens through
             frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            # spend_update is a GLOBAL broadcast, so the PREVIOUS check's turn
+            # can land one here -- same skip idiom as test_gate.py. Asserting
+            # "the very next frame is a token" was a latent race.
+            if frame["type"] == "spend_update":
+                continue
             assert frame["type"] == "token", frame
+            seen += 1
         await ws.send(json.dumps(_frame("interrupt", conversation_id=cid)))
         # Stream must stop promptly and close with done.
         deadline = asyncio.get_event_loop().time() + 2
@@ -202,7 +209,10 @@ async def check_interrupt_stalled_stream(port: int, token: str) -> None:
     try:
         cid = "g-stop-stalled"
         await _send_msg(ws, cid, "please wait forever")
-        first = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        while True:  # skip a prior turn's global spend_update (see check_interrupt)
+            first = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+            if first["type"] != "spend_update":
+                break
         assert first["type"] == "token" and first["conversation_id"] == cid, first
         await ws.send(json.dumps(_frame("interrupt", conversation_id=cid)))
 

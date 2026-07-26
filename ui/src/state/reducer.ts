@@ -71,6 +71,8 @@ export interface VoiceState {
 export interface SpendState {
   sessionUsd: number;
   monthUsd: number;
+  sessionTokens: number;
+  lastTurnTokens: number;
 }
 
 interface SnapshotState {
@@ -114,7 +116,7 @@ export const initialState: HaloState = {
   beliefs: {},
   skills: {},
   voice: { state: "idle", transcript: null },
-  spend: { sessionUsd: 0, monthUsd: 0 },
+  spend: { sessionUsd: 0, monthUsd: 0, sessionTokens: 0, lastTurnTokens: 0 },
   settings: {},
   operationErrors: {},
   snapshot: { pending: false, taskIds: {}, approvalIds: {}, activityCounts: {} },
@@ -347,7 +349,14 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
     case "spend_update":
       return finishSnapshot({
         ...state,
-        spend: { sessionUsd: frame.session_usd, monthUsd: frame.month_usd },
+        spend: {
+          sessionUsd: frame.session_usd,
+          monthUsd: frame.month_usd,
+          // Optional token fields (C4): keep the prior value when a frame omits
+          // them -- the snapshot carries session_tokens but no last_turn_tokens.
+          sessionTokens: frame.session_tokens ?? state.spend.sessionTokens,
+          lastTurnTokens: frame.last_turn_tokens ?? state.spend.lastTurnTokens,
+        },
       });
 
     case "settings_state":

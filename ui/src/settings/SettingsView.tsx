@@ -141,6 +141,13 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
             <span className="settings-label">This month</span>
             <span className="settings-value">${spend.monthUsd.toFixed(2)}</span>
           </div>
+          <div className="settings-row">
+            <span className="settings-label">Tokens this session</span>
+            <span className="settings-value">
+              {spend.sessionTokens.toLocaleString()}
+              {spend.lastTurnTokens > 0 && ` (last turn ${spend.lastTurnTokens.toLocaleString()})`}
+            </span>
+          </div>
         </section>
 
         <section className="settings-group">

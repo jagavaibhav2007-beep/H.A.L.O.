@@ -24,7 +24,7 @@ import sqlite_vec  # hard dep -- hoisted so it isn't re-imported inside three ho
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EMBED_DIM = 384
 
 _conn: sqlite3.Connection | None = None
@@ -122,6 +122,22 @@ _V2_NEW_TABLES = """
 """
 
 
+# [v3] Per-document digest cache for doc_digest (Layer 2,
+# systemdesign/13-document-ingestion.md). Keyed by content hash so an
+# unchanged file's map call is skipped entirely. Pure CREATE IF NOT EXISTS,
+# so both the fresh path and every upgrade path run it idempotently.
+_V3_NEW_TABLES = """
+    CREATE TABLE IF NOT EXISTS digest_cache (
+        path TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        digest_version INTEGER NOT NULL,
+        digest_json TEXT NOT NULL,
+        created_at TEXT,
+        PRIMARY KEY (path, sha256, digest_version)
+    );
+"""
+
+
 def _run_migrations(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
@@ -205,6 +221,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             conn.execute("UPDATE belief SET valid_at = created_at")
             conn.execute("UPDATE belief SET invalid_at = created_at WHERE status = 'superseded'")
             conn.executescript(_V2_NEW_TABLES)
+        if version < 3:
+            # v2 -> v3 (and every earlier path): additive table, idempotent.
+            conn.executescript(_V3_NEW_TABLES)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 def _now() -> str:
@@ -584,6 +603,30 @@ def latest_session_summary(conversation_id: str) -> dict | None:
         (conversation_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+# ------------------------------------------------------------ digest cache --
+
+
+@_serialized
+def get_digest(path: str, sha256: str, digest_version: int) -> dict | None:
+    conn = connect()
+    row = conn.execute(
+        "SELECT digest_json FROM digest_cache WHERE path=? AND sha256=? AND digest_version=?",
+        (path, sha256, digest_version),
+    ).fetchone()
+    return json.loads(row["digest_json"]) if row else None
+
+
+@_serialized
+def put_digest(path: str, sha256: str, digest_version: int, digest: dict) -> None:
+    conn = connect()
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO digest_cache(path, sha256, digest_version, digest_json, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (path, sha256, digest_version, json.dumps(digest, ensure_ascii=False), _now()),
+        )
 
 
 # ----------------------------------------------------------------- actions --

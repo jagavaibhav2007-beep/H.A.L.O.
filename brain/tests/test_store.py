@@ -352,9 +352,15 @@ def check_session_summary_crud() -> None:
     print("[check 14] session_summary add/list/latest round-trip: OK")
 
 
-def check_migration_v1_to_v2(tmp: Path) -> None:
+def check_migration_v1_to_v3(tmp: Path) -> None:
     """Hand-build a v1-shaped DB (user_version=1, no valid_at/invalid_at, no new
-    tables), then connect() must ALTER + backfill + create the v2 tables."""
+    tables), then connect() must ALTER + backfill + create the v2 tables AND the
+    v3 digest_cache.
+
+    ONE HOP, not two: `_run_migrations` runs `if version < 1 / elif version < 2`
+    for the belief ALTERs, then a SEPARATE `if version < 3` for the additive
+    table, and finally sets user_version straight to SCHEMA_VERSION. A v1 DB
+    therefore never lands on 2 -- asserting an intermediate 2 would be wrong."""
     import sqlite3
 
     v1_path = tmp / "v1.db"
@@ -388,7 +394,7 @@ def check_migration_v1_to_v2(tmp: Path) -> None:
     store.close()  # release any live module connection before opening the v1 file
     conn = store.connect(v1_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 3
         cols = {r[1] for r in conn.execute("PRAGMA table_info(belief)").fetchall()}
         assert "valid_at" in cols and "invalid_at" in cols, cols
 
@@ -398,16 +404,22 @@ def check_migration_v1_to_v2(tmp: Path) -> None:
 
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert "session_summary" in tables and "conversation_meta" in tables, tables
+        # v3 on the UPGRADE path, not just fresh-create: the table must exist
+        # and actually be usable (right columns/PK), so round-trip a digest.
+        assert "digest_cache" in tables, tables
+        store.put_digest("C:/x/doc.pdf", "sha-1", 1, {"gist": "hi"})
+        assert store.get_digest("C:/x/doc.pdf", "sha-1", 1) == {"gist": "hi"}
+        assert store.get_digest("C:/x/doc.pdf", "sha-1", 2) is None  # keyed by version
     finally:
         store.close()
-    print("[check 16] v1->v2 migration ALTERs belief, backfills valid_at/invalid_at, creates new tables: OK")
+    print("[check 16] v1->v3 migration ALTERs belief, backfills valid_at/invalid_at, creates v2+v3 tables: OK")
 
 
-def check_migration_v1_to_v2_half_migrated_is_idempotent(tmp: Path) -> None:
+def check_migration_half_migrated_is_idempotent(tmp: Path) -> None:
     """A3: simulate a crash mid-migration (columns already ALTERed, but
     user_version still 1 because executescript's implicit commit landed
-    before PRAGMA user_version=2 ran). connect() must succeed, not raise
-    'duplicate column name'."""
+    before the closing PRAGMA user_version ran). connect() must succeed, not
+    raise 'duplicate column name'."""
     import sqlite3
 
     v1_path = tmp / "v1_half.db"
@@ -442,11 +454,49 @@ def check_migration_v1_to_v2_half_migrated_is_idempotent(tmp: Path) -> None:
     store.close()
     conn = store.connect(v1_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 3
         assert store.get_belief("a") is not None
     finally:
         store.close()
-    print("[check 17] re-entering the v1->v2 migration on a half-migrated DB does not raise: OK")
+    print("[check 17] re-entering the migration on a half-migrated DB does not raise: OK")
+
+
+def check_migration_v2_to_v3(tmp: Path) -> None:
+    """The hop a real existing install actually takes: a DB already at v2 from
+    the memory-v2 work gains only digest_cache. Exercises the branch the v1 test
+    cannot -- `elif version < 2` is SKIPPED while the separate `if version < 3`
+    still runs, so a v2 DB must not be left without the new table.
+
+    Built by creating a current-shape DB and rolling it back to the v2 state
+    (drop digest_cache, user_version=2) rather than hand-writing the whole v2
+    schema, so this can't drift from what the code actually creates."""
+    import sqlite3
+
+    v2_path = tmp / "v2.db"
+    store.close()
+    store.connect(v2_path)  # lands at SCHEMA_VERSION
+    store.add_belief("keep-me", kind="preference", provenance="user")
+    store.close()
+
+    raw = sqlite3.connect(str(v2_path))
+    raw.execute("DROP TABLE IF EXISTS digest_cache")  # IF EXISTS: a broken v3
+    # migration must surface at this test's assertion, not as a setup error
+    raw.execute("PRAGMA user_version=2")
+    raw.commit()
+    raw.close()
+
+    conn = store.connect(v2_path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 3
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "digest_cache" in tables, tables
+        store.put_digest("C:/y/report.docx", "sha-2", 1, {"gist": "ok"})
+        assert store.get_digest("C:/y/report.docx", "sha-2", 1) == {"gist": "ok"}
+        # Pre-existing v2 data survives an additive migration.
+        assert [b["text"] for b in store.list_beliefs()] == ["keep-me"], store.list_beliefs()
+    finally:
+        store.close()
+    print("[check 18] v2->v3 migration adds digest_cache and preserves existing rows: OK")
 
 
 def check_embed_computed_outside_lock() -> None:
@@ -498,8 +548,9 @@ def main() -> None:
         check_conversation_meta_and_dirty()
         check_session_summary_crud()
         check_embed_computed_outside_lock()  # before the migration checks reconnect elsewhere
-        check_migration_v1_to_v2(tmp_path)  # last: reopens store on a separate v1 file
-        check_migration_v1_to_v2_half_migrated_is_idempotent(tmp_path)
+        check_migration_v1_to_v3(tmp_path)  # last: reopens store on separate files
+        check_migration_half_migrated_is_idempotent(tmp_path)
+        check_migration_v2_to_v3(tmp_path)
         store.close()
     print("[brain.store] self-check OK")
 

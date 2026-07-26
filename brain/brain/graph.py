@@ -28,6 +28,7 @@ from langgraph.types import Command
 
 from brain import gate, llm, memory, secrets_store, store
 import brain.tools.files  # noqa: F401 -- import registers the Lane-1 file tools into gate.TOOLS
+import brain.tools.docs  # noqa: F401 -- import registers doc_digest (Layer 2, systemdesign/13)
 
 logger = logging.getLogger("brain.graph")
 
@@ -107,7 +108,9 @@ class State(TypedDict, total=False):
 
 _graph = None
 _saver_conn: aiosqlite.Connection | None = None
-_session_usd = 0.0  # per-process accumulator; resets on Brain restart by design
+# Session spend/token totals live in llm.session_totals() -- accumulated at the
+# one choke point every LLM call passes through, so background consolidation and
+# doc_digest can no longer spend invisibly (measured: session_usd was 2.9x under).
 _recovery_started = False  # startup consolidation recovery runs once per process
 _recovery_task: asyncio.Task | None = None  # retained so the once-per-process task can't be GC'd mid-flight
 # conversation_id -> live-turn context while its stream runs. Callables stay
@@ -143,7 +146,13 @@ def _route_node(state: State, config) -> dict:
         name, _, rest = text[len("CALL_TOOL "):].partition(" ")
         args = _json.loads(rest) if rest.strip() else {}
         return {"pending_tool_calls": [{"id": "sentinel", "name": name, "args": args, "error": None}]}
-    return {"model": llm.route(text, state.get("escalated", False))}
+    # B1: consume escalation as a ONE-SHOT. The prior turn set escalated=True so
+    # this turn routes HEAVY; clearing it here -- AFTER route reads it -- makes
+    # escalation cover the next turn only, instead of latching HEAVY forever with
+    # no reset path (systemdesign/14 B1). Resetting it in run_turn's input dict
+    # would wipe it BEFORE route runs, so escalation would never take effect at
+    # all. respond re-sets it only on a LIGHT quality failure (B2).
+    return {"model": llm.route(text, state.get("escalated", False)), "escalated": False}
 
 
 async def _gate_node(state: State, config) -> dict:
@@ -155,11 +164,24 @@ async def _gate_node(state: State, config) -> dict:
     ctx = _turn_ctx[cid]
     queue = list(state.get("pending_tool_calls") or [])
     call = queue.pop(0)
+    seen = ctx.setdefault("seen_readonly", set())
     if call.get("error"):
         # Malformed arguments from the model: report it, never guess. The
         # result goes back as a tool message so it can correct itself.
         update: dict = {"pending_tool_result": {"tool": call["name"], "status": "error: bad arguments"}}
         content = f"I couldn't run {call['name']} — {call['error']}"
+    elif call["name"] in _READONLY_TOOLS and _call_key(call) in seen:
+        # D2: the same read-only call with identical args already ran THIS turn.
+        # Re-running re-pays for a result the model already has -- the generic
+        # form of the incident (a model that can't progress repeats itself).
+        # Read-only only: a repeated write may be a legitimate retry, and a
+        # Tier-3 denial comes back as a tool result the model may re-request
+        # after explaining itself (systemdesign/14 D2). No gate, no action row --
+        # nothing actually ran. ponytail: per-turn set; a Tier-3 suspend/resume
+        # builds a fresh ctx and forgets it -- the incident was an uninterrupted
+        # loop, so carrying it through checkpointed State isn't worth it.
+        update = {"pending_tool_result": {"tool": call["name"], "status": "ok"}}
+        content = "identical call already made this turn — its result is above"
     else:
         update = await gate.gated_execute(
             call["name"],
@@ -169,6 +191,8 @@ async def _gate_node(state: State, config) -> dict:
             broadcast=ctx["broadcast"],
         )
         content = (update.get("messages") or [{}])[0].get("content") or ""
+        if call["name"] in _READONLY_TOOLS:
+            seen.add(_call_key(call))
     if state.get("tool_rounds"):
         # Model-driven: the result must come back as a `tool` message keyed to
         # the call id, or the provider rejects the assistant tool_calls message
@@ -185,10 +209,57 @@ _SUMMARY_SYSTEM = (
 )
 
 
+# ponytail: 500-char floor. Below it a tool result ("ok", a short error) is
+# cheaper to keep than to stub -- eliding it saves nothing and drops signal.
+_TOOL_STUB_MIN = 500
+
+
+def _tool_stub(content: str, fn: dict) -> str:
+    """Deterministic, byte-stable placeholder for an already-answered tool
+    result (Layer 1, systemdesign/13): derived ONLY from the tool name, the
+    call's path/args, and the original length, so provider prompt caching still
+    hits across rounds. Restorable, not lossy -- the file is still on disk, so
+    the path is the reference the model re-fetches with offset/limit."""
+    name = fn.get("name") or "tool"
+    ref = name
+    try:
+        parsed = json.loads(fn.get("arguments") or "{}")
+        ref = parsed.get("path") or name  # raw model string: may be non-dict/invalid
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return (
+        f"[{name} result for {ref} ({len(content)} chars) elided — "
+        "call the tool again (offset/limit) if you need it]"
+    )
+
+
 def _prompt_messages(state: State) -> list[dict]:
     """The bounded history actually sent to the model: the running summary
-    stands in for messages[:dropped_before]."""
+    stands in for messages[:dropped_before], and every tool result the model
+    has ALREADY answered is replaced by a short restorable stub (Layer 1).
+
+    Staleness: a `tool` message is stale iff an `assistant` message follows it
+    -- the model produced a response having seen that result, so re-sending its
+    payload every round is the quadratic. Results in the tail past the last
+    assistant are not yet answered and stay verbatim. Pure projection: new dicts
+    for stubbed entries only; state["messages"], the reducer and the checkpoint
+    are untouched, and no message is dropped -- assistant/tool pairing is safe."""
     live = state["messages"][state.get("dropped_before") or 0:]
+    last_assistant = max(
+        (i for i, m in enumerate(live) if m.get("role") == "assistant"), default=-1
+    )
+    if last_assistant > 0:
+        fns = {
+            tc.get("id"): tc.get("function") or {}
+            for m in live for tc in (m.get("tool_calls") or ())
+        }
+        live = [
+            {**m, "content": _tool_stub(m["content"], fns.get(m.get("tool_call_id"), {}))}
+            if (i < last_assistant and m.get("role") == "tool"
+                and len(m.get("content") or "") > _TOOL_STUB_MIN)
+            else m
+            for i, m in enumerate(live)
+        ]
     summary = state.get("summary")
     if not summary:
         return live
@@ -261,6 +332,7 @@ async def _maybe_summarize(state: State, ctx: dict) -> dict:
             [{"role": "system", "content": _SUMMARY_SYSTEM}, {"role": "user", "content": excerpt}],
             llm.LIGHT,
             ctx["api_key"],
+            ctx["usage"],  # counts toward the turn -- was entirely unbilled
         )
         async for delta in _stream_until_stopped(stream, ctx["stop"]):
             parts.append(delta)
@@ -281,6 +353,21 @@ def _history_budget() -> int:
     return int(store.get_setting("history_token_budget", 6000))
 
 
+def _turn_token_budget() -> int:
+    # D1: cumulative-input-token ceiling for ONE turn (sits beside
+    # history_token_budget). _MAX_TOOL_ROUNDS caps rounds, not cost; this caps
+    # cost (systemdesign/14 D1).
+    store.connect()
+    return int(store.get_setting("turn_token_budget", 40000))
+
+
+_READONLY_TOOLS = {"dir_list", "file_search", "file_read", "run_readonly_cmd"}
+
+
+def _call_key(call: dict) -> str:
+    return json.dumps([call["name"], call.get("args") or {}], sort_keys=True, default=str)
+
+
 async def _respond_node(state: State, config) -> dict:
     cid = config["configurable"]["thread_id"]
     ctx = _turn_ctx[cid]
@@ -292,11 +379,23 @@ async def _respond_node(state: State, config) -> dict:
     parts: list[str] = []
     calls: list[dict] = []
     rounds = state.get("tool_rounds") or 0
-    # ponytail: soft cap. At the cap we make one more call with NO tools, so the
-    # user gets a real answer grounded in every tool result so far instead of a
-    # truncated turn. 8 is a guess at "a model that isn't converging"; raise it
-    # if real multi-step tasks legitimately need more.
-    tools = gate.tool_specs() if rounds < _MAX_TOOL_ROUNDS else None
+    # Two soft caps, ONE exit. Both keep the tool specs on the request (a stable,
+    # cheap-to-cache prefix) and send tool_choice="none" so the model gives a
+    # real final answer grounded in the results so far instead of looping.
+    # Dropping tools entirely (the old tools=None) invalidated the cached prefix
+    # on that request (systemdesign/14 B3).
+    #  - rounds cap (_MAX_TOOL_ROUNDS): a model that isn't converging.
+    #  - D1 token ceiling: a round's cost grows with history, so 8 rounds still
+    #    bought 150k tokens once. Cap CUMULATIVE input tokens (Track C's real
+    #    prompt_tokens, accumulated in ctx["usage"]) at turn_token_budget.
+    over_budget = ctx["usage"].get("prompt_tokens", 0) >= await asyncio.to_thread(_turn_token_budget)
+    if over_budget and rounds < _MAX_TOOL_ROUNDS:
+        logger.info(
+            "turn token budget reached for %s (%d input tokens); forcing a tools-free answer",
+            cid, ctx["usage"].get("prompt_tokens", 0),
+        )
+    tools = gate.tool_specs()
+    tool_choice = "none" if (rounds >= _MAX_TOOL_ROUNDS or over_budget) else "auto"
     try:
         # Retrieved beliefs prepend at stream time only -- never into graph
         # state, so they're recomputed per turn (no-double-injection rule).
@@ -308,6 +407,7 @@ async def _respond_node(state: State, config) -> dict:
             ctx["usage"],
             tools=tools,
             tool_calls_out=calls,
+            tool_choice=tool_choice,
         )
         async for delta in _stream_until_stopped(stream, ctx["stop"]):
             parts.append(delta)
@@ -319,9 +419,10 @@ async def _respond_node(state: State, config) -> dict:
         # into the error frame.
         logger.exception("stream failed for conversation_id=%s", cid)
         update["error"] = str(exc)
-        if state.get("model") == llm.LIGHT:
-            # ponytail: any mid-LIGHT-stream exception escalates the next turn
-            # to HEAVY -- a quality/parse-failure heuristic can refine this later.
+        if state.get("model") == llm.LIGHT and not llm.is_transport_error(exc):
+            # B2: escalate the NEXT turn to HEAVY only on a quality/parse-style
+            # failure -- a transport/5xx/429 says nothing about whether LIGHT was
+            # capable, and B1 now decays this after a single turn.
             update["escalated"] = True
     if ctx["stop"].is_set():
         update["redirected"] = True
@@ -445,9 +546,10 @@ async def aclose() -> None:
         await llm.aclose()
 
 
-def _spend_sync(cost: float) -> float:
+def _month_spend_sync() -> float:
+    # llm._stream_once already recorded this call's cost against the month at
+    # the choke point -- adding it again here is what double-counted.
     store.connect()
-    store.add_spend(cost)
     return store.month_spend()
 
 
@@ -461,17 +563,30 @@ async def _bill_and_extract(cid: str, result: dict, ctx: dict, api_key: str | No
     a real (billable) final answer, so skipping it would undercount spend and skip
     extraction on approved-tool turns. The `api_key and` guard is harmless in
     run_turn (it early-returns without a key)."""
-    global _session_usd
     if api_key and not result.get("error"):
         # v2: no per-turn extraction. Mark the conversation dirty + (re)arm the
         # idle consolidation timer; the actual extract/decide/summarize runs off
         # the hot path. note_turn swallows its own failures (rule 5).
         memory._spawn(memory.note_turn(cid, result.get("messages") or [], api_key, broadcast))
-    cost = ctx["usage"].get("cost")
-    if cost is not None:
-        _session_usd += cost
-        month = await asyncio.to_thread(_spend_sync, cost)
-        await broadcast("spend_update", {"session_usd": _session_usd, "month_usd": month})
+    usage = ctx["usage"]
+    if usage:
+        # The turn's REAL totals, summed over every round (see llm._record_usage).
+        # Logged because this is the only place the per-turn shape is visible
+        # until spend_update carries token counts.
+        logger.info(
+            "turn usage conversation_id=%s prompt=%d cached=%d completion=%d reasoning=%d cost=%.6f",
+            cid, usage.get("prompt_tokens", 0), usage.get("cached_tokens", 0),
+            usage.get("completion_tokens", 0), usage.get("reasoning_tokens", 0),
+            usage.get("cost", 0.0),
+        )
+        month = await asyncio.to_thread(_month_spend_sync)
+        totals = llm.session_totals()
+        await broadcast("spend_update", {
+            "session_usd": totals["cost"],
+            "month_usd": month,
+            "session_tokens": int(totals["prompt_tokens"] + totals["completion_tokens"]),
+            "last_turn_tokens": int(usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)),
+        })
 
 
 async def _finish_turn(result: dict, cid: str, broadcast) -> bool:
@@ -580,9 +695,15 @@ async def snapshot(send) -> None:
 
     await gate.push_activity_backlog(send)
     await memory.push_beliefs(send)
+    totals = llm.session_totals()
     await send(
         "spend_update",
-        {"session_usd": _session_usd, "month_usd": await asyncio.to_thread(store.month_spend)},
+        {
+            "session_usd": totals["cost"],
+            "month_usd": await asyncio.to_thread(store.month_spend),
+            # No last_turn_tokens on a fresh connect -- it's per-turn (optional).
+            "session_tokens": int(totals["prompt_tokens"] + totals["completion_tokens"]),
+        },
     )
 
 

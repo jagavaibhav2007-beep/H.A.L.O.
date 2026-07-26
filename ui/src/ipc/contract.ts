@@ -190,6 +190,8 @@ export interface SpendUpdateMsg extends IpcEnvelope {
   type: "spend_update";
   session_usd: number;
   month_usd: number;
+  session_tokens?: number;
+  last_turn_tokens?: number;
 }
 
 export interface SettingsStateMsg extends IpcEnvelope {
@@ -327,6 +329,7 @@ export const CONTRACT_SPEC = {
     }),
     spend_update: message(OUT, ["session_usd", "month_usd"], {
       session_usd: field(N), month_usd: field(N),
+      session_tokens: field(I), last_turn_tokens: field(I),
     }),
     settings_state: message(OUT, ["key", "status"], {
       key: field(S), status: field(S, ["set", "missing", "invalid", "unverified"]),

@@ -129,6 +129,24 @@ def check_classify_table() -> None:
     print("[check 1] classify table: T1/T2/T3, unknown->3 with empty redaction, exception->3: OK")
 
 
+def check_result_cap() -> None:
+    # An oversized list result must stay VALID JSON after capping -- the old
+    # byte-slice cut mid-token and the model got garbage. Newest-first entries
+    # are kept; the tail is dropped and reported.
+    big = [{"name": f"file_{i:04d}.pdf", "mtime": 1700000000 + i, "size": 12345} for i in range(2000)]
+    payload, omitted = gate._cap_result(big)
+    assert len(payload) <= gate._RESULT_CAP, len(payload)
+    assert omitted > 0, omitted
+    kept = json.loads(payload)  # must parse -- the whole point of the fix
+    assert kept == big[: len(kept)], "kept entries must be a valid head of the original"
+    assert len(kept) + omitted == len(big), (len(kept), omitted)
+
+    small = ["a.txt", "b.txt"]
+    payload, omitted = gate._cap_result(small)
+    assert omitted == 0 and json.loads(payload) == small
+    print("[check 1b] oversized list result stays valid JSON after cap: OK")
+
+
 async def check_sync_tool_does_not_block_event_loop() -> None:
     """A heartbeat must be able to release a blocking synchronous tool."""
     release = threading.Event()
@@ -361,6 +379,7 @@ async def check_restart_durability(port: int, token: str) -> None:
 
 async def main() -> None:
     check_classify_table()
+    check_result_cap()
     await check_sync_tool_does_not_block_event_loop()
     server, token = await start()
     port = server.sockets[0].getsockname()[1]

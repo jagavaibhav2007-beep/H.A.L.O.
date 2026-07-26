@@ -114,17 +114,25 @@ def _stub_candidates(last_user: str) -> list[dict]:
     return out
 
 
+def _render_span(span: list[dict]) -> str:
+    """The span as text for extraction/summary, WITHOUT tool results. Beliefs
+    and summaries come from what the user and assistant said; a `role: "tool"`
+    dir_list/file_read payload carries no durable fact and the extraction prompt
+    is told to ignore it anyway -- so don't pay to send it (systemdesign/14 B5;
+    measured ~12,656-token surcharge on a file-heavy span)."""
+    return "\n".join(
+        f"{m.get('role')}: {m.get('content')}" for m in span if m.get("role") != "tool"
+    )
+
+
 async def _llm_span_candidates(span: list[dict], api_key: str) -> list[dict]:
     """One extraction call over the WHOLE un-consolidated span (v2), not the
     last-10 window. Malformed/empty reply -> [] (rule 5)."""
-    convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in span)
+    convo = _render_span(span)
     prompt = [{"role": "system", "content": _EXTRACT_SYSTEM}, {"role": "user", "content": convo}]
     parts: list[str] = []
-    usage: dict = {}
-    async for delta in llm.stream_chat(prompt, llm.LIGHT, api_key, usage):
+    async for delta in llm.stream_chat(prompt, llm.LIGHT, api_key):
         parts.append(delta)
-    if usage.get("cost"):
-        await asyncio.to_thread(store.add_spend, usage["cost"])
     text = "".join(parts)
     start, end = text.find("["), text.rfind("]")
     if start < 0 or end <= start:
@@ -197,14 +205,11 @@ async def _llm_decide(cand: dict, neighbors: list[dict], dup: dict | None, api_k
     )
     user = f'New fact: {cand["text"]}\nExisting:\n{listing or "(none)"}'
     parts: list[str] = []
-    usage: dict = {}
     try:
         async for delta in llm.stream_chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}], llm.LIGHT, api_key, usage
+            [{"role": "system", "content": system}, {"role": "user", "content": user}], llm.LIGHT, api_key
         ):
             parts.append(delta)
-        if usage.get("cost"):
-            await asyncio.to_thread(store.add_spend, usage["cost"])
         text = "".join(parts)
         obj = json.loads(text[text.find("{"): text.rfind("}") + 1])
         op = obj.get("op")
@@ -259,17 +264,14 @@ async def _write_summary(conversation_id: str, span: list[dict], api_key: str) -
 async def _llm_summary(span: list[dict], api_key: str) -> tuple[str, dict]:
     """Best-effort episodic summary. Soft-fails to a first-user-line fallback --
     a bad parse must NOT raise, or the cursor would never advance (rule 5)."""
-    convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in span)
+    convo = _render_span(span)
     parts: list[str] = []
-    usage: dict = {}
     try:
         async for delta in llm.stream_chat(
             [{"role": "system", "content": _SUMMARY_SYSTEM}, {"role": "user", "content": convo}],
-            llm.LIGHT, api_key, usage,
+            llm.LIGHT, api_key,
         ):
             parts.append(delta)
-        if usage.get("cost"):
-            await asyncio.to_thread(store.add_spend, usage["cost"])
         text = "".join(parts)
         obj = json.loads(text[text.find("{"): text.rfind("}") + 1])
         summary = (obj.get("summary") or "").strip()

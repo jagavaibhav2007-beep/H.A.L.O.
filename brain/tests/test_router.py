@@ -69,7 +69,13 @@ async def _run_async_checks() -> None:
         words.append(delta)
     reply = " ".join(words)
     assert reply == f"stub reply from {LIGHT}: hello world", reply
-    assert usage == {"cost": 0.0}, usage
+    # usage_out now carries the full accounting shape (systemdesign/14 Track C),
+    # all zeros under the stub since no real call was made. Accumulation across
+    # rounds is pinned separately in test_usage.py.
+    assert usage == {
+        "cost": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
+        "cached_tokens": 0, "reasoning_tokens": 0,
+    }, usage
 
     ok = await validate_key("unused")
     assert ok is True

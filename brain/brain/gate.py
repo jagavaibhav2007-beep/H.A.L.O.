@@ -228,6 +228,32 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
 _RESULT_CAP = 8 * 1024  # serialized tool-result bytes fed back to the model
 
 
+def _cap_result(out) -> tuple[str, int]:
+    """Serialize a tool result under _RESULT_CAP, returning (json, omitted).
+
+    Slicing already-serialized JSON to a byte cap (the old behavior) cut the
+    string mid-token, so the model got un-parseable output. Instead: for lists
+    (dir_list/file_search -- the only genuinely unbounded results, and Track A
+    orders them newest/most-relevant first) drop trailing entries until the
+    JSON fits, so what remains is always valid. Non-list results (str/dict)
+    are already self-capped by their own tools (file_read's 8KB, run_cmd's
+    head/tail elision); if one ever isn't, fall back to a marked byte-slice
+    rather than silently emit invalid JSON.
+    """
+    def dump(x) -> str:
+        return json.dumps(x, ensure_ascii=False, default=str)
+
+    payload = dump(out)
+    if len(payload) <= _RESULT_CAP:
+        return payload, 0
+    if isinstance(out, list):
+        kept = out
+        while len(kept) > 1 and len(dump(kept)) > _RESULT_CAP:
+            kept = kept[: len(kept) // 2]
+        return dump(kept), len(out) - len(kept)
+    return payload[:_RESULT_CAP] + " …[truncated]", 0
+
+
 async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broadcast) -> dict:
     """Non-interrupting execution tail: run fn + record (with inverse, D7) +
     emit activity. Shared by gated_execute and handle_undo -- C-UNDO: undo
@@ -271,11 +297,10 @@ async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broad
             if out is None:
                 content = f"I ran {tool}."
             else:
-                payload = json.dumps(out, ensure_ascii=False, default=str)
-                if len(payload) > _RESULT_CAP:
-                    # ponytail: 8KB of tool output into the prompt; spill-to-file if one ever needs more.
-                    payload = payload[:_RESULT_CAP] + " …[truncated]"
+                payload, omitted = _cap_result(out)
                 extra = " (no matches)" if out == [] else ""
+                if omitted:
+                    extra += f" [{omitted} more result(s) omitted at the {_RESULT_CAP // 1024}KB cap; narrow the query]"
                 content = f"I ran {tool}. Result: {payload}{extra}."
         except GraphInterrupt:
             raise  # C2: a tool must never swallow the suspension signal

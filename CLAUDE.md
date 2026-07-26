@@ -157,7 +157,7 @@ Before doing non-trivial work, check whether an available skill or agent already
 - **[mem/Gotchas.md](mem/Gotchas.md)** — non-obvious traps: port ephemeral, shutdown flag ordering, StrictMode double-invoke, Tauri window-state plugin gotchas.
 - **[mem/Patterns.md](mem/Patterns.md)** — established patterns for common tasks (event store, mock design, etc.).
 - **[mem/Decisions.md](mem/Decisions.md)** — why certain design choices were made (e.g., why orb is user-resizable, why all-edge resize was replaced with corner grip).
-- **[mem/MigrationLog.md](mem/MigrationLog.md)** — database schema changes, newest first (currently at v2 — memory v2's consolidation/episodic/bi-temporal columns, upgraded in place from the Phase 2 v1 schema).
+- **[mem/MigrationLog.md](mem/MigrationLog.md)** — database schema changes, newest first (currently at v3 — the `doc_digest` content-hash cache table, added additively on top of memory v2's consolidation/episodic/bi-temporal columns). Upgrades are single-hop: `_run_migrations` takes a v1 DB straight to `SCHEMA_VERSION` in one transaction, never landing on an intermediate version.
 
 **Before implementing or debugging:** check `mem/Bugs.md` for similar symptoms and "Never do" rules. Before starting a new feature, check `mem/Decisions.md` to understand prior reasoning. **Update mem/ at the end of your session** if you:
 - Hit a new bug (add to Bugs.md with root cause and "Never do" rule).

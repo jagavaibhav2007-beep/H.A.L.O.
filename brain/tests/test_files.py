@@ -224,6 +224,23 @@ async def check_readonly_cmd() -> None:
     print("[check 6] run_readonly_cmd: allowed git works; outside roots and dangerous options refused: OK")
 
 
+async def check_cmd_head_tail_truncation() -> None:
+    # This repo's own `git log` comfortably exceeds the head+tail cap -- no
+    # fixture needed. Layer 0 (systemdesign/13-document-ingestion.md) wants
+    # head+tail with the middle elided, not head-only, so both ends must
+    # survive and a note must name what's missing.
+    FRAMES.clear()
+    res = await gate.gated_execute(
+        "run_readonly_cmd", {"cmd": "git log"},
+        conversation_id="files-test", task_id=None, broadcast=broadcast,
+    )
+    content = res["messages"][0]["content"]
+    assert "elided from the middle" in content, content
+    cap = files._CMD_HEAD_CAP + files._CMD_TAIL_CAP
+    assert len(content) < cap + 2048, "truncated content should stay close to the head+tail cap"
+    print("[check 12] run_readonly_cmd stdout truncates head+tail with the middle elided, not head-only: OK")
+
+
 def check_resolve() -> None:
     home = Path.home()
     # Bare/relative paths anchor at home, NOT the Brain's CWD (the bug that sent
@@ -257,7 +274,10 @@ async def check_search() -> None:
         conversation_id="files-test", task_id=None, broadcast=broadcast,
     )
     empty = res["messages"][0]["content"]
-    assert "[]" in empty and "no matches" in empty, empty
+    # Track A: flat-text result. An empty search reads as an explicit "0 of 0"
+    # header (was the JSON "[]" + gate's "no matches" suffix) so the model can't
+    # confabulate a result from a content-free ack.
+    assert "0 of 0" in empty, empty
 
     escaped = await gate.gated_execute(
         "file_search", {"path": str(ROOT), "pattern": "../*"},
@@ -292,9 +312,9 @@ def check_bounded_read_and_hash() -> None:
     p = ROOT / "large.txt"
     p.write_bytes(b"a" * (files._READ_CAP + 4096))
     text = files._file_read({"path": str(p)})
-    assert "truncated at 64KB" in text
+    assert "truncated at 8KB" in text and "offset=" in text
     assert files._sha(p) == _sha(p)
-    print("[check 11] file reads truncate and streaming hash preserves the digest: OK")
+    print("[check 11] file reads truncate at 8KB with a pageable offset note; streaming hash preserves the digest: OK")
 
 
 def check_traversal() -> None:
@@ -304,6 +324,63 @@ def check_traversal() -> None:
     print("[check 7] traversal: ..\\..\\ paths resolve outside roots -> Tier 3: OK")
 
 
+def check_dir_list_ordering() -> None:
+    # Track A core: the answer to "latest" is the ORDER, not a full read.
+    import time as _time
+    d = ROOT / "listing"
+    d.mkdir(exist_ok=True)
+    for name, age in (("old.txt", 300), ("mid.txt", 200), ("new.txt", 100)):
+        f = d / name
+        f.write_text("x", encoding="utf-8")
+        t = _time.time() - age
+        os.utime(f, (t, t))
+    (d / "sub").mkdir(exist_ok=True)
+    out = files._dir_list({"path": str(d)})
+    header, *body = out.splitlines()
+    order = [ln.split()[-1] for ln in body]
+    assert order.index("new.txt") < order.index("mid.txt") < order.index("old.txt"), out
+    assert "sub/" in out, "directories must be marked with a trailing slash"
+    assert "newest first" in header, header
+    two = files._dir_list({"path": str(d), "limit": 2})
+    assert len(two.splitlines()) - 1 == 2, two  # header + exactly 2 rows
+    assert "of 4" in two.splitlines()[0], "total count must still be reported when limited"
+    for f in d.glob("*.txt"):
+        f.unlink()
+    (d / "sub").rmdir()
+    d.rmdir()
+    print("[check 13] dir_list: newest-first order, dir '/' suffix, limit bounds rows + reports total: OK")
+
+
+def check_dir_list_skips_unreadable() -> None:
+    # An entry whose stat() raises (OneDrive placeholder, .crdownload, race)
+    # must be skipped and counted, never crash the whole call (the retry loop).
+    import types
+
+    class _Bad:
+        name = "ghost.crdownload"
+        def stat(self): raise OSError("placeholder not materialized")
+        def is_dir(self): raise OSError("placeholder not materialized")
+
+    class _Good:
+        name = "real.txt"
+        def stat(self): return types.SimpleNamespace(st_mtime=1_700_000_000.0, st_size=5)
+        def is_dir(self): return False
+
+    class _FakeScandir:
+        def __enter__(self): return iter([_Bad(), _Good()])
+        def __exit__(self, *a): return False
+
+    orig = files.os.scandir
+    files.os.scandir = lambda _p: _FakeScandir()
+    try:
+        out = files._dir_text(Path(str(ROOT)), 50)
+    finally:
+        files.os.scandir = orig
+    assert "real.txt" in out and "ghost" not in out, out
+    assert "1 unreadable skipped" in out, out
+    print("[check 14] dir_list: an entry whose stat() raises is skipped and counted, not fatal: OK")
+
+
 async def main() -> None:
     check_classify()
     await check_create_undo()
@@ -311,11 +388,14 @@ async def main() -> None:
     await check_move()
     await check_organize()
     await check_readonly_cmd()
+    await check_cmd_head_tail_truncation()
     check_resolve()
     await check_search()
     await check_delete_undo_does_not_overwrite_replacement()
     check_bounded_read_and_hash()
     check_traversal()
+    check_dir_list_ordering()
+    check_dir_list_skips_unreadable()
     print("[brain.files] self-check OK")
 
 
