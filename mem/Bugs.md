@@ -378,3 +378,30 @@
 **Root cause:** the lock-then-send ordering assumed `dispatch` could not throw after being called; it could, and did, on invalid payloads.
 **Fix:** `dispatch` now returns `boolean` instead of throwing — it validates inside its own guard and returns `false` on a rejected frame instead of propagating. `ApprovalCard.approve` sends BEFORE locking and declines to lock when `dispatch` returns `false`, surfacing an inline edit error instead. One shared fix covers all 11 `send*` callers, not just the approval card.
 **Never do:** a function whose caller flips a rule-3 lock immediately after calling it must never be allowed to throw after doing its real work — return a status the caller checks before locking, don't rely on try/catch ordering when the lock and the call are two separate statements.
+
+## Capsule clipped the mic indicator whenever narration rendered (P0-8) — 2026-07-29
+**Severity:** High. Last open P0 from DEEPSCAN_AUDIT.md; deferred twice before for lacking empirical proof.
+**Symptom:** at the capsule's fixed 360×52 size, `grid-template-columns: 1fr auto 1fr` + `white-space:nowrap` + `.narration{max-width:160px}` produced a content floor of ~466px — the right cluster (mic indicator) got amputated whenever narration text was present, contradicting `ui_ux/04-voice.md` ("mic presence must remain visible").
+**Root cause:** an `1fr` grid track refuses to shrink below its content's min-content size unless told otherwise; the narration child had no `min-width:0` to let it actually shrink to the ellipsis-truncated width its own `text-overflow` rule implied.
+**Fix:** `minmax(0, 1fr)` on the grid tracks + `min-width:0` on the narration flex child. Verified empirically (not just by reading CSS) via the browser preview at the real 360×52 size with a 512px-wide narration string injected: `.capsule` scrollWidth == clientWidth (0 overflow), mic indicator's rect fully inside the pill.
+**Never do:** don't mark a CSS overflow finding "fixed" from source reading alone when it was deferred for exactly that reason the first time — measure `scrollWidth`/`getBoundingClientRect()` in the actual running window size.
+
+## An audit's "dead branch" finding was tool-specific; removing it broke a live guard — 2026-07-29
+**Severity:** High (test-breaking regression introduced while fixing the audit's own P2 list).
+**Symptom:** `gate.py`'s `_execute_tail` stopped appending `(no matches)` to an empty tool result, based on the audit's note that "no registered tool returns a list any more." `test_toolcall.py`'s `check_empty_result` (which registers a `[]`-returning test tool specifically to exercise this path) started failing: `assert "no matches" in tool_msg["content"]`.
+**Root cause:** the audit's claim was true for *production* tools but the guard itself is generically useful (any future list-returning tool, and the test tool that already exercises it) — a comment two lines above the removed code explained exactly why it exists ("a content-free ack is what makes the model confabulate 'not found'"), and it was removed without reading that comment or running the test that covers it.
+**Fix:** restored `extra = " (no matches)" if out == [] else ""`.
+**Never do:** treat an audit's "this branch looks dead" as license to delete without first grepping for tests that construct the exact input the branch handles — "no *current* caller reaches this" is not "no test reaches this."
+
+## D2 identical-call suppression contradicted the Layer-1 stub's own instruction — 2026-07-29
+**Severity:** Medium. Found while closing DEEPSCAN_AUDIT.md's P2 list (`graph.py:178` vs `:237`).
+**Symptom:** a large read-only tool result gets Layer-1-stubbed to `"...elided — call the tool again (offset/limit) if you need it]"` once an assistant message follows it. D2's identical-call suppression would then refuse that literal re-call with `"identical call already made this turn — its result is above"` — the model was told to re-fetch and then refused for doing so.
+**Root cause:** D2 keyed suppression on (tool, args) alone, with no awareness that the result it claims is "above" may have since been replaced by a stub telling the model the opposite.
+**Fix:** D2 now only suppresses a repeat whose result is still verbatim in context (`len(content) <= _TOOL_STUB_MIN`) — once a result is stubbed, the re-call is allowed through.
+**Never do:** two independent context-shaping mechanisms (a loop guard, a token-saving eviction) that both rewrite what the model is told about a past tool call must be checked against each other's promises, not just against their own test in isolation.
+
+## A gate script's assertion had been certifying the exact defect a fix removed — 2026-07-29
+**Severity:** Medium. `shared/phase2_check.py`'s `doc_digest` check asserted `rows >= 2` in `digest_cache` after a real-graph run under `HALO_LLM_STUB` (whose reply is always prose → always the degraded path). That assertion was written when degraded digests were still (wrongly) cached forever; once the audit's fix landed ("never cache a degraded digest"), the same code path now correctly writes 0 rows, and the unmodified assertion turned a *correct* fix into a red gate.
+**Root cause:** a deliberate behavior change wasn't matched by an update to the E2E assertion that encoded the old behavior — caught only because the full `-Verify` gate was re-run after the fix, not assumed green from the unit tests alone.
+**Fix:** inverted the assertion to `rows == 0` with a comment explaining why zero is the E2E-correct number under the stub (the happy-path cache-write is exercised in `test_docs.py` instead, which stubs valid JSON in).
+**Never do:** when a fix deliberately inverts a behavior, grep every gate/E2E script for assertions on that behavior's old value — a unit test update alone can leave a "certifying" integration assertion silently wrong until the next full gate run.

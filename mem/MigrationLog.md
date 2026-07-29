@@ -1,6 +1,11 @@
 # Migration Log
 _Database schema changes — newest first._
 
+## v4 (2026-07-29) — action-log retention index, `brain/brain/store.py`
+`PRAGMA user_version` 3 → 4. Additive only, one more `if version < 4:` guard appended to the existing flat cumulative-guard block inside `_run_migrations`'s single `with conn:` transaction — preserves the documented single-hop invariant (a v1 DB goes straight to `SCHEMA_VERSION` in one transaction, never landing on an intermediate version):
+- `CREATE INDEX IF NOT EXISTS idx_action_ts ON action(ts DESC)` — `recent_actions` and the new `prune_actions` retention sweep (DEEPSCAN_AUDIT.md Tranche 1: the `action` table had no retention despite being spec'd as a rolling window) were full-scanning on every connect × 2 webviews without it.
+No new tables; the retention sweep itself is application logic (`store.prune_actions`), not a schema object — it exempts rows with an unconsumed `undo_token` so a live undo is never swept.
+
 ## v3 (2026-07-24) — doc_digest per-document cache, `brain/brain/store.py`
 `PRAGMA user_version` 2 → 3. Additive only, idempotent (`CREATE TABLE IF NOT EXISTS`, runs on both the fresh-create and every upgrade path):
 - New `digest_cache(path, sha256, digest_version, digest_json, created_at)`, `PRIMARY KEY (path, sha256, digest_version)` — one cached JSON digest per (file content, digest schema version). `doc_digest` (Layer 2, systemdesign/13-document-ingestion.md) checks it before its per-doc map LLM call; an unchanged file digests for ~0. Bumping `DIGEST_VERSION` in `brain/brain/tools/docs.py` invalidates all cached digests without a schema change.
