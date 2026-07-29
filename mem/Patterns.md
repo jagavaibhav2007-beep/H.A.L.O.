@@ -1,6 +1,12 @@
 # Patterns
 _Established code patterns and conventions for this project._
 
+## A terminal backend frame may need to converge multiple UI projections at once - 2026-07-27
+Treat conversation turns, approvals, and pending operations as parallel projections of the same backend work, not as parent/child ownership. A single terminal `done` or `error` can legitimately need to close more than one of them in one reducer pass. `ui/src/state/reducer.ts` now resolves approval state by `conversation_id` even when the assistant turn is already closed, and it applies correlated operation failure plus conversation cleanup from the same frame. Reuse this shape for any new projection: if two UI surfaces are owned by the same backend turn, converge both from the same terminal frame instead of making one conditional on the other's local state still being open.
+
+## Persist multi-chat history only after the send boundary - 2026-07-27
+For the conversation registry, an opened tab is draft UI state, not durable history. `ui/src/state/conversations.ts` now records `hasUserMessage` only after a non-empty submitted message and persists a closed tab to Recent only if that flag is true. Reuse this rule for any future task/chat draft surface: creating or focusing a shell does not mean the user started something; persistence begins when they cross the action boundary (here: Send). Preserve legacy records conservatively when introducing the marker so real short conversations are not dropped during migration.
+
 ## Compute expensive work before taking a lock, lock only the critical section — 2026-07-23
 `store.py`'s `add_belief`/`update_belief`/`search_beliefs` used to run embedding inference (including first-run model load) *inside* `_OP_LOCK`, serializing every store-touching turn behind it. Fixed by computing the embedding first (unlocked), then taking the lock only around the SQL, passing the precomputed vector in. Reuse this shape any time a locked section does one cheap deterministic op (SQL write) plus one expensive/variable-latency op (model inference, network call, file I/O): split them, lock only the cheap deterministic part.
 

@@ -2,9 +2,11 @@
 
 Curated, short, self-maintaining. The "second brain." Local only.
 
-> **Status:** v2 is the approved target design; the v1 write path (per-turn
-> extraction) is implemented and being replaced. Sections marked **[v2 new]**
-> are not yet built. Everything else is live behavior that v2 keeps.
+> **Status:** v2 is **implemented.** M1–M3 shipped — span consolidation with the
+> AUDN decision matrix replaced the v1 per-turn extraction write path, and the
+> schema migrated through v2 (consolidation/episodic/bi-temporal columns) to v3
+> (the `doc_digest` content-hash cache). Sections marked **[v2 new]** describe
+> live behavior, not a plan; see `mem/MigrationLog.md` for the schema history.
 >
 > **Why v2:** measured after 3 days of real use, the v1 write path had turned
 > one user statement into ~8 near-duplicate belief rows, 60% of the table was
@@ -156,6 +158,8 @@ cursor advances. Memory stays short by design.
   `belief_state` frames). Contract addition mirrored in
   `shared/ipc-contract.json`, both contract mirrors, and the mock, per the
   standard new-message-type checklist.
+- Permanent removal is a separate, explicit archived-view action. The Brain
+  rejects purge requests for active or superseded history.
 - The memory panel gains a "Sessions" section (Phase 3 UI) listing session
   summaries; summaries are not part of the connect snapshot.
 
@@ -185,7 +189,8 @@ cursor advances. Memory stays short by design.
    distance-only dedup and the first-3-words `_contradicts` heuristic.
 3. **M3 — episodic layer:** `session_summary` table + retrieval prepend +
    `valid_at`/`invalid_at` migration (schema v2 in mem/MigrationLog.md).
-4. **M4 — panel history:** `memory_query` contract addition + Sessions UI.
+4. **M4 — panel history:** `memory_query` and archived/superseded belief
+   hydration are shipped. The Sessions UI remains Phase 3.
 
 ## References (research 2026-07-23)
 

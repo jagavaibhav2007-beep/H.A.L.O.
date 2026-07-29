@@ -14,7 +14,11 @@ export function usePendingConfirm<T>(
 ) {
   type Entry = {
     label: string;
-    confirms: (value: T | undefined) => boolean;
+    // Undefined = no semantic predicate: unlock on any change to collection[key]
+    // (the right default for primitive collections like settings status strings,
+    // where there is no entity identity to compare — see `begin`).
+    confirms?: (value: T | undefined) => boolean;
+    baselineValue?: T;
     errorKey?: string;
     baselineErrorId?: string;
   };
@@ -27,7 +31,10 @@ export function usePendingConfirm<T>(
     const next = { ...entriesRef.current };
     for (const [key, entry] of Object.entries(entriesRef.current)) {
       const failure = entry.errorKey ? operationErrors[entry.errorKey] : undefined;
-      if (entry.confirms(collection[key]) || (failure && failure.id !== entry.baselineErrorId)) {
+      const confirmed = entry.confirms
+        ? entry.confirms(collection[key])
+        : !Object.is(collection[key], entry.baselineValue);
+      if (confirmed || (failure && failure.id !== entry.baselineErrorId)) {
         delete next[key];
         if (failure) setFailures((current) => ({ ...current, [key]: failure.message }));
         changed = true;
@@ -42,14 +49,20 @@ export function usePendingConfirm<T>(
   const begin = (
     key: string,
     label: string,
-    confirms: Entry["confirms"] = () => false,
+    confirms?: Entry["confirms"],
     operationKind?: OperationKind,
   ) => {
     if (entriesRef.current[key]) return false;
     const errorKey = operationKind ? operationCorrelationKey(operationKind, key) : undefined;
     const next = {
       ...entriesRef.current,
-      [key]: { label, confirms, errorKey, baselineErrorId: errorKey ? operationErrors[errorKey]?.id : undefined },
+      [key]: {
+        label,
+        confirms,
+        baselineValue: collection[key],
+        errorKey,
+        baselineErrorId: errorKey ? operationErrors[errorKey]?.id : undefined,
+      },
     };
     setFailures((current) => {
       if (!(key in current)) return current;

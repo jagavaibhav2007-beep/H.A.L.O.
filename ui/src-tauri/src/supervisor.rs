@@ -1,16 +1,17 @@
 // Phase 0 Step 6 — Tauri sidecar spawn & supervision with backoff.
 // Spec: systemdesign/11-ipc-contract.md "Process lifecycle" / phase-0-plan.md Step 6.
 
+use crate::log;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
@@ -151,37 +152,142 @@ fn backoff_delay(attempt: u32) -> Option<Duration> {
 /// part of a crash loop — its next restart gets a clean slate at 1s.
 const HEALTHY_UPTIME: Duration = Duration::from_secs(10);
 
-// ponytail: dev-mode cwd resolution walks up from the cargo manifest dir
-// (ui/src-tauri) to the repo root. The packaged-binary phase (sidecar
-// externalBin) replaces this with a resource-dir-relative path.
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent() // ui/
-        .expect("ui/src-tauri has a parent")
-        .parent() // repo root
-        .expect("ui/ has a parent")
-        .to_path_buf()
+/// The rung the *next* restart starts from, given how long the child that just
+/// exited stayed up. This — not `backoff_delay`'s table — is what decides
+/// whether a restart waits 1s or 30s.
+fn attempt_after_exit(attempt: u32, uptime: Duration) -> u32 {
+    if uptime > HEALTHY_UPTIME {
+        0
+    } else {
+        attempt
+    }
 }
 
-fn python_cmd(module: &str) -> Command {
-    let mut cmd = Command::new("python");
-    cmd.args(["-m", module]).current_dir(repo_root().join(module));
-    cmd
+/// CREATE_NO_WINDOW. `python.exe` is console-subsystem, so a GUI-subsystem
+/// parent (any release build — see `main.rs`) otherwise pops a visible console
+/// window per sidecar and per version probe.
+#[cfg(windows)]
+fn no_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000);
 }
 
-fn brain_cmd() -> Command {
-    let mut cmd = python_cmd("brain");
+#[cfg(not(windows))]
+fn no_window(_cmd: &mut Command) {}
+
+/// Mirrors `_python.ps1`'s `Resolve-PythonLauncher`: try `python`, then `py -3`,
+/// each with a real *version probe* rather than a PATH-presence check. Presence
+/// is not enough — with no Python installed Windows resolves `python` to the
+/// Store alias, which spawns successfully and exits immediately, so the
+/// supervisor reports a crash loop and the diagnosis points at the wrong thing.
+///
+/// ponytail: the ps1's remaining branches (an explicit launcher override and a
+/// bundled `codex-runtimes` scan) are deliberately not mirrored — both exist for
+/// CI/agent sandboxes, where the native app never runs, and `dev.ps1` itself
+/// calls `Resolve-PythonLauncher` with no override.
+fn probe_python(cmd: &str, prefix: &[&str]) -> bool {
+    let mut probe = Command::new(cmd);
+    probe
+        .args(prefix)
+        .args([
+            "-c",
+            "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    no_window(&mut probe);
+    matches!(probe.status(), Ok(status) if status.success())
+}
+
+fn python_launcher() -> Option<(&'static str, &'static [&'static str])> {
+    static LAUNCHER: OnceLock<Option<(&'static str, &'static [&'static str])>> = OnceLock::new();
+    *LAUNCHER.get_or_init(|| {
+        [("python", &[][..]), ("py", &["-3"][..])]
+            .into_iter()
+            .find(|(cmd, prefix)| probe_python(cmd, prefix))
+    })
+}
+
+/// Repo root, resolved at *runtime* by walking up from the running executable
+/// to the first directory holding both sidecar packages. A compile-time path
+/// must not survive into a shipped binary — `CARGO_MANIFEST_DIR` bakes in the
+/// build machine's checkout path whether or not it is ever read — so that
+/// fallback is debug-only, where it keeps `tauri dev` behaving exactly as before.
+fn repo_root() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        for dir in exe.ancestors() {
+            if dir.join("brain").join("brain").is_dir() && dir.join("voice").is_dir() {
+                return Some(dir.to_path_buf());
+            }
+        }
+    }
+    #[cfg(debug_assertions)]
+    return PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2) // ui/src-tauri -> ui -> repo root
+        .map(|root| root.to_path_buf());
+    #[cfg(not(debug_assertions))]
+    None
+}
+
+/// ponytail: prefers a bundled sidecar binary when one is present. The other
+/// half of packaging — a PyInstaller build step that actually produces
+/// `resources/sidecars/halo-<module>.exe`, plus the `bundle.resources` entry to
+/// ship it — is NOT written, so today this always misses and falls through to
+/// the source run below. Nothing about behaviour changes until that step exists.
+fn bundled_sidecar(app: &AppHandle, module: &str) -> Option<PathBuf> {
+    let exe = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join("sidecars")
+        .join(format!("halo-{module}{}", std::env::consts::EXE_SUFFIX));
+    exe.is_file().then_some(exe)
+}
+
+fn sidecar_cmd(app: &AppHandle, module: &'static str) -> Result<Command, String> {
+    let mut cmd = match bundled_sidecar(app, module) {
+        Some(exe) => Command::new(exe),
+        None => {
+            let (launcher, prefix) = python_launcher().ok_or_else(|| {
+                format!("Python 3.11+ not found (tried `python` and `py -3`); cannot start {module}")
+            })?;
+            let root = repo_root().ok_or_else(|| {
+                format!("could not locate the Halo source tree from {:?}", std::env::current_exe())
+            })?;
+            let mut cmd = Command::new(launcher);
+            cmd.args(prefix).args(["-m", module]).current_dir(root.join(module));
+            cmd
+        }
+    };
+    // Child stdout/stderr go to a file, not the parent's console: in a release
+    // build there is no console to inherit, so this is the only place a sidecar
+    // traceback can be read from.
+    if let Some(dir) = crate::halo_dir() {
+        if let Ok(out) = crate::open_log(dir, &format!("{module}.log")) {
+            if let Ok(err) = out.try_clone() {
+                cmd.stdout(out).stderr(err);
+            }
+        }
+    }
+    no_window(&mut cmd);
+    Ok(cmd)
+}
+
+fn brain_cmd(app: &AppHandle) -> Result<Command, String> {
+    let mut cmd = sidecar_cmd(app, "brain")?;
     // ponytail: HALO_MOCK=1 (set by dev.ps1 -Mock) runs the supervised Brain
     // as the scripted mock scenario player. An env var, not a Cargo feature,
     // because it's a dev-time toggle, not a compile-time one.
     if matches!(std::env::var("HALO_MOCK").as_deref(), Ok("1")) {
         cmd.arg("--mock");
     }
-    cmd
+    Ok(cmd)
 }
 
-fn voice_cmd() -> Command {
-    python_cmd("voice")
+fn voice_cmd(app: &AppHandle) -> Result<Command, String> {
+    sidecar_cmd(app, "voice")
 }
 
 /// One rung of the ladder: sleeps and returns true to retry, or emits the
@@ -225,7 +331,7 @@ fn publish_child(shared: &Shared, shutdown: &AtomicBool, mut child: Child) -> bo
 fn supervise(
     app: AppHandle,
     name: &'static str,
-    mk_cmd: fn() -> Command,
+    mk_cmd: fn(&AppHandle) -> Result<Command, String>,
     shared: Shared,
     shutdown: Arc<AtomicBool>,
     statuses: Arc<SidecarStatuses>,
@@ -238,10 +344,12 @@ fn supervise(
                 return;
             }
             emit_state(&app, &statuses, name, "starting");
-            let mut child = match mk_cmd().spawn() {
+            let spawned = mk_cmd(&app)
+                .and_then(|mut cmd| cmd.spawn().map_err(|e| format!("failed to spawn {name}: {e}")));
+            let mut child = match spawned {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("halo: failed to spawn {name}: {e}");
+                    log(&format!("halo: {e}"));
                     if backoff_or_error(&app, &statuses, name, &mut attempt) {
                         continue;
                     }
@@ -249,19 +357,24 @@ fn supervise(
                 }
             };
             if let Err(error) = process_job.assign(&child) {
-                eprintln!("halo: {error}");
+                log(&format!("halo: {error}"));
                 match child.kill() {
                     Ok(()) => {
                         let _ = child.wait();
-                        if backoff_or_error(&app, &statuses, name, &mut attempt) {
-                            continue;
-                        }
                     }
-                    Err(kill_error) => {
-                        eprintln!("halo: failed to terminate unowned {name}: {kill_error}");
-                        *shared.lock().unwrap() = Some(child);
-                        emit_state(&app, &statuses, name, "error");
-                    }
+                    // ponytail: an unkillable, un-job-assigned child is an
+                    // orphan we can neither reap nor rely on KILL_ON_JOB_CLOSE
+                    // to take down. Parking it in `shared` never helped — the
+                    // next publish_child overwrites the slot and drops the
+                    // handle anyway — so log it and keep supervising. Abandoning
+                    // the ladder here was the only branch that stranded a
+                    // sidecar in "error" with no restart short of an app relaunch.
+                    Err(kill_error) => log(&format!(
+                        "halo: failed to terminate unowned {name} (orphaned): {kill_error}"
+                    )),
+                }
+                if backoff_or_error(&app, &statuses, name, &mut attempt) {
+                    continue;
                 }
                 return;
             }
@@ -289,7 +402,7 @@ fn supervise(
                         }
                         Err(error) => {
                             wait_errors += 1;
-                            eprintln!("halo: failed to poll {name} (attempt {wait_errors}/3): {error}");
+                            log(&format!("halo: failed to poll {name} (attempt {wait_errors}/3): {error}"));
                             if wait_errors < 3 {
                                 false
                             } else {
@@ -299,7 +412,7 @@ fn supervise(
                                         true
                                     }
                                     Err(kill_error) => {
-                                        eprintln!("halo: failed to terminate {name}: {kill_error}");
+                                        log(&format!("halo: failed to terminate {name}: {kill_error}"));
                                         wait_errors = 0;
                                         false
                                     }
@@ -322,9 +435,7 @@ fn supervise(
                 thread::sleep(Duration::from_millis(200));
             }
 
-            if start.elapsed() > HEALTHY_UPTIME {
-                attempt = 0;
-            }
+            attempt = attempt_after_exit(attempt, start.elapsed());
             if !backoff_or_error(&app, &statuses, name, &mut attempt) {
                 return;
             }
@@ -403,6 +514,29 @@ mod tests {
         assert_eq!(backoff_delay(2), Some(Duration::from_secs(30)));
         assert_eq!(backoff_delay(3), None);
         assert_eq!(backoff_delay(100), None);
+    }
+
+    #[test]
+    fn healthy_uptime_resets_the_ladder_but_a_crash_loop_keeps_climbing() {
+        let healthy = HEALTHY_UPTIME + Duration::from_secs(1);
+        let crashy = Duration::from_secs(1);
+
+        // A child that lived past the threshold restarts at the 1s rung...
+        assert_eq!(attempt_after_exit(2, healthy), 0);
+        assert_eq!(
+            backoff_delay(attempt_after_exit(2, healthy)),
+            Some(Duration::from_secs(1))
+        );
+        // ...one that died immediately stays where the ladder left it.
+        assert_eq!(attempt_after_exit(2, crashy), 2);
+        assert_eq!(
+            backoff_delay(attempt_after_exit(2, crashy)),
+            Some(Duration::from_secs(30))
+        );
+        // Exactly HEALTHY_UPTIME does not count as healthy (strictly greater),
+        // and a crash loop still reaches exhaustion.
+        assert_eq!(attempt_after_exit(3, HEALTHY_UPTIME), 3);
+        assert_eq!(backoff_delay(attempt_after_exit(3, crashy)), None);
     }
 
     #[test]

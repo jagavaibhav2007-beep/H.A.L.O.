@@ -17,37 +17,47 @@ import {
   selectVoice,
   selectChats,
   selectOperationErrors,
+  selectCapabilities,
 } from "../state/store";
 import type { AssistantTurn, Turn } from "../state/reducer";
 import type { ActivityMsg } from "../ipc/contract";
 import "./ChatView.css";
 
-const EXAMPLE_CHIPS = ["demo everything", "demo task", "demo voice"];
+const REAL_EXAMPLE_CHIPS = [
+  "Summarize a file",
+  "Search my files",
+  "What do you remember about me?",
+];
+const DEMO_EXAMPLE_CHIPS = ["demo everything", "demo task", "demo voice"];
 
 interface ChatViewProps {
   conversationId: string;
   connState: ConnState;
   sendUserMsg: (conversationId: string, text: string) => void;
+  sendInterrupt: (conversationId: string) => string;
   sendMic: (op: "mute" | "unmute") => void;
   /** Kept on the real textarea so the workspace's Ctrl+K focus still lands. */
   inputId: string;
 }
 
-export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inputId }: ChatViewProps) {
+export function ChatView({ conversationId, connState, sendUserMsg, sendInterrupt, sendMic, inputId }: ChatViewProps) {
   const conv = useHaloStore(selectConversation(conversationId));
   const activities = useHaloStore(selectActivities);
   const voice = useHaloStore(selectVoice);
   const operationErrors = useHaloStore(selectOperationErrors);
+  const capabilities = useHaloStore(selectCapabilities);
   // Against the real Brain there is no voice capture yet, so a mic toggle comes
   // back as an operation_unsupported error (correlated by envelope id, so keyed
   // "mic:<uuid>"). Nothing else renders that error, so surface it here: once
   // one arrives, the mic control is honestly disabled instead of dead. In mock
   // mode voice_state confirms the toggle and no such error is ever produced.
-  const micUnsupported = useMemo(
+  const micRejected = useMemo(
     () => Object.keys(operationErrors).some((k) => k.startsWith("mic:")),
     [operationErrors],
   );
+  const micUnavailable = capabilities.voiceInput !== true || micRejected;
   const appendUserTurn = useHaloStore((s) => s.appendUserTurn);
+  const appendLocalUserTurn = useHaloStore((s) => s.appendLocalUserTurn);
   const acknowledgeInputRestore = useHaloStore((s) => s.acknowledgeInputRestore);
   const titleFromMessage = useHaloStore((s) => s.titleFromMessage);
   const chats = useHaloStore(selectChats);
@@ -58,7 +68,11 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   const pinnedRef = useRef(true); // autoscroll only while the user sits at the bottom (rule 6)
 
   const turns = conv?.turns ?? [];
+  const activeAssistantId = turns.find(
+    (turn): turn is AssistantTurn => turn.role === "assistant" && turn.status === "streaming",
+  )?.id;
   const input = drafts[conversationId] ?? "";
+  const exampleChips = capabilities.demoScenarios ? DEMO_EXAMPLE_CHIPS : REAL_EXAMPLE_CHIPS;
   // Live voice transcript for THIS conversation, still being spoken -> ghost text.
   const ghost =
     voice.transcript && !voice.transcript.final && voice.transcript.conversationId === conversationId
@@ -68,14 +82,29 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   const send = useCallback(
     (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed) return;
+      if (!trimmed || connState === "incompatible") return;
       lastSentRef.current[conversationId] = trimmed;
+      if (activeAssistantId && trimmed.toLowerCase() === "stop") {
+        appendLocalUserTurn(conversationId, trimmed, crypto.randomUUID());
+        sendInterrupt(conversationId);
+        setDrafts((current) => ({ ...current, [conversationId]: "" }));
+        return;
+      }
       appendUserTurn(conversationId, trimmed, crypto.randomUUID());
       titleFromMessage(conversationId, trimmed); // no-ops unless still untitled
       sendUserMsg(conversationId, trimmed);
       setDrafts((current) => ({ ...current, [conversationId]: "" }));
     },
-    [appendUserTurn, titleFromMessage, conversationId, sendUserMsg],
+    [
+      activeAssistantId,
+      appendLocalUserTurn,
+      appendUserTurn,
+      titleFromMessage,
+      conversationId,
+      connState,
+      sendInterrupt,
+      sendUserMsg,
+    ],
   );
 
   // rule 8: on error/disconnect the user's text is restored to the box so a
@@ -120,20 +149,23 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   // panel that reads as data loss.
   const restored = empty && chats.all.find((c) => c.id === conversationId)?.restored;
   const latestAssistant = [...turns].reverse().find((turn): turn is AssistantTurn => turn.role === "assistant");
+  // First person, one sentence, plain (ui_ux/00-design-language.md "Voice of
+  // the interface") — these are screen-reader-only (the sr-only live region
+  // below), so the copy voice rule still applies even though sighted users
+  // never see the text.
   const connectionStatus =
     connState === "incompatible"
-      ? "Halo is running a different protocol version. Please restart the app to update."
+      ? "I'm running a different protocol version — please restart the app to update."
       : connState === "reconnecting"
-        ? "Halo is reconnecting. Messages will send when reconnected."
+        ? "I'm reconnecting. Your message will send once I'm back."
         : connState === "connecting"
-          ? "Halo is connecting. Messages will send when connected."
+          ? "I'm connecting. Your message will send once I'm here."
           : latestAssistant?.status === "streaming"
-            ? "Halo is thinking."
+            ? "I'm thinking."
             : latestAssistant?.status === "done"
-              ? "Halo response complete."
+              ? "I'm done."
               : "";
-  const latestError =
-    latestAssistant?.status === "error" ? latestAssistant.error?.message ?? "Halo could not answer." : "";
+  const latestError = latestAssistant?.status === "error" ? latestAssistant.error?.message ?? "I couldn't answer that." : "";
 
   return (
     <div className="chat-view">
@@ -155,8 +187,14 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
               <>
                 <p className="chat-empty-line">Ask me anything, or just say "Halo".</p>
                 <div className="chat-empty-chips">
-                  {EXAMPLE_CHIPS.map((c) => (
-                    <button key={c} type="button" className="chat-chip" onClick={() => send(c)}>
+                  {exampleChips.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className="chat-chip"
+                      disabled={connState === "incompatible"}
+                      onClick={() => send(c)}
+                    >
                       {c}
                     </button>
                   ))}
@@ -166,9 +204,22 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
           </div>
         ) : (
           <div className="chat-turns">
-            {turns.map((t) => (
-              <TurnRow key={t.id} turn={t} activities={activities} />
-            ))}
+            {turns.map((t, index) => {
+              const retryText =
+                t.role === "assistant" && t.status === "error" && t.error?.recoverable
+                  ? [...turns.slice(0, index)].reverse().find((turn) => turn.role === "user")?.text
+                  : undefined;
+              return (
+                <TurnRow
+                  key={t.id}
+                  turn={t}
+                  activities={activities}
+                  canInterrupt={t.role === "assistant" && t.id === activeAssistantId}
+                  onInterrupt={() => sendInterrupt(conversationId)}
+                  onRetry={retryText ? () => send(retryText) : undefined}
+                />
+              );
+            })}
             {ghost && <GhostBubble text={ghost} />}
           </div>
         )}
@@ -180,12 +231,12 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
           type="button"
           className="chat-input-mic"
           data-muted={voice.state === "muted" || undefined}
-          data-unavailable={micUnsupported || undefined}
-          disabled={micUnsupported}
-          title={micUnsupported ? "Voice input isn't available yet." : undefined}
+          data-unavailable={micUnavailable || undefined}
+          disabled={micUnavailable}
+          title={micUnavailable ? "Voice input isn't available in this build." : undefined}
           aria-label={
-            micUnsupported
-              ? "Voice input isn't available yet"
+            micUnavailable
+              ? "Voice input unavailable"
               : voice.state === "muted"
                 ? "Unmute mic"
                 : "Mute mic"
@@ -204,7 +255,8 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
             setDrafts((current) => ({ ...current, [conversationId]: value }));
           }}
           onKeyDown={onKeyDown}
-          placeholder="Message Halo…"
+          disabled={connState === "incompatible"}
+          placeholder={connState === "incompatible" ? "Restart Halo to continue…" : "Message Halo…"}
           rows={1}
         />
         {connState === "incompatible" ? (
@@ -217,7 +269,19 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendMic, inpu
   );
 }
 
-function TurnRow({ turn, activities }: { turn: Turn; activities: ActivityMsg[] }) {
+function TurnRow({
+  turn,
+  activities,
+  canInterrupt,
+  onInterrupt,
+  onRetry,
+}: {
+  turn: Turn;
+  activities: ActivityMsg[];
+  canInterrupt: boolean;
+  onInterrupt: () => string;
+  onRetry?: () => void;
+}) {
   if (turn.role === "user") {
     return (
       <div className="chat-turn chat-turn-user">
@@ -228,10 +292,37 @@ function TurnRow({ turn, activities }: { turn: Turn; activities: ActivityMsg[] }
       </div>
     );
   }
-  return <AssistantRow turn={turn} activities={activities} />;
+  return (
+    <AssistantRow
+      turn={turn}
+      activities={activities}
+      canInterrupt={canInterrupt}
+      onInterrupt={onInterrupt}
+      onRetry={onRetry}
+    />
+  );
 }
 
-function AssistantRow({ turn, activities }: { turn: AssistantTurn; activities: ActivityMsg[] }) {
+function AssistantRow({
+  turn,
+  activities,
+  canInterrupt,
+  onInterrupt,
+  onRetry,
+}: {
+  turn: AssistantTurn;
+  activities: ActivityMsg[];
+  canInterrupt: boolean;
+  onInterrupt: () => string;
+  onRetry?: () => void;
+}) {
+  const [stopping, setStopping] = useState(false);
+  const [interruptId, setInterruptId] = useState<string | null>(null);
+  const operationErrors = useHaloStore(selectOperationErrors);
+  const interruptError = interruptId ? operationErrors[`interrupt:${interruptId}`] : undefined;
+  useEffect(() => {
+    if (interruptError) setStopping(false);
+  }, [interruptError]);
   const thinking = turn.status === "streaming" && turn.text.length === 0;
   return (
     <div className="chat-turn chat-turn-halo">
@@ -248,10 +339,34 @@ function AssistantRow({ turn, activities }: { turn: AssistantTurn; activities: A
         {turn.status === "error" && turn.error && (
           <div className="chat-error">
             <span>{turn.error.message} — the turn is saved; your message is back in the box.</span>
+            {onRetry && (
+              <button type="button" className="chat-retry" onClick={onRetry}>
+                Retry response
+              </button>
+            )}
           </div>
         )}
         {turn.status === "interrupted" && (
           <div className="chat-interrupted">{turn.note ?? "stopped · what should I do differently?"}</div>
+        )}
+        {canInterrupt && (
+          <button
+            type="button"
+            className="chat-stop"
+            aria-label="Stop response"
+            disabled={stopping}
+            onClick={() => {
+              setStopping(true);
+              setInterruptId(onInterrupt());
+            }}
+          >
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
+        )}
+        {interruptError && (
+          <div className="chat-interrupted" role="alert">
+            {interruptError.message}
+          </div>
         )}
       </div>
       {turn.taskId && <WhatIDidRow taskId={turn.taskId} activities={activities} />}

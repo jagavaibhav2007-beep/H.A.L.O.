@@ -64,12 +64,19 @@
   align-items: center;
   gap: 8px;
 }
+/* Same flex min-content trap as .task-title — a long skill name has to be
+   allowed to shrink before it can ellipsize. */
 .skill-name {
+  min-width: 0;
   font-size: var(--text-base);
   font-weight: 500;
   color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .skill-playbook-tag {
+  flex-shrink: 0;
   margin-left: auto;
   padding: 2px 8px;
   border-radius: 999px;
@@ -115,10 +122,10 @@
   max-height: 220px;
   display: flex;
   flex-direction: column;
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   border: 1px solid var(--border);
   background: var(--bg);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-elevated);
 }
 .trial-drawer-head {
   display: flex;
@@ -136,6 +143,10 @@
   font-size: var(--text-title);
   line-height: 1;
   cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-out);
+}
+.trial-drawer-head button:hover {
+  color: var(--text);
 }
 .trial-drawer-body {
   flex: 1;

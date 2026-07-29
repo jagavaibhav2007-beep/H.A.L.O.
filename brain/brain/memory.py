@@ -284,11 +284,12 @@ async def _llm_summary(span: list[dict], api_key: str) -> tuple[str, dict]:
     return ("session: " + first_user)[:_SUMMARY_CHARS], {}
 
 
-async def consolidate_span(conversation_id: str, messages: list[dict], api_key: str, broadcast) -> None:
+async def consolidate_span(conversation_id: str, messages: list[dict], api_key: str, broadcast) -> bool:
     """Core off-hot-path pass over `messages[cursor:]`. Never raises (same
     contract as v1 extract). Advances the cursor ONLY on full success, so any
     failure retries the same span next trigger (rule 5). Shared by the idle/
-    pressure/flush triggers and by startup recovery."""
+    pressure/flush triggers and by startup recovery. Returns True when the span
+    is consolidated (an empty span counts -- there is nothing left to retry)."""
     lock = _consolidate_locks.setdefault(conversation_id, asyncio.Lock())
     async with lock:
         try:
@@ -296,7 +297,7 @@ async def consolidate_span(conversation_id: str, messages: list[dict], api_key: 
             cursor = (meta or {}).get("consolidation_cursor") or 0
             span = messages[cursor:]
             if not span:
-                return  # empty span -> silent no-op (idle/flush/recovery all land here)
+                return True  # empty span -> silent no-op (idle/flush/recovery all land here)
             cands = await _extract_span(span, api_key)
             changed: list[tuple[dict, str | None]] = []
             for cand in cands:
@@ -311,8 +312,10 @@ async def consolidate_span(conversation_id: str, messages: list[dict], api_key: 
                     )
             await _write_summary(conversation_id, span, api_key)
             await asyncio.to_thread(store.set_consolidation_cursor, conversation_id, len(messages))
+            return True
         except Exception:  # noqa: BLE001 - rule 5: cursor stays put, retry next trigger
             logger.exception("consolidation failed for %s (cursor not advanced)", conversation_id)
+            return False
 
 
 async def consolidate(conversation_id: str) -> None:
@@ -320,7 +323,16 @@ async def consolidate(conversation_id: str) -> None:
     entry = _dirty.get(conversation_id)
     if entry is None:
         return
-    await consolidate_span(conversation_id, entry["messages"], entry["api_key"], entry["broadcast"])
+    ok = await consolidate_span(
+        conversation_id, entry["messages"], entry["api_key"], entry["broadcast"]
+    )
+    # Drop the entry once it is consolidated: it pins the conversation's whole
+    # message list AND a live broadcast closure (holding the websocket) for the
+    # process lifetime otherwise. Identity check, not a bare pop -- a turn that
+    # landed while we were awaiting has already stashed a newer entry, and that
+    # one still needs its own pass.
+    if ok and _dirty.get(conversation_id) is entry:
+        _dirty.pop(conversation_id, None)
 
 
 async def _idle_then_consolidate(conversation_id: str) -> None:
@@ -348,7 +360,10 @@ async def note_turn(conversation_id: str, messages: list[dict], api_key: str, br
             old.cancel()
         if est > _PRESSURE_TOKENS:
             _spawn(consolidate(conversation_id))
-            return
+            # Fall through and arm the idle timer anyway: a failed pressure pass
+            # left nothing pending, so the span waited for the next turn to get
+            # another chance. On success the timer fires into a popped `_dirty`
+            # and no-ops; _consolidate_locks serializes the overlap either way.
         _idle_tasks[conversation_id] = _spawn(_idle_then_consolidate(conversation_id))
     except Exception:  # noqa: BLE001 - rule 5: never surface as a turn error
         logger.exception("note_turn failed (turn unaffected)")
@@ -452,12 +467,46 @@ async def handle_memory_edit(msg: dict, broadcast) -> None:
                           "operation_kind": "memory_edit", "operation_id": belief_id}
             )
             return
-        # A human typed it -> provenance user; update_belief re-embeds.
-        await asyncio.to_thread(store.update_belief, belief_id, text, "user")
+        # A human edit is a new user statement, never an in-place rewrite:
+        # preserve the prior version and close its validity window atomically.
+        replacement_id, _ = await asyncio.to_thread(
+            store.add_candidate_belief,
+            text,
+            row["kind"],
+            "user",
+            supersede_id=belief_id,
+        )
+        await broadcast("belief_state", belief_frame(await asyncio.to_thread(store.get_belief, belief_id)))
+        await broadcast(
+            "belief_state",
+            belief_frame(await asyncio.to_thread(store.get_belief, replacement_id)),
+        )
+        return
     elif op == "delete":
         await asyncio.to_thread(store.set_belief_status, belief_id, "archived")
     elif op == "restore":
-        await asyncio.to_thread(store.set_belief_status, belief_id, "active")
+        restored = await asyncio.to_thread(store.restore_belief, belief_id)
+        for changed in restored:
+            await broadcast("belief_state", belief_frame(changed))
+        return
+    elif op == "purge":
+        try:
+            deleted = await asyncio.to_thread(store.purge_belief, belief_id)
+        except ValueError:
+            await broadcast(
+                "error",
+                {
+                    "code": "memory_purge_invalid",
+                    "message": "Only archived memories can be permanently deleted.",
+                    "recoverable": True,
+                    "operation_kind": "memory_edit",
+                    "operation_id": belief_id,
+                },
+            )
+            return
+        if deleted:
+            await broadcast("belief_deleted", {"belief_id": belief_id})
+        return
     await broadcast("belief_state", belief_frame(await asyncio.to_thread(store.get_belief, belief_id)))
 
 
@@ -470,3 +519,14 @@ async def push_beliefs(send) -> None:
     rows = await asyncio.to_thread(store.live_beliefs, 50)
     for row in rows:
         await send("belief_state", belief_frame(row))
+
+
+async def push_history(send) -> None:
+    """On-demand panel hydration for durable archived/superseded history."""
+    store.connect()
+    await send("memory_history_state", {"complete": False})
+    rows = await asyncio.to_thread(store.list_beliefs)
+    for row in rows:
+        if row["status"] in {"archived", "superseded"}:
+            await send("belief_state", belief_frame(row))
+    await send("memory_history_state", {"complete": True})

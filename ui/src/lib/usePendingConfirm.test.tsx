@@ -49,6 +49,36 @@ test("rule 3: a key unlocks only when its operation-specific confirmation matche
   expect(result.current.pending.a).toBeUndefined();
 });
 
+test("rule 3: no-predicate lock (primitive collection) unlocks on any change to its value", () => {
+  // Regression for the Settings-key P0: SettingsView calls begin() with no
+  // `confirms` predicate. Before the fix `confirms` defaulted to () => false,
+  // so saving/removing the OpenRouter key locked the row FOREVER. The default
+  // must be "unlock when collection[key] changes" for primitive collections.
+  // Typed separately: renderHook infers Props from `initialProps`, so an inline
+  // literal would narrow the collection to {openrouter_key} and reject the
+  // second key the "unrelated key" rerender below needs.
+  const initialProps: { collection: Record<string, string> } = {
+    collection: { openrouter_key: "missing" },
+  };
+  const { result, rerender } = renderHook(
+    ({ collection }: { collection: Record<string, string> }) => usePendingConfirm(collection),
+    { initialProps, ...strict },
+  );
+
+  act(() => {
+    expect(result.current.begin("openrouter_key", "checking…")).toBe(true);
+  });
+  expect(result.current.pending.openrouter_key).toBe("checking…");
+
+  // An unrelated key changing must not unlock it.
+  rerender({ collection: { openrouter_key: "missing", theme: "dark" } });
+  expect(result.current.pending.openrouter_key).toBe("checking…");
+
+  // The Brain's settings_state reply changes the status → unlock.
+  rerender({ collection: { openrouter_key: "set", theme: "dark" } });
+  expect(result.current.pending.openrouter_key).toBeUndefined();
+});
+
 test("begin refuses a second lock on an already-pending key", () => {
   const { result } = renderHook(
     ({ collection }: { collection: Record<string, unknown> }) => usePendingConfirm(collection),

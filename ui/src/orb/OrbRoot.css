@@ -31,6 +31,17 @@ body,
 .capsule {
   --cap-text: #cdd9f5;
   --cap-text-muted: #8a9bc4;
+  /* The rest of the fixed palette. These are the DARK-theme values of
+     --primary/--accent-soft/--tier-3/--destructive/--border, frozen here:
+     reading the live theme tokens let a light OS theme repaint the capsule's
+     accents for a light surface that the capsule never has (the light
+     --destructive lands at 3.65:1 and the light --tier-3 approval chip at
+     ~3.7:1 on this midnight glass — both below AA). */
+  --cap-primary: #3d82f5;
+  --cap-accent: #6b96f7;
+  --cap-tier-3: #ffbe69;
+  --cap-destructive: #ef4444;
+  --cap-border: rgba(255, 255, 255, 0.1);
   position: relative;
   box-sizing: border-box; /* fill the window exactly -- padding/border must
                              not push the pill past the fixed window width */
@@ -63,7 +74,7 @@ body,
   width: 140px;
   height: 140px;
   transform: translate(-50%, -50%);
-  background: radial-gradient(circle, var(--primary) 0%, transparent 70%);
+  background: radial-gradient(circle, var(--cap-primary) 0%, transparent 70%);
   opacity: 0.35;
   filter: blur(8px);
   pointer-events: none;
@@ -84,13 +95,21 @@ body,
   justify-self: end;
 }
 
+/* justify-self stays STRETCH (the default), not `center`. A grid item with a
+   non-stretch justify-self is sized to fit-content, so it happily overflows
+   its own track: with narration present the centre item measured 212px inside
+   an 88px track and painted the narration 62px over each chip cluster —
+   straight across the approval count and the mic (ui_ux/04-voice.md: mic
+   presence must stay visible). Stretched, the item is the track's width and
+   the narration below can shrink into whatever is left. `justify-content`
+   keeps orb+narration centred as a group, which is what `center` was for. */
 .capsule-center {
   position: relative;
   z-index: 1;
-  justify-self: center;
   min-width: 0;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
 }
 
@@ -128,16 +147,16 @@ button.chip:active {
 }
 
 .approval-chip {
-  color: var(--tier-3);
-  background: color-mix(in srgb, var(--tier-3) 18%, transparent);
+  color: var(--cap-tier-3);
+  background: color-mix(in srgb, var(--cap-tier-3) 18%, transparent);
 }
 .approval-chip:hover {
-  background: color-mix(in srgb, var(--tier-3) 26%, transparent);
+  background: color-mix(in srgb, var(--cap-tier-3) 26%, transparent);
 }
 
 .error-chip {
-  color: var(--destructive);
-  background: color-mix(in srgb, var(--destructive) 18%, transparent);
+  color: var(--cap-destructive);
+  background: color-mix(in srgb, var(--cap-destructive) 18%, transparent);
 }
 
 .task-ring {
@@ -148,8 +167,19 @@ button.chip:active {
 }
 
 /* Narration: inline, truncated, transient -- takes the remaining center
-   space while chips stay put (ui_ux/01-companion-orb.md "Narration"). */
+   space while chips stay put (ui_ux/01-companion-orb.md "Narration").
+   `flex: 0 1 auto` + `min-width: 0` is what actually lets it shrink: a flex
+   item's automatic minimum size is its content, so without min-width:0 the
+   nowrap text refuses to go below its full width and pushes out of the pill.
+   Narration is the lowest-priority element in the capsule -- at 360px it
+   yields to the clusters, never the other way round.
+   ponytail: at the busiest state (Takeover lane + task + error + approval)
+   only ~37px is left, so narration degrades to a stub + ellipsis. The full
+   text is on the title attribute; a legibility floor that hides it entirely
+   would need a container query -- add one if that state proves common. */
 .narration {
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -167,7 +197,7 @@ button.chip:active {
   color: var(--cap-text-muted);
 }
 .capsule-center[data-voice-state="muted"] ~ .capsule-right .mic-indicator {
-  color: var(--destructive);
+  color: var(--cap-destructive);
 }
 
 /* ---- The orb: voice state only, everything else is a chip (see above). ---- */
@@ -186,7 +216,7 @@ button.chip:active {
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  background: radial-gradient(circle, var(--accent-soft) 0%, transparent 68%);
+  background: radial-gradient(circle, var(--cap-accent) 0%, transparent 68%);
   opacity: 0.5;
 }
 
@@ -195,8 +225,8 @@ button.chip:active {
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #fff 0%, var(--accent-soft) 42%, var(--primary) 100%);
-  box-shadow: 0 0 10px var(--primary);
+  background: radial-gradient(circle at 35% 30%, #fff 0%, var(--cap-accent) 42%, var(--cap-primary) 100%);
+  box-shadow: 0 0 10px var(--cap-primary);
   transition:
     filter var(--motion-base) var(--ease-out),
     box-shadow var(--motion-base) var(--ease-out);
@@ -215,8 +245,8 @@ button.chip:active {
 /* Listening: rim lit, steady. */
 .capsule-center[data-voice-state="listening"] .orb-core {
   box-shadow:
-    0 0 0 2px var(--accent-soft),
-    0 0 12px var(--accent-soft);
+    0 0 0 2px var(--cap-accent),
+    0 0 12px var(--cap-accent);
 }
 
 /* Thinking: inner gradient slowly swirls. */
@@ -268,9 +298,9 @@ button.chip:active {
 
 @keyframes capsule-pulse {
   from {
-    box-shadow: 0 0 8px var(--primary);
+    box-shadow: 0 0 8px var(--cap-primary);
   }
   to {
-    box-shadow: 0 0 18px var(--primary);
+    box-shadow: 0 0 18px var(--cap-primary);
   }
 }

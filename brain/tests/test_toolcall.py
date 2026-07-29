@@ -190,7 +190,7 @@ async def _connect_auth(port: int, token: str):
     ws = await websockets.connect(f"ws://127.0.0.1:{port}")
     await ws.send(json.dumps(_frame("hello", token=token)))
     assert json.loads(await asyncio.wait_for(ws.recv(), timeout=1))["type"] == "hello_ack"
-    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
+    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "snapshot_complete":
         pass
     return ws
 

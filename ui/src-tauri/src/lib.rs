@@ -2,7 +2,59 @@ mod supervisor;
 mod windows;
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use supervisor::{SidecarSnapshot, Sidecars};
+
+/// %LOCALAPPDATA%\Halo — the same directory the Brain writes session.json to.
+/// Created here rather than assumed, because the supervisor logs its first
+/// spawn before the Brain has ever run and created it.
+pub(crate) fn halo_dir() -> Option<&'static Path> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Halo");
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    })
+    .as_deref()
+}
+
+/// ponytail: "rotation" is a single truncate past 4 MB — enough that a crash
+/// loop can't fill the disk. A real scheme (numbered generations) only pays off
+/// once someone needs history older than the current session.
+const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Appending log file under `dir`, truncated first if it has grown past the cap.
+pub(crate) fn open_log(dir: &Path, file: &str) -> std::io::Result<std::fs::File> {
+    let path = dir.join(file);
+    let too_big = std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX_BYTES);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(!too_big)
+        .write(too_big)
+        .truncate(too_big)
+        .open(path)
+}
+
+fn append_line(dir: &Path, file: &str, msg: &str) {
+    if let Ok(mut f) = open_log(dir, file) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = writeln!(f, "{secs} {msg}");
+    }
+}
+
+/// Native diagnostics. stderr is invisible in a release build (`main.rs` sets
+/// `windows_subsystem = "windows"`), which is exactly why every one of these
+/// also lands in %LOCALAPPDATA%\Halo\halo.log.
+pub(crate) fn log(msg: &str) {
+    eprintln!("{msg}");
+    if let Some(dir) = halo_dir() {
+        append_line(dir, "halo.log", msg);
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct Session {
@@ -72,4 +124,32 @@ pub fn run() {
             sidecars.kill_all();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Against a temp dir, not LOCALAPPDATA — mutating process env would race
+    /// the other tests, which cargo runs on parallel threads.
+    #[test]
+    fn append_line_appends_and_truncates_past_the_cap() {
+        let dir = std::env::temp_dir().join(format!("halo-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.log");
+        let _ = std::fs::remove_file(&path);
+
+        append_line(&dir, "t.log", "first");
+        append_line(&dir, "t.log", "second");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body.lines().count(), 2, "second line must append, not overwrite");
+        assert!(body.contains("first") && body.contains("second"));
+
+        std::fs::write(&path, vec![b'x'; (LOG_MAX_BYTES + 1) as usize]).unwrap();
+        append_line(&dir, "t.log", "after-rotate");
+        let rotated = std::fs::read_to_string(&path).unwrap();
+        assert!(rotated.ends_with("after-rotate\n") && rotated.len() < 64);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

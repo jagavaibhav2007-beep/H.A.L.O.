@@ -21,7 +21,11 @@
   align-items: center;
   gap: 10px;
 }
+/* min-width:0 is what makes the ellipsis reachable: as a flex child its
+   automatic minimum is the full nowrap string, so a long title overflowed the
+   card head instead of truncating. */
 .task-title {
+  min-width: 0;
   font-size: var(--text-base);
   font-weight: 500;
   color: var(--text);
@@ -49,7 +53,7 @@
   cursor: pointer;
 }
 .task-lane-select:disabled {
-  opacity: 0.55;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 
@@ -74,7 +78,7 @@
 .task-waiting {
   margin: 0;
   font-size: var(--text-sm);
-  color: var(--tier-3);
+  color: var(--tier-3-text); /* the AA text variant; --tier-3 is 3.12:1 in light mode */
 }
 .task-reason {
   margin: 0;

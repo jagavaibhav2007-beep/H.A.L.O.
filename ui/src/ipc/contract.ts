@@ -23,7 +23,7 @@ export interface HelloMsg extends IpcEnvelope {
 // envelope/field change; a major mismatch across the WS is refused loudly on
 // both sides. Hand-mirrored with brain/brain/ipc/contract.py CONTRACT_VERSION
 // and shared/ipc-contract.json "version" — check_contract_sync.py compares them.
-export const CONTRACT_VERSION = "1.0";
+export const CONTRACT_VERSION = "1.1";
 export const contractMajor = (v: string | undefined): number | null => {
   if (typeof v !== "string") return null;
   const major = Number.parseInt(v.split(".")[0], 10);
@@ -52,8 +52,12 @@ export interface ApprovalResponseMsg extends IpcEnvelope {
 export interface MemoryEditMsg extends IpcEnvelope {
   type: "memory_edit";
   belief_id: string;
-  op: "edit" | "delete" | "restore";
+  op: "edit" | "delete" | "restore" | "purge";
   text?: string;
+}
+
+export interface MemoryQueryMsg extends IpcEnvelope {
+  type: "memory_query";
 }
 
 export interface SkillOpMsg extends IpcEnvelope {
@@ -138,9 +142,10 @@ export interface DoneMsg extends IpcEnvelope {
   type: "done";
   conversation_id: string;
   task_id?: string;
+  interrupted?: boolean;
 }
 
-export type OperationKind = "undo" | "memory_edit" | "approval_response" | "task_op" | "lane_pin" | "mic" | "skill_op";
+export type OperationKind = "undo" | "memory_edit" | "approval_response" | "interrupt" | "task_op" | "lane_pin" | "mic" | "skill_op";
 
 interface ErrorMsgBase extends IpcEnvelope {
   type: "error";
@@ -200,6 +205,14 @@ export interface SettingsStateMsg extends IpcEnvelope {
   status: "set" | "missing" | "invalid" | "unverified";
 }
 
+export interface CapabilitiesStateMsg extends IpcEnvelope {
+  type: "capabilities_state";
+  voice_input: boolean;
+  task_controls: boolean;
+  skill_controls: boolean;
+  demo_scenarios: boolean;
+}
+
 export interface BeliefStateMsg extends IpcEnvelope {
   type: "belief_state";
   belief_id: string;
@@ -210,6 +223,24 @@ export interface BeliefStateMsg extends IpcEnvelope {
   status: "active" | "archived" | "superseded";
   superseded_by?: string;
   used_at?: string;
+}
+
+export interface BeliefDeletedMsg extends IpcEnvelope {
+  type: "belief_deleted";
+  belief_id: string;
+}
+
+export interface MemoryHistoryStateMsg extends IpcEnvelope {
+  type: "memory_history_state";
+  complete: boolean;
+}
+
+// Last frame of the connect snapshot. Payload-free: a boundary marker needs no
+// state. Exists so the reducer never has to infer the boundary from
+// `spend_update`, which the contract treats as a global that may arrive at any
+// time.
+export interface SnapshotCompleteMsg extends IpcEnvelope {
+  type: "snapshot_complete";
 }
 
 export interface SkillStateMsg extends IpcEnvelope {
@@ -230,6 +261,7 @@ export type IpcMessage =
   | InterruptMsg
   | ApprovalResponseMsg
   | MemoryEditMsg
+  | MemoryQueryMsg
   | SkillOpMsg
   | LanePinMsg
   | TaskOpMsg
@@ -248,7 +280,11 @@ export type IpcMessage =
   | TranscriptMsg
   | SpendUpdateMsg
   | SettingsStateMsg
+  | CapabilitiesStateMsg
   | BeliefStateMsg
+  | BeliefDeletedMsg
+  | MemoryHistoryStateMsg
+  | SnapshotCompleteMsg
   | SkillStateMsg;
 
 type MsgType = IpcMessage["type"];
@@ -287,8 +323,9 @@ export const CONTRACT_SPEC = {
       reply_to: field(S), decision: field(S, ["approve", "deny", "edit"]), edited_args: field(O),
     }),
     memory_edit: message(IN, ["belief_id", "op"], {
-      belief_id: field(S), op: field(S, ["edit", "delete", "restore"]), text: field(S),
+      belief_id: field(S), op: field(S, ["edit", "delete", "restore", "purge"]), text: field(S),
     }),
+    memory_query: message(IN, [], {}),
     skill_op: message(IN, ["skill_name", "op"], {
       skill_name: field(S), op: field(S, ["trial", "disable", "restore", "delete"]),
     }),
@@ -307,10 +344,12 @@ export const CONTRACT_SPEC = {
       approval_id: field(S), tool: field(S), args_redacted: field(O), tier: field(I, LANES),
       task_id: field(S), summary: field(S), destructive: field(B), conversation_id: field(S),
     }),
-    done: message(OUT, ["conversation_id"], { conversation_id: field(S), task_id: field(S) }),
+    done: message(OUT, ["conversation_id"], {
+      conversation_id: field(S), task_id: field(S), interrupted: field(B),
+    }),
     error: message(OUT, ["code", "message", "recoverable"], {
       code: field(S), message: field(S), recoverable: field(B), conversation_id: field(S),
-      operation_kind: field(S, ["undo", "memory_edit", "approval_response", "task_op", "lane_pin", "mic", "skill_op"]),
+      operation_kind: field(S, ["undo", "memory_edit", "approval_response", "interrupt", "task_op", "lane_pin", "mic", "skill_op"]),
       operation_id: field(S),
     }),
     task_state: message(OUT, ["task_id", "state", "lane"], {
@@ -334,12 +373,18 @@ export const CONTRACT_SPEC = {
     settings_state: message(OUT, ["key", "status"], {
       key: field(S), status: field(S, ["set", "missing", "invalid", "unverified"]),
     }),
+    capabilities_state: message(OUT, ["voice_input", "task_controls", "skill_controls", "demo_scenarios"], {
+      voice_input: field(B), task_controls: field(B), skill_controls: field(B), demo_scenarios: field(B),
+    }),
     belief_state: message(OUT, ["belief_id", "text", "kind", "provenance", "salience", "status"], {
       belief_id: field(S), text: field(S),
       kind: field(S, ["preference", "project", "workflow", "decision", "lesson"]),
       provenance: field(S, ["user", "inferred"]), salience: field(N),
       status: field(S, ["active", "archived", "superseded"]), superseded_by: field(S), used_at: field(S),
     }),
+    belief_deleted: message(OUT, ["belief_id"], { belief_id: field(S) }),
+    memory_history_state: message(OUT, ["complete"], { complete: field(B) }),
+    snapshot_complete: message(OUT, [], {}),
     skill_state: message(OUT, ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"], {
       skill_name: field(S), origin: field(S, ["auto", "user"]), kind: field(S, ["skill", "playbook"]),
       uses: field(I), success_rate: field(N), status: field(S, ["active", "paused", "retired"]),

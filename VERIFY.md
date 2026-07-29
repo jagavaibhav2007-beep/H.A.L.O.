@@ -21,7 +21,7 @@ not respond to mock demo triggers.
       UI self-checks, Vitest, the UI production build, Rust tests, and all
       three phase protocol checks.
 - [x] Confirm the final line says `FULL AUTOMATED VERIFICATION PASSED`
-      (2026-07-22: all Python/Voice scripts, five TS self-checks, Vitest 16/16,
+      (2026-07-27: all Python/Voice scripts, five TS self-checks, Vitest 32/32,
       production build, Rust 7/7, and Phase 0/1/2 gates).
 - [x] Confirm both gate scripts parse in Windows PowerShell and resolve Python
       3.11+ via `python`, `py -3`, or a discoverable bundled Codex runtime.
@@ -100,8 +100,10 @@ provider behavior, a real key that must never be pasted into source or logs.
 
 - [x] Run `./dev.ps1 -Verify` and confirm the complete repository gate, including
       Phase 0, Phase 1, and Phase 2, reports green in one run.
-- [ ] Add a real OpenRouter key in Settings; send a normal chat message and watch
-      a real streamed reply render token-by-token into one assistant bubble.
+- [x] Add a real OpenRouter key in Settings; send a normal chat message and watch
+      a real streamed reply render token-by-token into one assistant bubble
+      (2026-07-27 no-mock native run; final generated sanity reply:
+      `FINAL_NATIVE_SANITY`).
 - [ ] Send a reasoning-heavy prompt (a multi-step plan, a stack trace, or "think
       hard about ..."); confirm the router visibly escalates to the heavy model
       (spend/activity or logs show the heavy model id was used).
@@ -136,8 +138,12 @@ below when you work through that section.
 
 ### Phase 2 result record
 
-- Date:
+- Date: 2026-07-27 (targeted real-key/native regression pass; unchecked items
+  above remain outstanding)
 - Commit:
-- Tester:
-- Blocking findings: none / describe
-- Non-blocking notes:
+- Tester: Codex native desktop automation
+- Blocking findings: none in the exercised approval/stop/chat/orb paths
+- Non-blocking notes: Deny and Stop now remove the modal approval, leave the
+  composer enabled, and accept a follow-up. Stop terminates queued tool calls
+  instead of raising replacement permission cards. Ordinary orb click opens
+  the workspace. Destructive approvals and destructive Undo were not executed.

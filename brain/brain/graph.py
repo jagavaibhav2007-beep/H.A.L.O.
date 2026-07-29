@@ -119,6 +119,11 @@ _turn_ctx: dict[str, dict] = {}
 
 
 def _after_gate(state: State) -> str:
+    # "Stop this task" resumes a suspended approval with redirected=True.
+    # Cancellation is terminal for this turn: returning to respond would let
+    # the model request the same denied tool again and spam approval cards.
+    if state.get("redirected"):
+        return END
     if state.get("pending_tool_calls"):
         return "gate"  # more calls in this round; drain them one at a time
     return "respond" if state.get("tool_rounds") else END
@@ -191,7 +196,13 @@ async def _gate_node(state: State, config) -> dict:
             broadcast=ctx["broadcast"],
         )
         content = (update.get("messages") or [{}])[0].get("content") or ""
-        if call["name"] in _READONLY_TOOLS:
+        # Only suppress a repeat whose result is still VERBATIM above. A result
+        # over _TOOL_STUB_MIN gets Layer-1 stubbed to "call the tool again" once
+        # an assistant message follows it, so refusing that re-call with "its
+        # result is above" contradicts the stub the model is obeying (D2 vs
+        # Layer 1). Below the stub floor the result stays put, so "it's above"
+        # is true and the loop guard still holds.
+        if call["name"] in _READONLY_TOOLS and len(content) <= _TOOL_STUB_MIN:
             seen.add(_call_key(call))
     if state.get("tool_rounds"):
         # Model-driven: the result must come back as a `tool` message keyed to
@@ -589,6 +600,44 @@ async def _bill_and_extract(cid: str, result: dict, ctx: dict, api_key: str | No
         })
 
 
+# Every super-step writes a checkpoint carrying the whole serialized `messages`
+# channel, so a thread's disk cost is quadratic in its length and nothing ever
+# deleted a row (689 checkpoints / 41 threads / 7.1MB after ~2 weeks of light
+# use). The NEWEST checkpoint already holds the full cumulative conversation --
+# older ones only serve time-travel/replay, which Halo exposes nowhere (no
+# aget_state_history/alist caller in the repo). 20 is well clear of the ~3-8
+# super-steps one turn writes, so a few turns of parent chain survive for
+# LangGraph's own resume path; pruning only ever runs after a turn has ended, so
+# no in-flight (Tier-3 suspended) checkpoint is ever a candidate.
+_CHECKPOINT_KEEP = 20
+
+
+async def _prune_checkpoints(cid: str) -> int:
+    """Delete all but the newest _CHECKPOINT_KEEP checkpoints of one thread.
+
+    checkpoint_id is a time-ordered UUID and the saver itself selects the live
+    checkpoint with `ORDER BY checkpoint_id DESC`, so lexicographic order is
+    recency order. Runs on the saver's own lock/connection -- it is shared and
+    actively in use. Pruned rows leave a dangling parent_checkpoint_id on the
+    oldest survivor, which is fine for aget_state (latest-only)."""
+    graph = await _ensure_graph()
+    saver = graph.checkpointer
+    conn = saver.conn
+    async with saver.lock:
+        keep_q = (
+            "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? "
+            "ORDER BY checkpoint_id DESC LIMIT ?"
+        )
+        # writes first: it references checkpoint_ids the second statement drops.
+        for table in ("writes", "checkpoints"):
+            cur = await conn.execute(
+                f"DELETE FROM {table} WHERE thread_id = ? AND checkpoint_id NOT IN ({keep_q})",
+                (cid, cid, _CHECKPOINT_KEEP),
+            )
+        await conn.commit()
+    return cur.rowcount  # checkpoints deleted (last statement of the loop)
+
+
 async def _finish_turn(result: dict, cid: str, broadcast) -> bool:
     """Close one graph invocation: emit approval_request (suspended -> True),
     or error/done (-> False). Shared by run_turn and resume_turn -- a resumed
@@ -612,7 +661,17 @@ async def _finish_turn(result: dict, cid: str, broadcast) -> bool:
             {"code": "turn_failed", "message": result["error"], "recoverable": True, "conversation_id": cid},
         )
     else:
-        await broadcast("done", {"conversation_id": cid})
+        payload = {"conversation_id": cid}
+        if result.get("redirected"):
+            payload["interrupted"] = True
+        await broadcast("done", payload)
+    # The turn is over, so both rolling windows can be trimmed now -- and only
+    # now: mid-turn, this thread's checkpoints are the resume state.
+    try:
+        await _prune_checkpoints(cid)
+        await asyncio.to_thread(store.prune_actions)
+    except Exception:  # noqa: BLE001 - rule 5: retention is housekeeping, never a turn error
+        logger.exception("retention sweep failed after turn on %s", cid)
     return False
 
 
@@ -679,6 +738,16 @@ async def snapshot(send) -> None:
         )
     else:
         await send("settings_state", {"key": "openrouter_key", "status": key_status})
+
+    await send(
+        "capabilities_state",
+        {
+            "voice_input": False,
+            "task_controls": False,
+            "skill_controls": False,
+            "demo_scenarios": False,
+        },
+    )
 
     store.connect()
     tasks = await asyncio.to_thread(store.list_tasks, _SNAPSHOT_TASK_STATES)

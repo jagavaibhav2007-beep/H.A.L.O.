@@ -25,7 +25,16 @@ import { SkillsView } from "../skills/SkillsView";
 import { SettingsView } from "../settings/SettingsView";
 import { ApprovalOverlay } from "../approvals/ApprovalCard";
 import { useStoreConnection } from "../state/useStoreConnection";
-import { useHaloStore, selectActiveView, selectApprovals, selectActiveConversationId } from "../state/store";
+import {
+  useHaloStore,
+  selectActiveView,
+  selectApprovals,
+  selectActiveConversationId,
+  selectBrainStatus,
+  selectGlobalErrors,
+  selectOperationErrors,
+  selectVoiceStatus,
+} from "../state/store";
 import type { ActiveView } from "../state/store";
 import "./WorkspaceRoot.css";
 
@@ -54,6 +63,8 @@ export function WorkspaceRoot() {
 
   const activeView = useHaloStore(selectActiveView);
   const setActiveView = useHaloStore((s) => s.setActiveView);
+  const brainStatus = useHaloStore(selectBrainStatus);
+  const voiceStatus = useHaloStore(selectVoiceStatus);
 
   // The workspace window owns its own live connection + store instance; the
   // shared hook feeds inbound frames into the store and forwards the two
@@ -67,6 +78,7 @@ export function WorkspaceRoot() {
     sendInterrupt,
     sendLanePin,
     sendMemoryEdit,
+    sendMemoryQuery,
     sendSkillOp,
     sendSettingsUpdate,
     sendMic,
@@ -75,6 +87,16 @@ export function WorkspaceRoot() {
   // Which conversation the chat view and any conversation-scoped send targets.
   // Owned by the store (UI decision), never by the transport hook.
   const conversationId = useHaloStore(selectActiveConversationId);
+  const globalErrors = useHaloStore(selectGlobalErrors);
+  const operationErrors = useHaloStore(selectOperationErrors);
+  const dismissError = useHaloStore((state) => state.dismissError);
+  const workspaceErrors = [
+    ...globalErrors,
+    ...Object.values(operationErrors).filter(
+      (error) => error.operation_kind === "approval_response" && !error.conversation_id,
+    ),
+  ];
+  const workspaceError = workspaceErrors[workspaceErrors.length - 1];
 
   // Away flow (Step 10): a pending approval that arrives while this window is
   // hidden fires a Windows toast; clicking it opens the workspace (Rust
@@ -86,6 +108,11 @@ export function WorkspaceRoot() {
   const approvals = useHaloStore(selectApprovals);
   const toastedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    // Keep the dedupe set bounded to what's actually pending — otherwise it
+    // grows one id per approval for the window's whole lifetime.
+    for (const id of toastedRef.current) {
+      if (!(id in approvals)) toastedRef.current.delete(id);
+    }
     if (!isTauri()) return;
     let cancelled = false;
     void (async () => {
@@ -215,15 +242,47 @@ export function WorkspaceRoot() {
         <GlassPanel elevation="panel" className="workspace-content">
           <Sidebar />
           <div className="workspace-main">
+            {brainStatus === "error" && (
+              <div className="process-health process-health-error" role="alert">
+                Halo’s Brain failed to start. Chat and actions are unavailable until it recovers.
+              </div>
+            )}
+            {brainStatus === "restarting" && (
+              <div className="process-health" role="status">
+                Halo’s Brain is restarting. Your draft is safe; sending will resume after reconnection.
+              </div>
+            )}
+            {voiceStatus === "error" && (
+              <div className="process-health process-health-voice" role="status">
+                Voice failed to start. You can keep using typed chat.
+              </div>
+            )}
+            {workspaceError && (
+              <div className="workspace-error" role="alert">
+                <span>{workspaceError.message}</span>
+                <button type="button" onClick={() => dismissError(workspaceError.id)}>
+                  Dismiss
+                </button>
+              </div>
+            )}
             <StatusStrip sendTaskOp={sendTaskOp} />
             <div className="workspace-views">
               {VIEWS.map((v) => (
-                <div key={v.id} hidden={activeView !== v.id} className="workspace-view">
+                <section
+                  key={v.id}
+                  hidden={activeView !== v.id}
+                  className="workspace-view"
+                  aria-labelledby={`workspace-${v.id}-heading`}
+                >
+                  <h1 id={`workspace-${v.id}-heading`} className="sr-only">
+                    {v.label}
+                  </h1>
                   {v.id === "chat" ? (
                     <ChatView
                       conversationId={conversationId}
                       connState={connState}
                       sendUserMsg={sendUserMsg}
+                      sendInterrupt={sendInterrupt}
                       sendMic={sendMic}
                       inputId={CHAT_INPUT_ID}
                     />
@@ -232,13 +291,17 @@ export function WorkspaceRoot() {
                   ) : v.id === "tasks" ? (
                     <TasksView sendTaskOp={sendTaskOp} sendLanePin={sendLanePin} />
                   ) : v.id === "memory" ? (
-                    <MemoryView sendMemoryEdit={sendMemoryEdit} />
+                    <MemoryView
+                      active={activeView === "memory"}
+                      sendMemoryEdit={sendMemoryEdit}
+                      sendMemoryQuery={sendMemoryQuery}
+                    />
                   ) : v.id === "skills" ? (
                     <SkillsView sendSkillOp={sendSkillOp} />
                   ) : (
                     <SettingsView sendSettingsUpdate={sendSettingsUpdate} />
                   )}
-                </div>
+                </section>
               ))}
               <ApprovalOverlay
                 conversationId={conversationId}

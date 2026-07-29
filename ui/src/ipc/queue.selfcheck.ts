@@ -1,5 +1,6 @@
 import { flushQueuedMessages, sendOrQueue } from "./queue.ts";
-import type { UserMsg } from "./contract.ts";
+import { OUTBOUND_CAP, capQueue, dropStaleControlFrames } from "../lib/outboundQueue.ts";
+import type { InterruptMsg, UserMsg } from "./contract.ts";
 
 function message(text: string): UserMsg {
   return {
@@ -43,3 +44,32 @@ if (preAuthSent.length || waiting.length !== 1) {
 }
 
 console.log("[queue.selfcheck.ts] messages wait for authentication acknowledgement: OK");
+
+// ---- Queue policy (../lib/outboundQueue.ts) ----
+
+function interrupt(id: string): InterruptMsg {
+  return { type: "interrupt", id, ts: "2026-07-28T00:00:00Z", conversation_id: "conv-1" };
+}
+
+const overflowing: UserMsg[] = [];
+for (let i = 0; i < OUTBOUND_CAP + 5; i += 1) overflowing.push(message(`msg-${i}`));
+if (capQueue(overflowing) !== 5 || overflowing.length !== OUTBOUND_CAP) {
+  throw new Error("queue was not capped to OUTBOUND_CAP");
+}
+if (overflowing[0].text !== "msg-5" || overflowing[OUTBOUND_CAP - 1].text !== `msg-${OUTBOUND_CAP + 4}`) {
+  throw new Error("cap dropped the newest frames instead of the oldest");
+}
+if (capQueue(overflowing) !== 0) throw new Error("cap dropped frames from an already-capped queue");
+
+console.log("[queue.selfcheck.ts] outbound queue is capped, oldest dropped first: OK");
+
+// A restart gives the Brain a new port; anything naming an id from the dead
+// process must not be replayed to the new one.
+const pending = [message("first"), interrupt("i-1"), message("second"), interrupt("i-2")];
+if (dropStaleControlFrames(pending) !== 2) throw new Error("stale control frames were not dropped");
+if (pending.map((msg) => (msg.type === "user_msg" ? msg.text : msg.type)).join(",") !== "first,second") {
+  throw new Error("reconnect pruning dropped or reordered replayable user messages");
+}
+if (dropStaleControlFrames(pending) !== 0) throw new Error("pruning a user_msg-only queue dropped frames");
+
+console.log("[queue.selfcheck.ts] a reconnect to a new port keeps user_msg and drops control frames: OK");

@@ -47,9 +47,9 @@ async def _connect_auth(port: int, token: str):
     ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
     assert ack["type"] == "hello_ack", ack
     # A fresh non-mock UI connection gets the snapshot right after hello_ack
-    # (server.py -> graph.snapshot) -- drain through its `spend_update`
-    # sentinel so callers' next recv() sees whatever they actually triggered.
-    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
+    # (server.py -> graph.snapshot) -- drain through its `snapshot_complete`
+    # marker so callers' next recv() sees whatever they actually triggered.
+    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "snapshot_complete":
         pass
     return ws
 
@@ -289,7 +289,18 @@ async def check_no_api_key(port: int, token: str) -> None:
     print("[check 5] missing key -> honest no_api_key error, connection stays usable: OK")
 
 
+def check_cancelled_gate_is_terminal() -> None:
+    state = {
+        "redirected": True,
+        "tool_rounds": 1,
+        "pending_tool_calls": [{"id": "queued", "name": "file_create", "args": {}}],
+    }
+    assert graph._after_gate(state) == graph.END
+    print("[check 4d] stop during approval terminates the turn; queued/repeated permission requests cannot run: OK")
+
+
 async def main() -> None:
+    check_cancelled_gate_is_terminal()
     server, token = await start()
     port = server.sockets[0].getsockname()[1]
     try:

@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getTheme, setTheme, type Theme } from "../styles/theme";
 import { Button } from "../components/Button";
-import { useHaloStore, selectSpend } from "../state/store";
+import { useHaloStore, selectSpend, selectCapabilities } from "../state/store";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
 import "./SettingsView.css";
 
@@ -33,6 +33,7 @@ const KEY_STATUS_COPY: Record<string, string> = {
 
 export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   const spend = useHaloStore(selectSpend);
+  const capabilities = useHaloStore(selectCapabilities);
   const settings = useHaloStore((s) => s.settings);
   const keyStatus = settings.openrouter_key;
   const [theme, setThemeState] = useState<Theme>(getTheme());
@@ -107,6 +108,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
               <input
                 type="checkbox"
                 checked={wakeWord}
+                disabled={capabilities.voiceInput !== true}
                 onChange={(e) => {
                   setWakeWord(e.target.checked);
                   sendSettingsUpdate("voice.wake_word", e.target.checked);
@@ -120,6 +122,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
               <input
                 type="checkbox"
                 checked={pushToTalk}
+                disabled={capabilities.voiceInput !== true}
                 onChange={(e) => {
                   setPushToTalk(e.target.checked);
                   sendSettingsUpdate("voice.push_to_talk", e.target.checked);
@@ -128,7 +131,13 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
               Push-to-talk instead
             </label>
           </div>
-          <p className="settings-note">Voice is still scripted for demos — real listening lands with the Voice worker.</p>
+          <p className="settings-note">
+            {capabilities.voiceInput === true
+              ? "Voice controls are available in this session."
+              : capabilities.voiceInput === false
+                ? "Voice input is not available in this build; typed chat still works."
+                : "Checking whether voice input is available…"}
+          </p>
         </section>
 
         <section className="settings-group">
@@ -171,6 +180,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
           </div>
           <div className="settings-row">
             <span className="settings-value" role="status" data-key-status={keyStatus ?? "unknown"}>
+              {(keyPending != null || !keyStatus) && <span className="halo-spinner" aria-hidden="true" />}
               {keyPending ?? (keyStatus ? KEY_STATUS_COPY[keyStatus] : "checking stored status…")}
             </span>
             {keyStatus === "set" && (

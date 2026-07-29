@@ -24,7 +24,7 @@ import sqlite_vec  # hard dep -- hoisted so it isn't re-imported inside three ho
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 EMBED_DIM = 384
 
 _conn: sqlite3.Connection | None = None
@@ -32,6 +32,11 @@ _embedder = None  # lazy fastembed.TextEmbedding singleton
 _vec_ok = False  # whether belief_vec is usable this session
 _embed_failed = False  # memoize a failed embedder init so we don't retry every call mid-turn
 _OP_LOCK = RLock()  # one shared sqlite3 connection: serialize complete operations/transactions
+_EMBED_LOCK = RLock()  # construction of the embedder singleton ONLY. A4 deliberately
+                       # runs _embed outside _OP_LOCK, which by construction makes it
+                       # concurrent -- unguarded, two turns each load a ~130MB model on
+                       # cold start. Never widen this to _OP_LOCK: that would undo A4 and
+                       # stall every store operation behind a first-call model download.
 
 
 def _serialized(fn):
@@ -224,6 +229,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         if version < 3:
             # v2 -> v3 (and every earlier path): additive table, idempotent.
             conn.executescript(_V3_NEW_TABLES)
+        if version < 4:
+            # v4: index the raw activity log's sort key. recent_actions orders
+            # by ts DESC on every connect (x2 webviews) and prune_actions needs
+            # the same order -- both full-scanned the table without this.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_action_ts ON action(ts DESC)")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 def _now() -> str:
@@ -238,9 +248,13 @@ def _embed(text: str) -> list[float] | None:
         return None
     try:
         if _embedder is None:
-            from fastembed import TextEmbedding
+            # Double-checked: the fast path stays lock-free, and the loser of
+            # the race re-reads the singleton the winner published.
+            with _EMBED_LOCK:
+                if _embedder is None:
+                    from fastembed import TextEmbedding
 
-            _embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                    _embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
         vec = next(iter(_embedder.embed([text])))
         return [float(x) for x in vec]
     except Exception as exc:
@@ -275,6 +289,20 @@ def _index_embedding(conn: sqlite3.Connection, belief_id: str, vec: list[float] 
     conn.execute(
         "INSERT INTO belief_vec(rowid, embedding) VALUES (?, ?)", (rowid, sqlite_vec.serialize_float32(vec))
     )
+
+
+def _unindex(conn: sqlite3.Connection, belief_id: str) -> None:
+    """SQL-only (caller owns the transaction and _OP_LOCK): drop a belief's
+    vector-index rows when it leaves the live set. vec0 returns the k nearest
+    rows and status='active' is a *post*-filter, so a dead belief left in the
+    index consumes a k-slot a live belief needed -- leave enough dead rows and
+    search returns nothing. Every status change out of 'active' must call this."""
+    if _vec_ok:
+        conn.execute(
+            "DELETE FROM belief_vec WHERE rowid IN (SELECT rowid FROM belief_map WHERE belief_id=?)",
+            (belief_id,),
+        )
+    conn.execute("DELETE FROM belief_map WHERE belief_id=?", (belief_id,))
 
 
 # ---------------------------------------------------------------- beliefs --
@@ -344,6 +372,7 @@ def add_candidate_belief(
                 )
                 if cur.rowcount != 1:
                     raise ValueError("add_candidate_belief: belief changed before supersession")
+                _unindex(conn, supersede_id)  # superseded belief leaves the live set
                 superseded = True
 
             # Kept last so a vector/index failure rolls back both the candidate
@@ -391,6 +420,85 @@ def set_belief_status(belief_id: str, status: str) -> None:
     conn = connect()
     with conn:
         conn.execute("UPDATE belief SET status=? WHERE belief_id=?", (status, belief_id))
+        if status != "active":
+            _unindex(conn, belief_id)
+
+
+@_serialized
+def purge_belief(belief_id: str) -> bool:
+    """Permanently remove one archived belief and its vector index entry.
+
+    Active and superseded beliefs remain part of the recoverable history and
+    cannot be purged through the panel action.
+    """
+    conn = connect()
+    with conn:
+        row = conn.execute(
+            "SELECT status FROM belief WHERE belief_id=?", (belief_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row["status"] != "archived":
+            raise ValueError("purge_belief: only archived beliefs can be permanently deleted")
+        conn.execute(
+            "UPDATE belief SET superseded_by=NULL WHERE superseded_by=?", (belief_id,)
+        )
+        _unindex(conn, belief_id)
+        deleted = conn.execute(
+            "DELETE FROM belief WHERE belief_id=?", (belief_id,)
+        ).rowcount
+    return deleted == 1
+
+
+@_serialized
+def restore_belief(belief_id: str) -> list[dict]:
+    """Restore an archived or superseded belief without creating two live
+    versions of the same supersession chain.
+
+    The target row keeps its identity so the UI's correlated pending control
+    can confirm against it. If a later active descendant exists, that row is
+    superseded by the restored version in the same transaction. The restored
+    validity window starts now and is always open.
+    """
+    conn = connect()
+    now = _now()
+    changed_ids: list[str] = []
+    with conn:
+        target = conn.execute("SELECT * FROM belief WHERE belief_id=?", (belief_id,)).fetchone()
+        if target is None:
+            raise ValueError("restore_belief: unknown belief_id")
+
+        successor_id = target["superseded_by"] if target["status"] == "superseded" else None
+        visited = {belief_id}
+        active_successor = None
+        while successor_id and successor_id not in visited:
+            visited.add(successor_id)
+            successor = conn.execute(
+                "SELECT * FROM belief WHERE belief_id=?", (successor_id,)
+            ).fetchone()
+            if successor is None:
+                break
+            if successor["status"] == "active":
+                active_successor = successor
+                break
+            successor_id = successor["superseded_by"]
+
+        if active_successor is not None:
+            conn.execute(
+                "UPDATE belief SET status='superseded', superseded_by=?, invalid_at=? WHERE belief_id=?",
+                (belief_id, now, active_successor["belief_id"]),
+            )
+            _unindex(conn, active_successor["belief_id"])  # successor leaves the live set
+            changed_ids.append(active_successor["belief_id"])
+
+        conn.execute(
+            "UPDATE belief SET status='active', superseded_by=NULL, invalid_at=NULL, valid_at=? "
+            "WHERE belief_id=?",
+            (now, belief_id),
+        )
+        changed_ids.append(belief_id)
+
+    return [get_belief(changed_id) for changed_id in changed_ids]
 
 
 @_serialized
@@ -411,6 +519,7 @@ def supersede(old_id: str, new_id: str) -> None:
         )
         if cur.rowcount != 1:
             raise ValueError("supersede: old belief changed before update")
+        _unindex(conn, old_id)  # superseded belief leaves the live set
 
 
 def search_beliefs(query_text: str, k: int = 15, live_only: bool = True) -> list[dict]:
@@ -438,7 +547,12 @@ def search_beliefs(query_text: str, k: int = 15, live_only: bool = True) -> list
                     """,
                     (sqlite_vec.serialize_float32(vec), k),
                 ).fetchall()
-                return [dict(r) for r in rows]
+                # Empty is NOT a valid answer here: it means the k nearest vectors
+                # were all dead rows (or every active belief written offline is
+                # unindexed), not that there are no live beliefs. Fall through to
+                # the recency floor rather than returning [] and injecting no memory.
+                if rows:
+                    return [dict(r) for r in rows]
             except Exception:
                 logger.warning("vector search failed; falling back to recency", exc_info=True)
 
@@ -491,6 +605,7 @@ def decay(half_life_days: float = 30, archive_below: float = 0.2, now: datetime 
                     "UPDATE belief SET salience=?, status='archived' WHERE belief_id=?",
                     (new_salience, row["belief_id"]),
                 )
+                _unindex(conn, row["belief_id"])  # archived belief leaves the live set
                 archived.append(row["belief_id"])
             else:
                 conn.execute(
@@ -516,6 +631,7 @@ def invalidate_belief(belief_id: str, superseded_by: str | None = None, *, by_in
             "UPDATE belief SET status='superseded', invalid_at=?, superseded_by=? WHERE belief_id=?",
             (_now(), superseded_by, belief_id),
         )
+        _unindex(conn, belief_id)  # invalidated belief leaves the live set
 
 
 # ------------------------------------------------- conversation meta + episodic --
@@ -627,6 +743,10 @@ def put_digest(path: str, sha256: str, digest_version: int, digest: dict) -> Non
             "VALUES (?,?,?,?,?)",
             (path, sha256, digest_version, json.dumps(digest, ensure_ascii=False), _now()),
         )
+        # The file's content moved on, so its older-sha rows are unreachable by
+        # any future lookup -- drop them here rather than accumulate one row per
+        # save for the life of the file.
+        conn.execute("DELETE FROM digest_cache WHERE path=? AND sha256<>?", (path, sha256))
 
 
 # ----------------------------------------------------------------- actions --
@@ -701,6 +821,32 @@ def recent_actions(limit: int = 100) -> list[dict]:
     conn = connect()
     rows = conn.execute("SELECT * FROM action ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
+
+
+# The raw activity log is spec'd as a rolling window (systemdesign/03-memory.md),
+# not an archive: it powers the feed + undo, and nothing reads deeper than
+# recent_actions' 100. 2000 leaves weeks of audit/search history while bounding a
+# table whose file_create inverses each hold the full text of a created file.
+_ACTION_KEEP = 2000
+
+
+@_serialized
+def prune_actions(keep: int = _ACTION_KEEP) -> int:
+    """Trim the activity log to its newest `keep` rows; returns rows deleted.
+
+    An unconsumed undo token is live user-reversible state, not retention
+    garbage: those rows survive the sweep at any age, or an old-but-still-
+    offered "Undo" would silently stop working."""
+    conn = connect()
+    with conn:
+        cur = conn.execute(
+            # Parens matter: AND binds tighter than OR, so without them this
+            # deletes every consumed row at any age.
+            "DELETE FROM action WHERE (undo_token IS NULL OR consumed = 1) "
+            "AND action_id NOT IN (SELECT action_id FROM action ORDER BY ts DESC LIMIT ?)",
+            (keep,),
+        )
+    return cur.rowcount
 
 
 # ------------------------------------------------------------------- tasks --

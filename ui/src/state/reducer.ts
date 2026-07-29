@@ -75,6 +75,13 @@ export interface SpendState {
   lastTurnTokens: number;
 }
 
+export interface CapabilityState {
+  voiceInput: boolean | null;
+  taskControls: boolean | null;
+  skillControls: boolean | null;
+  demoScenarios: boolean | null;
+}
+
 interface SnapshotState {
   pending: boolean;
   taskIds: Record<string, true>;
@@ -98,13 +105,26 @@ export interface HaloState {
   voice: VoiceState;
   spend: SpendState;
   settings: SettingsState;
+  capabilities: CapabilityState;
   operationErrors: Record<string, ErrorMsg>;
-  /** Connect snapshots end at spend_update. While one is pending, entity IDs
+  globalErrors: ErrorMsg[];
+  memoryHistoryLoaded: boolean;
+  /** Connect snapshots end at snapshot_complete (authoritative), with spend_update
+   * as a backstop for paths that don't send it. While one is pending, entity IDs
    * are collected so absence can reconcile stale reconnect state. */
   snapshot: SnapshotState;
 }
 
 export const ACTIVITY_CAP = 10_000;
+
+// Bound on resident conversations. The orb window never calls the workspace's
+// chat registry (that's what bounds the workspace at RECENT_CAP=50), yet
+// applyFrame's getConversation creates an entry for every conversation_id it
+// projects — so on an always-on app the orb's map would grow without limit.
+// 2x the registry cap keeps this a strict superset of the 50 threads the
+// workspace can render, so the LRU here never evicts a thread that's still
+// visible; it only reaps threads both surfaces have already forgotten.
+export const CONVERSATION_CAP = 100;
 
 export const initialState: HaloState = {
   connection: { wsStatus: "connecting", brainStatus: "unknown", voiceStatus: "unknown" },
@@ -118,7 +138,15 @@ export const initialState: HaloState = {
   voice: { state: "idle", transcript: null },
   spend: { sessionUsd: 0, monthUsd: 0, sessionTokens: 0, lastTurnTokens: 0 },
   settings: {},
+  capabilities: {
+    voiceInput: null,
+    taskControls: null,
+    skillControls: null,
+    demoScenarios: null,
+  },
   operationErrors: {},
+  globalErrors: [],
+  memoryHistoryLoaded: false,
   snapshot: { pending: false, taskIds: {}, approvalIds: {}, activityCounts: {} },
 };
 
@@ -140,14 +168,44 @@ function getConversation(state: HaloState, conversationId: string): Conversation
   );
 }
 
-/** The newest assistant turn still streaming. A queued user follow-up may sit
+/** The oldest assistant turn still streaming. A queued user follow-up may sit
  * after it while the Brain finishes the current serialized turn. */
 function openTurn(conv: ConversationState): AssistantTurn | undefined {
-  for (let i = conv.turns.length - 1; i >= 0; i -= 1) {
+  // Requests to one conversation are serialized by the Brain. Pick the oldest
+  // unresolved placeholder so a rapid follow-up cannot steal the first turn's
+  // tokens or completion frame.
+  for (let i = 0; i < conv.turns.length; i += 1) {
     const turn = conv.turns[i];
     if (turn.role === "assistant" && turn.status === "streaming") return turn;
   }
   return undefined;
+}
+
+/** Oldest-first matching means a placeholder that never receives a terminal
+ * frame would otherwise absorb every later turn's tokens/done/error forever.
+ * A placeholder that is still EMPTY when the user sends again is that case: a
+ * live turn has either produced text already or is seconds old. Close it here
+ * so the next turn opens a bubble of its own.
+ * ponytail: arrival order is the only correlator the contract offers; a turn
+ * id on token/done/error would let each frame address its own turn and retire
+ * this heuristic. */
+function closeAbandonedPlaceholders(state: HaloState, conv: ConversationState): ConversationState {
+  // A Tier-3 approval pauses its turn for as long as the user takes to decide
+  // — that placeholder is legitimately open, empty and silent.
+  const awaitingApproval = Object.values(state.approvals).some(
+    (approval) => approval.conversation_id === conv.conversationId,
+  );
+  const abandoned = (turn: Turn) =>
+    turn.role === "assistant" && turn.status === "streaming" && turn.text === "";
+  if (awaitingApproval || !conv.turns.some(abandoned)) return conv;
+  return {
+    ...conv,
+    turns: conv.turns.map((turn) =>
+      turn.role === "assistant" && abandoned(turn)
+        ? { ...turn, status: "interrupted" as const, note: "interrupted — no reply arrived" }
+        : turn,
+    ),
+  };
 }
 
 /** Record the user's own outgoing message as a turn (see UserTurn comment).
@@ -169,8 +227,36 @@ export function appendUserTurn(
   });
 }
 
+/** Begin one UI-originated request. The local assistant placeholder gives
+ * immediate feedback before the provider emits its first token. */
+export function beginUserRequest(
+  state: HaloState,
+  conversationId: string,
+  text: string,
+  id: string,
+): HaloState {
+  const withUser = appendUserTurn(state, conversationId, text, id);
+  const conv = closeAbandonedPlaceholders(withUser, getConversation(withUser, conversationId));
+  const pending: AssistantTurn = {
+    id: `pending-${id}`,
+    role: "assistant",
+    status: "streaming",
+    text: "",
+  };
+  return replaceConversation(withUser, { ...conv, turns: [...conv.turns, pending] });
+}
+
 function replaceConversation(state: HaloState, conv: ConversationState): HaloState {
-  return { ...state, conversations: { ...state.conversations, [conv.conversationId]: conv } };
+  // Re-insert last so object key order tracks recency, then reap the oldest
+  // beyond the cap (JS preserves string-key insertion order). Pure: builds a
+  // fresh object, never mutates state.conversations.
+  const { [conv.conversationId]: _prev, ...rest } = state.conversations;
+  const merged: Record<string, ConversationState> = { ...rest, [conv.conversationId]: conv };
+  const keys = Object.keys(merged);
+  if (keys.length > CONVERSATION_CAP) {
+    for (const stale of keys.slice(0, keys.length - CONVERSATION_CAP)) delete merged[stale];
+  }
+  return { ...state, conversations: merged };
 }
 
 function pushActivity(state: HaloState, activity: ActivityMsg): HaloState {
@@ -220,6 +306,15 @@ function reconcileSnapshotActivity(state: HaloState, activity: ActivityMsg): Hal
   return { ...state, activities, snapshot };
 }
 
+/** Reconcile the id-keyed RUNTIME slices against what the snapshot reported:
+ * a task or approval the Brain no longer knows about is gone (D6).
+ *
+ * `beliefs` and `skills` are deliberately excluded, and must stay that way.
+ * They are DB-backed collections the snapshot only sends a *slice* of —
+ * `memory.push_beliefs` replays live beliefs only, capped at 50, and archived/
+ * superseded ones arrive later behind `memory_query`; the real Brain sends no
+ * `skill_state` at connect at all. Filtering them by snapshot presence would
+ * wipe the user's memory and skills panels on every reconnect. */
 function finishSnapshot(state: HaloState): HaloState {
   if (!state.snapshot.pending) return state;
   const tasks = Object.fromEntries(
@@ -256,6 +351,20 @@ function resolveApprovalsForTask(state: HaloState, taskId: string): HaloState {
   return { ...state, approvals };
 }
 
+/** Deny and "stop this task" intentionally execute no tool, so they have no
+ * activity frame to confirm resolution. Their terminal done/error frame is
+ * the authoritative signal instead. Matching by conversation keeps one
+ * conversation from clearing another conversation's card. */
+function resolveApprovalsForConversation(state: HaloState, conversationId: string): HaloState {
+  const pending = Object.keys(state.approvals).filter(
+    (id) => state.approvals[id].conversation_id === conversationId,
+  );
+  if (pending.length === 0) return state;
+  const approvals = { ...state.approvals };
+  for (const id of pending) delete approvals[id];
+  return { ...state, approvals };
+}
+
 // ---- Frame projection ----
 
 export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
@@ -265,6 +374,9 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       // truth (the user_msg echo may be local-only).
       const conv = getConversation(state, frame.conversation_id);
       const open = openTurn(conv);
+      // ponytail: rebuilding the whole string per token frame is O(n^2) over a
+      // long reply. Leave it until a profiler complains — a chunk list joined
+      // at render time is the upgrade path, and it costs the views a change.
       const turns: Turn[] = open
         ? conv.turns.map((t) => (t === open ? { ...t, text: t.text + frame.text } : t))
         : [...conv.turns, { id: frame.id, role: "assistant", status: "streaming", text: frame.text }];
@@ -274,21 +386,39 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
     case "done": {
       const conv = getConversation(state, frame.conversation_id);
       const open = openTurn(conv);
-      if (!open) return state; // nothing streaming to close
-      const turns = patchOpenTurn(conv.turns, open, { status: "done", taskId: frame.task_id });
-      return replaceConversation(state, { ...conv, turns });
+      const next = open
+        ? replaceConversation(state, {
+            ...conv,
+            turns: patchOpenTurn(
+              conv.turns,
+              open,
+              frame.interrupted
+                ? {
+                    status: "interrupted",
+                    taskId: frame.task_id,
+                    note: "stopped · what should I do differently?",
+                  }
+                : { status: "done", taskId: frame.task_id },
+            ),
+          })
+        : state;
+      return resolveApprovalsForConversation(next, frame.conversation_id);
     }
 
     case "error": {
+      let next = state;
       if (frame.operation_kind && frame.operation_id) {
         const key = operationCorrelationKey(frame.operation_kind, frame.operation_id);
         const approvals = frame.operation_kind === "approval_response"
           ? Object.fromEntries(Object.entries(state.approvals).filter(([id]) => id !== frame.operation_id))
           : state.approvals;
-        return { ...state, approvals, operationErrors: upsert(state.operationErrors, key, frame) };
+        next = { ...state, approvals, operationErrors: upsert(state.operationErrors, key, frame) };
       }
-      if (!frame.conversation_id) return state;
-      const conv = getConversation(state, frame.conversation_id);
+      if (!frame.conversation_id) {
+        if (frame.operation_kind) return next;
+        return { ...next, globalErrors: [...next.globalErrors, frame].slice(-5) };
+      }
+      const conv = getConversation(next, frame.conversation_id);
       const open = openTurn(conv);
       const error = { code: frame.code, message: frame.message, recoverable: frame.recoverable };
       const turns: Turn[] = open
@@ -296,7 +426,10 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
         : [...conv.turns, { id: frame.id, role: "assistant", status: "error", text: "", error }];
       // rule 8: a turn is never lost — flag the input for restore regardless
       // of whether a turn had started streaming yet.
-      return replaceConversation(state, { ...conv, turns, needsInputRestore: true });
+      return resolveApprovalsForConversation(
+        replaceConversation(next, { ...conv, turns, needsInputRestore: true }),
+        frame.conversation_id,
+      );
     }
 
     case "activity": {
@@ -343,8 +476,32 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
     case "belief_state":
       return { ...state, beliefs: upsert(state.beliefs, frame.belief_id, frame) };
 
+    case "belief_deleted": {
+      const beliefs = { ...state.beliefs };
+      delete beliefs[frame.belief_id];
+      return { ...state, beliefs };
+    }
+
+    case "memory_history_state":
+      return frame.complete
+        ? { ...state, memoryHistoryLoaded: true }
+        : {
+            ...state,
+            beliefs: Object.fromEntries(
+              Object.entries(state.beliefs).filter(([, belief]) => belief.status === "active"),
+            ),
+            memoryHistoryLoaded: false,
+          };
+
     case "skill_state":
       return { ...state, skills: upsert(state.skills, frame.skill_name, frame) };
+
+    case "snapshot_complete":
+      // Authoritative snapshot terminator (real Brain sends it last). spend_update
+      // below is kept as a backstop: the mock never sends snapshot_complete, and a
+      // Brain that omits it must still converge rather than wedge in snapshot mode
+      // silently swallowing live activity that matches an earlier frame.
+      return finishSnapshot(state);
 
     case "spend_update":
       return finishSnapshot({
@@ -361,6 +518,17 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
 
     case "settings_state":
       return { ...state, settings: upsert(state.settings, frame.key, frame.status) };
+
+    case "capabilities_state":
+      return {
+        ...state,
+        capabilities: {
+          voiceInput: frame.voice_input,
+          taskControls: frame.task_controls,
+          skillControls: frame.skill_controls,
+          demoScenarios: frame.demo_scenarios,
+        },
+      };
 
     case "voice_state":
       return { ...state, voice: { ...state.voice, state: frame.state } };
@@ -414,6 +582,7 @@ export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): 
       return {
         ...state,
         connection: { ...state.connection, wsStatus: "connected" },
+        memoryHistoryLoaded: false,
         snapshot: { pending: true, taskIds: {}, approvalIds: {}, activityCounts: {} },
       };
 
@@ -423,20 +592,25 @@ export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): 
       // forever until the reconnect snapshot reconciles them (D6).
       const conversations: Record<string, ConversationState> = {};
       for (const [id, conv] of Object.entries(state.conversations)) {
-        const open = openTurn(conv);
-        conversations[id] = open
+        const interrupted = conv.turns.some(
+          (turn) => turn.role === "assistant" && turn.status === "streaming",
+        );
+        conversations[id] = interrupted
           ? {
               ...conv,
-              turns: patchOpenTurn(conv.turns, open, {
-                status: "interrupted",
-                note: "interrupted — connection lost",
-              }),
+              turns: conv.turns.map((turn) =>
+                turn.role === "assistant" && turn.status === "streaming"
+                  ? { ...turn, status: "interrupted", note: "interrupted — connection lost" }
+                  : turn,
+              ),
+              needsInputRestore: true,
             }
           : conv;
       }
       return {
         ...state,
         conversations,
+        memoryHistoryLoaded: false,
         connection: { ...state.connection, wsStatus: "reconnecting" },
         snapshot: { pending: true, taskIds: {}, approvalIds: {}, activityCounts: {} },
       };

@@ -23,7 +23,14 @@ from brain.ipc.contract import parse_ipc_message  # noqa: E402
 from brain.server import start  # noqa: E402
 
 SNAPSHOT_TYPES = {
-    "belief_state", "skill_state", "task_state", "approval_request", "settings_state", "spend_update"
+    "belief_state",
+    "skill_state",
+    "task_state",
+    "approval_request",
+    "settings_state",
+    "capabilities_state",
+    "spend_update",
+    "snapshot_complete",
 }
 
 
@@ -56,7 +63,7 @@ async def _snapshot(ws) -> list[dict]:
         frame = await _recv(ws)
         assert frame["type"] in SNAPSHOT_TYPES, frame
         frames.append(frame)
-        if frame["type"] == "spend_update":
+        if frame["type"] == "snapshot_complete":
             return frames
 
 
@@ -78,9 +85,17 @@ async def check_snapshot_reconnect_is_idempotent(port: int, token: str) -> None:
 
     assert _payloads(first_snapshot) == _payloads(second_snapshot)
     domain_keys = [
-        frame.get("belief_id") or frame.get("skill_name") or frame.get("task_id")
+        (
+            frame["type"],
+            frame.get("belief_id")
+            or frame.get("skill_name")
+            or frame.get("task_id")
+            or frame.get("approval_id")
+            or frame.get("key")
+            or frame["type"],
+        )
         for frame in first_snapshot
-        if frame["type"] != "spend_update"
+        if frame["type"] not in {"spend_update", "snapshot_complete"}
     ]
     assert len(domain_keys) == len(set(domain_keys)), "snapshot contains duplicate identities"
     print("PASS -- reconnect snapshot is contract-valid, stable, and identity-idempotent")
@@ -229,6 +244,59 @@ async def check_remaining_scenarios(port: int, token: str) -> None:
     print("PASS -- standalone task, trust, memory, voice, flood, stream, error, and degraded scenarios validate")
 
 
+async def check_memory_history_surface(port: int, token: str) -> None:
+    """Contract 1.1 moved archived/superseded beliefs out of the connect
+    snapshot and behind an explicit `memory_query`, and added `belief_deleted`
+    plus `memory_edit{op:"purge"}`. None of that had gate coverage -- this file
+    was only extended far enough to tolerate `capabilities_state`. Asserts the
+    whole path, including the half that would regress silently: that the
+    snapshot no longer carries history."""
+    ws = await _connect_ui(port, token)
+    try:
+        snapshot = await _snapshot(ws)
+        history_in_snapshot = [
+            f for f in snapshot
+            if f["type"] == "belief_state" and f["status"] in {"archived", "superseded"}
+        ]
+        assert not history_in_snapshot, history_in_snapshot
+
+        await ws.send(json.dumps(_frame("memory_query")))
+        start = await _recv(ws)
+        assert start["type"] == "memory_history_state" and start["complete"] is False, start
+        history: list[dict] = []
+        while (frame := await _recv(ws))["type"] != "memory_history_state":
+            assert frame["type"] == "belief_state", frame
+            assert frame["status"] in {"archived", "superseded"}, frame
+            history.append(frame)
+        assert frame["complete"] is True, frame
+        statuses = {f["status"] for f in history}
+        assert statuses == {"archived", "superseded"}, history
+
+        # purge is archived-only, and its rejection must be correlated or the
+        # UI's rule-3 lock on that row never clears.
+        await ws.send(json.dumps(_frame("memory_edit", belief_id="belief-editor", op="purge")))
+        refused = await _recv(ws)
+        assert refused["type"] == "error" and refused["code"] == "memory_purge_invalid", refused
+        assert refused["operation_kind"] == "memory_edit", refused
+        assert refused["operation_id"] == "belief-editor", refused
+
+        archived = next(f["belief_id"] for f in history if f["status"] == "archived")
+        await ws.send(json.dumps(_frame("memory_edit", belief_id=archived, op="purge")))
+        deleted = await _recv(ws)
+        assert deleted["type"] == "belief_deleted" and deleted["belief_id"] == archived, deleted
+
+        # Purged for real: the history query no longer returns it.
+        await ws.send(json.dumps(_frame("memory_query")))
+        remaining = []
+        while (frame := await _recv(ws))["type"] != "memory_history_state" or frame["complete"] is False:
+            if frame["type"] == "belief_state":
+                remaining.append(frame["belief_id"])
+        assert archived not in remaining, remaining
+    finally:
+        await ws.close()
+    print("PASS -- memory history query, purge, and belief_deleted round-trip (contract 1.1)")
+
+
 async def main() -> None:
     print("=== Halo Phase 1 mock E2E check ===")
     server, token = await start(mock=True)
@@ -239,6 +307,9 @@ async def main() -> None:
         await check_undo_reverses(port, token)
         await check_everything_walkthrough(port, token)
         await check_remaining_scenarios(port, token)
+        # Last: purge permanently drops a seeded belief, so anything asserting
+        # on the seeded set must have run already.
+        await check_memory_history_surface(port, token)
     finally:
         server.close()
         await server.wait_closed()

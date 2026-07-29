@@ -27,12 +27,18 @@ test("keeps the composer labelled and announces connection and response status",
     conversationId: "chat", needsInputRestore: false,
     turns: [{ id: "assistant", role: "assistant", status: "streaming", text: "" }],
   } } });
-  const props = { conversationId: "chat", sendUserMsg: vi.fn(), sendMic: vi.fn(), inputId: "halo-composer" };
+  const props = {
+    conversationId: "chat",
+    sendUserMsg: vi.fn(),
+    sendInterrupt: vi.fn(),
+    sendMic: vi.fn(),
+    inputId: "halo-composer",
+  };
   const view = render(<ChatView {...props} connState="connected" />);
   expect(screen.getByLabelText("Message Halo")).not.toBeNull();
-  expect(screen.getByRole("status").textContent).toContain("Halo is thinking.");
+  expect(screen.getByRole("status").textContent).toContain("I'm thinking.");
   view.rerender(<ChatView {...props} connState="reconnecting" />);
-  expect(screen.getByRole("status").textContent).toContain("Halo is reconnecting. Messages will send when reconnected.");
+  expect(screen.getByRole("status").textContent).toContain("I'm reconnecting. Your message will send once I'm back.");
 });
 
 test("assistant failures are assertive alerts", () => {
@@ -41,6 +47,15 @@ test("assistant failures are assertive alerts", () => {
     turns: [{ id: "assistant", role: "assistant", status: "error", text: "",
       error: { code: "failed", message: "Could not answer", recoverable: true } }],
   } } });
-  render(<ChatView conversationId="chat" connState="connected" sendUserMsg={vi.fn()} sendMic={vi.fn()} inputId="halo-composer" />);
+  render(
+    <ChatView
+      conversationId="chat"
+      connState="connected"
+      sendUserMsg={vi.fn()}
+      sendInterrupt={vi.fn()}
+      sendMic={vi.fn()}
+      inputId="halo-composer"
+    />,
+  );
   expect(screen.getByRole("alert").textContent).toContain("Could not answer");
 });

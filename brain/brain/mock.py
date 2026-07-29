@@ -254,9 +254,11 @@ def _seed_spend() -> dict:
 async def push_snapshot(send: SendFn) -> None:
     """D6: right after hello_ack, push seeded + live state to the connecting
     client only. Id-keyed frames -> idempotent on reconnect. `spend_update`
-    is always pushed last; tests rely on that to know the snapshot is done."""
+    is pushed last here; the shared connect dispatcher then sends the
+    authoritative `snapshot_complete` marker for both mock and real paths."""
     for belief in _beliefs.values():
-        await send("belief_state", belief)
+        if belief["status"] == "active":
+            await send("belief_state", belief)
     for skill in _skills.values():
         await send("skill_state", skill)
     for task in _tasks.values():
@@ -271,6 +273,15 @@ async def push_snapshot(send: SendFn) -> None:
     _settings["openrouter_key"] = await asyncio.to_thread(secrets_store.key_status)
     for key, status in _settings.items():
         await send("settings_state", {"key": key, "status": status})
+    await send(
+        "capabilities_state",
+        {
+            "voice_input": True,
+            "task_controls": True,
+            "skill_controls": True,
+            "demo_scenarios": True,
+        },
+    )
     await send("spend_update", _seed_spend())
 
 
@@ -387,7 +398,11 @@ async def handle_memory_edit(msg: dict, broadcast: BroadcastFn) -> None:
     op = msg.get("op")
     cur = _beliefs.get(belief_id)
     if cur is None:
-        return  # ponytail: unknown belief -> silent no-op
+        await broadcast("error", {
+            "code": "belief_not_found", "message": "I couldn't find that memory.", "recoverable": True,
+            "operation_kind": "memory_edit", "operation_id": str(belief_id),
+        })
+        return
     if op == "edit":
         new_id = str(uuid.uuid4())
         superseded = {**cur, "status": "superseded", "superseded_by": new_id,
@@ -405,9 +420,44 @@ async def handle_memory_edit(msg: dict, broadcast: BroadcastFn) -> None:
         _beliefs[belief_id] = archived
         await broadcast("belief_state", archived)
     elif op == "restore":
-        restored = {**cur, "status": "active"}
+        successor_id = cur.get("superseded_by") if cur.get("status") == "superseded" else None
+        visited = {belief_id}
+        while successor_id and successor_id not in visited:
+            visited.add(successor_id)
+            successor = _beliefs.get(successor_id)
+            if successor is None:
+                break
+            if successor.get("status") == "active":
+                changed = {**successor, "status": "superseded", "superseded_by": belief_id}
+                _beliefs[successor_id] = changed
+                await broadcast("belief_state", changed)
+                break
+            successor_id = successor.get("superseded_by")
+        restored = {k: v for k, v in cur.items() if k != "superseded_by"}
+        restored["status"] = "active"
         _beliefs[belief_id] = restored
         await broadcast("belief_state", restored)
+    elif op == "purge":
+        if cur.get("status") != "archived":
+            await broadcast("error", {
+                "code": "memory_purge_invalid",
+                "message": "Only archived memories can be permanently deleted.",
+                "recoverable": True,
+                "operation_kind": "memory_edit",
+                "operation_id": str(belief_id),
+            })
+            return
+        del _beliefs[belief_id]
+        await broadcast("belief_deleted", {"belief_id": belief_id})
+
+
+@_swallow_closed
+async def handle_memory_query(_msg: dict, send: SendFn) -> None:
+    await send("memory_history_state", {"complete": False})
+    for belief in _beliefs.values():
+        if belief["status"] in {"archived", "superseded"}:
+            await send("belief_state", belief)
+    await send("memory_history_state", {"complete": True})
 
 
 @_swallow_closed
@@ -423,7 +473,15 @@ async def handle_skill_op(msg: dict, broadcast: BroadcastFn) -> None:
     op = msg.get("op")
     cur = _skills.get(skill_name)
     if cur is None:
-        return  # ponytail: unknown skill -> silent no-op
+        # A silent return wedges the caller's rule-3 lock forever: the button
+        # disabled on press only clears on a confirming skill_state, and an
+        # unknown skill can never produce one. Same correlated-error shape as
+        # handle_memory_edit's belief_not_found.
+        await broadcast("error", {
+            "code": "skill_not_found", "message": "I couldn't find that skill.", "recoverable": True,
+            "operation_kind": "skill_op", "operation_id": str(skill_name),
+        })
+        return
     if op == "trial":
         trial_task = f"skill-trial-{skill_name}"
         for line in (f"Trying {skill_name} on a sample input…", "Looks right.", "Trial run complete."):

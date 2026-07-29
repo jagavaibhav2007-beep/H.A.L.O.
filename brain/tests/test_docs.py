@@ -3,13 +3,16 @@
 No test framework -- plain asyncio + assert, matching test_files.py. Run with:
     python brain/tests/test_docs.py
 
-Everything runs under HALO_LLM_STUB: map JSON parsing fails on the stub reply,
-so the honest-degrade path produces deterministic per-doc gists.
+Everything runs under HALO_LLM_STUB. The stub's raw reply is prose, which is the
+honest-degrade path -- and a degraded digest is deliberately never cached, so map
+calls are answered with canned JSON here and MAP_REPLIES_JSON flips that off for
+the one check that exercises the degrade path itself.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -21,7 +24,7 @@ _TMP = tempfile.mkdtemp(prefix="halo-test-docs-")
 os.environ["LOCALAPPDATA"] = _TMP  # store's default DB path lands in the temp dir
 os.environ["HALO_LLM_STUB"] = "1"
 
-from brain import gate, store  # noqa: E402
+from brain import extract, gate, store  # noqa: E402
 from brain.tools import docs  # noqa: E402  -- registers doc_digest
 from brain.tools.files import _sha  # noqa: E402
 
@@ -38,14 +41,39 @@ B.write_text("# Beta\n\nHeadcount dropped from 40 to 31.", encoding="utf-8")
 
 LLM_CALLS: list[str] = []
 _real_llm_text = docs._llm_text
+# Map calls answer with real JSON so the cache path can be tested at all: the
+# raw stub reply is prose, which is the DEGRADED path, and a degraded digest is
+# deliberately never cached. Flip this to exercise that instead.
+MAP_REPLIES_JSON = True
 
 
 async def _counting_llm_text(messages, api_key):
-    LLM_CALLS.append(messages[0]["content"][:20])
+    system = messages[0]["content"]
+    LLM_CALLS.append(system[:20])
+    if system is docs._MAP_PROMPT or system == docs._MAP_PROMPT:
+        if MAP_REPLIES_JSON:
+            return json.dumps({
+                "path": "ignored -- the caller's path wins",
+                "gist": "a well-formed digest", "key_points": ["kp"],
+                "entities": ["e"], "numbers": ["1"], "caveats": [], "confidence": 0.9,
+            })
     return await _real_llm_text(messages, api_key)
 
 
 docs._llm_text = _counting_llm_text
+
+# Same trick for extraction, so "a cache hit does not re-parse" is an assertion
+# rather than an inference.
+EXTRACTS: list[str] = []
+_real_extract_text = extract.extract_text
+
+
+def _counting_extract_text(path):
+    EXTRACTS.append(str(path))
+    return _real_extract_text(path)
+
+
+extract.extract_text = _counting_extract_text
 
 
 async def broadcast(msg_type: str, payload: dict) -> None:
@@ -68,20 +96,50 @@ async def check_digest_and_cache() -> None:
     assert out["digest"], "merged digest empty"
     assert len(out["docs"]) == 2
     for d, p in zip(out["docs"], (A, B)):
-        assert d["path"] == str(p), d
-        # Stub reply is not JSON -> honest degrade: raw reply as gist, 0.3.
-        assert d["gist"].startswith("stub") and d["confidence"] == 0.3, d
+        assert d["path"] == str(p), d  # the caller's path, never the model's echo
+        assert d["gist"] == "a well-formed digest" and d["confidence"] == 0.9, d
+        assert not d.get("degraded"), d
     # Small files, no chunking: 2 map calls + 1 reduce.
     assert len(LLM_CALLS) == 3, LLM_CALLS
     assert store.get_digest(str(A), _sha(A), docs.DIGEST_VERSION) is not None
     assert store.get_digest(str(B), _sha(B), docs.DIGEST_VERSION) is not None
-    print("[check 2] digest of 2 md files: merged output + per-doc degrade entries + cache rows: OK")
+    print("[check 2] digest of 2 md files: merged output + per-doc entries + cache rows: OK")
 
     LLM_CALLS.clear()
+    EXTRACTS.clear()
     out2 = await docs._doc_digest({"paths": [str(A), str(B)], "focus": "numbers"})
     assert len(out2["docs"]) == 2
     assert len(LLM_CALLS) == 1, f"cache hit should skip both map calls: {LLM_CALLS}"
-    print("[check 3] second call hits the cache: only the reduce LLM call runs: OK")
+    # Hash-before-extract: the content is hashed and looked up FIRST, so a hit
+    # never re-parses. The old order extracted, then hashed, then looked up --
+    # two reads either side of an LLM round-trip, so saving the file in between
+    # cached the OLD content's digest under the NEW content's sha, permanently.
+    assert EXTRACTS == [], f"cache hit re-extracted the file: {EXTRACTS}"
+    print("[check 3] cache hit skips both the map call and the extraction entirely: OK")
+
+
+async def check_degraded_digest_is_not_cached() -> None:
+    """A parse failure is a fact about one reply, not about the file. Caching it
+    pins the degraded answer under that sha forever -- there is no invalidation
+    short of bumping DIGEST_VERSION."""
+    global MAP_REPLIES_JSON
+    C = ROOT / "gamma.md"
+    C.write_text("# Gamma\n\nMargin held at 22%.", encoding="utf-8")
+    MAP_REPLIES_JSON = False  # raw stub reply is prose -> the degrade path
+    try:
+        out = await docs._doc_digest({"paths": [str(C)]})
+    finally:
+        MAP_REPLIES_JSON = True
+    d = out["docs"][0]
+    assert d["confidence"] == 0.3 and d["degraded"] is True, d
+    assert store.get_digest(str(C), _sha(C), docs.DIGEST_VERSION) is None, (
+        "a degraded digest was cached -- it would be served forever"
+    )
+    # A later good reply for the same unchanged file still caches normally.
+    out2 = await docs._doc_digest({"paths": [str(C)]})
+    assert not out2["docs"][0].get("degraded"), out2
+    assert store.get_digest(str(C), _sha(C), docs.DIGEST_VERSION) is not None
+    print("[check 7] a degraded digest is not cached; a later good one is: OK")
 
 
 async def check_cap_and_bad_file() -> None:
@@ -118,6 +176,7 @@ async def main() -> None:
     await check_digest_and_cache()
     await check_cap_and_bad_file()
     await check_gated_run()
+    await check_degraded_digest_is_not_cached()
     print("[brain.docs] self-check OK")
 
 

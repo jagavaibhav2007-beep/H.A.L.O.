@@ -20,7 +20,14 @@ Phase 2 is a solid *interactive-chat* spine, but its architecture equates "the a
 | 2 | **Snapshot cost grows with all-time data and collides with the 1 MiB deferred-broadcast cap → reconnect livelock.** `rehydrate_pending` deserializes state for *every thread ever created* on *every connect* (`brain/brain/graph.py:504-531`); `checkpoints.db` is never pruned (~quadratic per-thread growth); while a snapshot streams, broadcasts queue against 256 frames/1 MiB with overflow = forced disconnect (server.py:38-39,143-158); UI retries on a fixed 1 s timer. | graph.py:99-104, 504-531; server.py; useHaloConnection.ts:126-136 | Phase 3d streams `stream_frame` at ~2 fps (~130 KB JPEG) **by spec** → deferred queue overflows in ~4 s → any webview reconnecting during a live stream is dropped mid-snapshot, retries at 1 Hz, overflows again: it can never rejoin, and each loop re-runs the full rehydrate scan. |
 | 3 | **No contract versioning + UI parser hard-closes on any unknown type *or field*** (`ui/src/ipc/contract.ts:366-416`); any parse throw → `ws.close()` → 1 s retry forever (useHaloConnection.ts:106-124); `hello`/`hello_ack` carry no version. | contract.ts, useHaloConnection.ts, shared/ipc-contract.json | Every Phase 3 sub-phase adds frame types while the Brain restarts independently of a stale webview bundle (the stable launcher serves stale JS by design). One new outbound frame = infinite reconnect storm rendering as "reconnecting…" flicker, with the Brain re-running the P1-2 snapshot once per second per webview. |
 
-### Live bugs (fix now regardless of Phase 3)
+### Live bugs (fix now regardless of Phase 3) — **both fixed, 2026-07-23**
+
+Bug #4 is closed: `mic` is now listed in `_REAL_UNSUPPORTED_OPS` and answered with a
+correlated `operation_unsupported` error ("Voice input is not available in the real
+Brain yet"), so the affordance is honest instead of a silent no-op. Bug #5 is closed:
+`graph.py:575` spawns `note_turn` through `memory._spawn`, the repo's retained-task
+helper, so it can no longer be GC'd mid-flight. The rows below are kept for the
+record.
 
 | # | Finding | Evidence |
 |---|---------|----------|

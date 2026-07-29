@@ -1,6 +1,9 @@
 # System Design: Token Economics & Tool Answerability
 
-Status: **design — not yet implemented.** Supersedes nothing; complements [13-document-ingestion](13-document-ingestion.md), which attacked a different term of the same cost equation and is corrected in-place by this doc's *Corrections to doc 13* section.
+Status: **implemented** (shipped in `d19876c`, "Reduce token cost of file/loop-heavy
+turns; add real usage accounting"): mtime-aware `dir_list`/`file_search` rows and
+newest-first sorting, the `escalated` per-turn reset, the turn token budget, and
+contract change C4. Supersedes nothing; complements [13-document-ingestion](13-document-ingestion.md), which attacked a different term of the same cost equation and is corrected in-place by this doc's *Corrections to doc 13* section.
 
 ## Problem (measured)
 

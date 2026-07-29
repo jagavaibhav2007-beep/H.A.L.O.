@@ -128,9 +128,9 @@ def _frame_visible_to(role: str, msg_type: str, payload: dict) -> bool:
 # Clients still receiving their snapshot: broadcasts aimed at them are held
 # here and flushed, in order, once the snapshot finishes. A client is added to
 # `authenticated` BEFORE its snapshot so no event is missed, but a broadcast
-# landing mid-snapshot would otherwise interleave into it -- breaking the
-# "spend_update is the snapshot's last frame" sentinel every drain relies on,
-# and showing the UI a live delta before the state it applies to.
+# landing mid-snapshot would otherwise interleave into it -- landing ahead of
+# the `snapshot_complete` marker that closes it, and showing the UI a live
+# delta before the state it applies to.
 _deferred: dict[ServerConnection, list[str]] = {}
 _deferred_bytes: dict[ServerConnection, int] = {}
 
@@ -166,10 +166,40 @@ async def _broadcast(authenticated: dict[ServerConnection, str], msg_type: str, 
             await asyncio.wait_for(client.send(raw), timeout=_SEND_TIMEOUT_S)
         except (ConnectionClosed, asyncio.TimeoutError):
             # Closed, or stalled-but-open (buffer full). Drop it from routing so
-            # it can't hold the conversation lock hostage; it will reconnect and
-            # re-snapshot. ponytail: transport teardown is left to the
-            # connection handler's own finally.
+            # it can't hold the conversation lock hostage, then close the socket
+            # -- the handler is parked in `async for raw in ws` and only reaches
+            # its `finally` once the socket closes, so leaving teardown to it
+            # leaks the socket, its task and its state for the process lifetime.
             authenticated.pop(client, None)
+            try:
+                await asyncio.wait_for(client.close(code=1013, reason="send timeout"), _SEND_TIMEOUT_S)
+            except (ConnectionClosed, asyncio.TimeoutError):
+                pass
+
+
+async def _release_deferred(ws: ServerConnection, authenticated: dict[ServerConnection, str]) -> None:
+    """Snapshot finished: flush anything that arrived during it, in order.
+
+    Drains from the FRONT and drops the key only once the queue is empty.
+    Popping the key first would leave `_deferred[ws]` absent for the whole
+    flush, so a `_broadcast` landing mid-drain would take the live path and
+    overtake frames still held -- reopening the very interleave window the
+    deferral exists to close. Module-level rather than a handler closure so a
+    test can drive the real function instead of reimplementing the drain."""
+    held = _deferred.get(ws)
+    while held:
+        raw = held[0]
+        try:
+            await asyncio.wait_for(ws.send(raw), timeout=_SEND_TIMEOUT_S)
+        except (ConnectionClosed, asyncio.TimeoutError):
+            authenticated.pop(ws, None)
+            _deferred.pop(ws, None)
+            _deferred_bytes.pop(ws, None)
+            return
+        held.pop(0)
+        _deferred_bytes[ws] = _deferred_bytes.get(ws, 0) - len(raw.encode("utf-8"))
+    _deferred.pop(ws, None)
+    _deferred_bytes.pop(ws, None)
 
 
 def write_session_file(port: int, token: str, session_file: Path = SESSION_FILE) -> None:
@@ -351,7 +381,7 @@ _REAL_UNSUPPORTED_OPS: tuple[str, ...] = ("task_op", "lane_pin", "mic", "skill_o
 # test_server enumerates the contract and fails if this set drifts. Keep it
 # beside the if/elif chain in _connection_handler that it mirrors.
 _REAL_DISPATCH_TYPES: frozenset[str] = frozenset({
-    "user_msg", "settings_update", "interrupt", "approval_response", "memory_edit", "undo",
+    "user_msg", "settings_update", "interrupt", "approval_response", "memory_edit", "memory_query", "undo",
     *_REAL_UNSUPPORTED_OPS,
 })
 
@@ -362,6 +392,7 @@ _MOCK_DISPATCH: dict[str, tuple[str, bool]] = {
     "task_op": ("handle_task_op", False),
     "lane_pin": ("handle_lane_pin", False),
     "memory_edit": ("handle_memory_edit", False),
+    "memory_query": ("handle_memory_query", True),
     "skill_op": ("handle_skill_op", False),
     "mic": ("handle_mic", False),
     "settings_update": ("handle_settings_update", True),
@@ -373,7 +404,7 @@ def _operation_correlation(msg: dict | None) -> dict | None:
         return None
     fields = {
         "undo": "undo_token", "memory_edit": "belief_id", "approval_response": "reply_to",
-        "task_op": "task_id", "lane_pin": "task_id",
+        "task_op": "task_id", "lane_pin": "task_id", "skill_op": "skill_name",
     }
     kind = msg.get("type")
     target = msg.get(fields.get(kind, ""))
@@ -386,9 +417,15 @@ async def _send_unsupported_operation(msg: dict, send_fn) -> None:
     correlation = _operation_correlation(msg)
     if correlation is None:
         correlation = {"operation_kind": msg["type"], "operation_id": msg["id"]}
+    messages = {
+        "task_op": "Task controls are not available in the real Brain yet.",
+        "lane_pin": "Task lane controls are not available in the real Brain yet.",
+        "mic": "Voice input is not available in the real Brain yet.",
+        "skill_op": "Skill controls are not available in the real Brain yet.",
+    }
     await send_fn("error", {
         "code": "operation_unsupported",
-        "message": "Task controls are not available in the real Brain yet.",
+        "message": messages.get(msg["type"], "This operation is not available in the real Brain yet."),
         "recoverable": True,
         **correlation,
     })
@@ -442,8 +479,15 @@ async def _auth(ws: ServerConnection, token: str, timeout: float) -> str | None:
         logger.info("dropping connection: first frame was not hello")
         return None
 
+    # compare_digest on two str operands raises TypeError unless BOTH are pure
+    # ASCII, and the contract only checks that `token` is a str -- so a
+    # non-ASCII token from any unauthenticated local process would escape this
+    # function as an unhandled traceback. Bytes are always comparable, and the
+    # comparison stays constant-time.
     supplied = parsed.get("token")
-    if not isinstance(supplied, str) or not secrets.compare_digest(supplied, token):
+    if not isinstance(supplied, str) or not secrets.compare_digest(
+        supplied.encode("utf-8"), token.encode("utf-8")
+    ):
         logger.info("dropping connection: bad token")
         return None
 
@@ -503,17 +547,6 @@ async def _connection_handler(
     _deferred_bytes[ws] = 0
     logger.info("client authenticated (role=%s, mock=%s)", role, mock)
 
-    async def _release_deferred() -> None:
-        """Snapshot finished: flush anything that arrived during it, in order."""
-        held = _deferred.pop(ws, None)
-        _deferred_bytes.pop(ws, None)
-        for raw in held or []:
-            try:
-                await asyncio.wait_for(ws.send(raw), timeout=_SEND_TIMEOUT_S)
-            except (ConnectionClosed, asyncio.TimeoutError):
-                authenticated.pop(ws, None)
-                return
-
     try:
         if mock and role == "ui":
             # D6: snapshot goes only to the connecting UI client, right after
@@ -529,9 +562,17 @@ async def _connection_handler(
 
             graph_mod = await asyncio.to_thread(importlib.import_module, "brain.graph")
             await graph_mod.snapshot(send_fn)
+        if role == "ui":
+            # Explicit end-of-snapshot marker. Both snapshot builders happen to
+            # end with `spend_update`, but the contract never gave that frame a
+            # terminal role (it's a global that can arrive at any time), so the
+            # UI reducer had no honest signal for leaving snapshot mode. Sent
+            # here rather than inside either builder so real and mock share one
+            # site. Voice gets no snapshot, so it gets no marker either.
+            await send_fn("snapshot_complete", {})
         # Snapshot done (or none was owed -- Voice gets no snapshot): release
         # anything broadcast while it was streaming, then go live.
-        await _release_deferred()
+        await _release_deferred(ws, authenticated)
 
         async for raw in ws:
             try:
@@ -568,6 +609,10 @@ async def _connection_handler(
                 from brain import memory
 
                 runtime.spawn(memory.handle_memory_edit(msg, broadcast_fn), send_fn, msg)
+            elif not mock and msg["type"] == "memory_query":
+                from brain import memory
+
+                runtime.spawn(memory.push_history(send_fn), send_fn, msg)
             elif not mock and msg["type"] == "undo":
                 # Step 6: undo is a global feed action, not tied to a
                 # conversation -- no conversation lock; token consumption is
@@ -634,6 +679,10 @@ async def _run(mock: bool = False) -> None:
         try:
             await server.serve_forever()
         finally:
+            # Drop the port+token so a client can't dial a dead Brain (or, worse,
+            # an unrelated local listener that later grabs the same port). The
+            # instance lock is released just after, so a fresh Brain rewrites it.
+            SESSION_FILE.unlink(missing_ok=True)
             if not mock:
                 # Graceful shutdown flushes any dirty conversations' memory
                 # (graph.aclose -> memory.flush_all) before the process exits.

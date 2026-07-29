@@ -33,7 +33,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "brain"))
 
+import atexit
+import shutil
+
 _TMP = tempfile.mkdtemp(prefix="halo-phase2-check-")
+atexit.register(shutil.rmtree, _TMP, ignore_errors=True)  # don't leak on every run
 os.environ["HALO_LLM_STUB"] = "1"
 os.environ["HALO_EXTRACT_STUB"] = "1"
 # v2 memory: consolidation is idle-debounced. Shrink the idle window to ~50ms
@@ -51,10 +55,20 @@ from brain import gate, graph, store  # noqa: E402
 from brain.server import start  # noqa: E402
 
 FILES_DIR = Path(tempfile.mkdtemp(prefix="halo-phase2-files-")).resolve()
+atexit.register(shutil.rmtree, FILES_DIR, ignore_errors=True)  # don't leak on every run
 store.connect()
 store.set_setting("project_roots", [str(FILES_DIR)])
 
-SNAPSHOT_TYPES = {"settings_state", "task_state", "approval_request", "activity", "belief_state", "spend_update"}
+SNAPSHOT_TYPES = {
+    "settings_state",
+    "capabilities_state",
+    "task_state",
+    "approval_request",
+    "activity",
+    "belief_state",
+    "spend_update",
+    "snapshot_complete",
+}
 
 EXECUTED: list[tuple[str, dict]] = []
 
@@ -110,7 +124,7 @@ async def _drain_snapshot(ws) -> list[dict]:
         frame = await _recv(ws)
         assert frame["type"] in SNAPSHOT_TYPES, frame
         frames.append(frame)
-        if frame["type"] == "spend_update":
+        if frame["type"] == "snapshot_complete":
             return frames
 
 
@@ -150,8 +164,10 @@ async def check_real_chat_turn(port: int, token: str) -> None:
         # and the Settings readout depend on is locked here so it can't silently
         # regress to the pre-Track-C state that undercounted spend ~4x.
         snap = await _drain_snapshot(ws)
-        assert snap[-1]["type"] == "spend_update" and isinstance(snap[-1].get("session_tokens"), int), snap[-1]
-        assert "last_turn_tokens" not in snap[-1], "snapshot has no 'last turn' to report"
+        assert snap[-1]["type"] == "snapshot_complete", snap[-1]  # explicit end-of-snapshot marker
+        spend = next(f for f in snap if f["type"] == "spend_update")
+        assert isinstance(spend.get("session_tokens"), int), spend
+        assert "last_turn_tokens" not in spend, "snapshot has no 'last turn' to report"
 
         await ws.send(json.dumps(_frame("user_msg", text="ping", conversation_id="p2-chat", source="ui")))
         tokens: list[str] = []
@@ -181,18 +197,18 @@ async def check_real_chat_turn(port: int, token: str) -> None:
 async def check_tier_behaviors(port: int, token: str) -> None:
     ws = await _connect_ui(port, token)
     try:
-        # Tier 1: runs silently -- no approval, no activity, just an action row.
+        # Tier 1: runs without approval and emits a quiet, non-narrated activity
+        # so the UI remains truthful about backend work.
         await _call_tool(ws, "p2-t1", "p2_t1", {"path": "x"})
-        # _recv_type (not raw _recv): a previous check's turn finishes as a
-        # background task and its spend_update is a GLOBAL broadcast that
-        # correctly reaches this connection too. Skip it rather than reading it
-        # as this turn's frame.
+        act = await _recv_type(ws, "activity")
+        assert act["tier"] == 1 and act["lane"] == 1, act
+        assert act["narrate"] is False and act["undoable"] is False, act
         frame = await _recv_type(ws, "done")
         assert frame["conversation_id"] == "p2-t1", frame
         assert ("p2_t1", {"path": "x"}) in EXECUTED
         rows = [a for a in store.recent_actions(200) if a["tool"] == "p2_t1"]
         assert rows and rows[0]["tier"] == 1 and rows[0]["result"] == "ok", rows
-        print("PASS -- Tier 1: runs silently, action row written, no approval/activity (criterion 3)")
+        print("PASS -- Tier 1: runs without approval, writes an action row, and emits quiet activity (criterion 3)")
 
         # Tier 2: runs + surfaces an activity.
         await _call_tool(ws, "p2-t2", "p2_t2", {})
@@ -300,6 +316,8 @@ async def check_doc_digest(port: int, token: str) -> None:
     ws = await _connect_ui(port, token)
     try:
         await _call_tool(ws, "p2-digest", "doc_digest", {"paths": [str(d1), str(d2)]})
+        act = await _recv_type(ws, "activity", timeout=30)
+        assert act["tier"] == 1 and act["narrate"] is False, act
         done = await _recv_type(ws, "done", timeout=30)
         assert done["conversation_id"] == "p2-digest", done
     finally:
@@ -315,10 +333,17 @@ async def check_doc_digest(port: int, token: str) -> None:
     assert "digest-a.md" in results[0] and "digest-b.md" in results[0], results[0]
     tokens_est = len(results[0]) // 4
     assert tokens_est < 2500, f"conversation-visible digest too big: ~{tokens_est} tokens"
+    # Under HALO_LLM_STUB the stub reply is prose, so every per-doc digest takes
+    # the honest-degrade path -- and a degraded digest is deliberately NEVER
+    # cached (it would pin the degraded answer under that sha forever, with no
+    # invalidation short of bumping DIGEST_VERSION). So the E2E-correct
+    # assertion here is zero rows: the real graph never manufactures a
+    # non-degraded digest offline. The happy-path cache-write is exercised in
+    # test_docs.py check 2, which stubs valid JSON in.
     rows = store.connect().execute("SELECT COUNT(*) AS n FROM digest_cache").fetchone()["n"]
-    assert rows >= 2, f"expected >=2 digest cache rows, found {rows}"
+    assert rows == 0, f"degraded digests must not be cached, found {rows} rows"
     print("PASS -- doc_digest: turn completes, conversation-visible result stays "
-          f"~{tokens_est} tokens (<2500), digest cache rows written (Layer 2, systemdesign/13)")
+          f"~{tokens_est} tokens (<2500), degraded digests not cached (Layer 2, systemdesign/13)")
 
 
 # --------------------------------------------------------------- criterion 2
@@ -439,7 +464,7 @@ async def main():
             await ws.send(json.dumps(frame("hello", token=token)))
             ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             assert ack["type"] == "hello_ack", ack
-            while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
+            while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "snapshot_complete":
                 pass
             await ws.send(json.dumps(frame("user_msg", text="hello", conversation_id="km", source="ui")))
             err = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))

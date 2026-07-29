@@ -13,7 +13,15 @@ const skill: SkillStateMsg = {
 beforeEach(() => {
   installLocalStorage();
   useHaloStore.setState(useHaloStore.getInitialState(), true);
-  useHaloStore.setState({ skills: { [skill.skill_name]: skill } });
+  useHaloStore.setState({
+    skills: { [skill.skill_name]: skill },
+    capabilities: {
+      voiceInput: false,
+      taskControls: false,
+      skillControls: true,
+      demoScenarios: false,
+    },
+  });
 });
 afterEach(cleanup);
 

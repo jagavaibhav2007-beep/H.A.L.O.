@@ -115,7 +115,114 @@ def check_docx_via_mammoth() -> None:
     _minimal_docx(p, "Hello docx world")
     md = extract.extract_text(p)
     assert "Hello docx world" in md, md
-    print("[check 5] .docx converts via mammoth: OK")
+    # mammoth's own markdown writer is deprecated upstream, so this now goes
+    # HTML -> markdownify (the .html path's converter). The output must still be
+    # markdown, not the intermediate HTML.
+    assert "<p>" not in md and "</p>" not in md, md
+    print("[check 5] .docx converts via mammoth HTML + markdownify: OK")
+
+
+def check_sheet_and_page_caps_bound_the_work() -> None:
+    """These cap the WORK, not just the output. Extraction runs under
+    asyncio.to_thread, which is not cancellable -- an unbounded parse holds a
+    pool thread for the process lifetime and no timeout can fire."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for i in range(extract._XLSX_SHEET_CAP + 5):
+        wb.create_sheet(f"S{i}").append(["v", i])
+    p = TMP / "many_sheets.xlsx"
+    wb.save(p)
+    md = extract.extract_text(p)
+    assert f"## S{extract._XLSX_SHEET_CAP - 1}" in md, "capped short of the limit"
+    assert f"## S{extract._XLSX_SHEET_CAP}" not in md, "sheet cap did not bound the workbook"
+    assert f"truncated at {extract._XLSX_SHEET_CAP} sheets" in md, md
+
+    # Page cap: a real multi-page text PDF is awkward to build, so drive the
+    # constant down instead -- the branch under test is the same one.
+    prev = extract._PDF_PAGE_CAP
+    extract._PDF_PAGE_CAP = 1
+    try:
+        w = PdfWriter()
+        for _ in range(3):
+            w.add_blank_page(width=200, height=200)
+        p2 = TMP / "three_blank.pdf"
+        with p2.open("wb") as handle:
+            w.write(handle)
+        pages_read: list[int] = []
+        real_reader = extract.PdfReader
+
+        class _CountingReader(real_reader):  # type: ignore[misc,valid-type]
+            @property
+            def pages(self):
+                got = super().pages
+                pages_read.append(len(got))
+                return got
+
+        extract.PdfReader = _CountingReader
+        try:
+            try:
+                extract.extract_text(p2)  # blank pages -> honest "no text" error
+            except ValueError:
+                pass
+        finally:
+            extract.PdfReader = real_reader
+        # The point: the fallback asked for len(pages) but only ever indexed
+        # within the cap -- it never iterated all three.
+        assert pages_read and pages_read[0] == 3, pages_read
+    finally:
+        extract._PDF_PAGE_CAP = prev
+    print("[check 8] xlsx sheet cap and pdf page cap bound the parse work: OK")
+
+
+def check_oversized_file_refused_once() -> None:
+    """No size check anywhere was a Tier-1-inside-roots OOM of the Brain: a
+    multi-GB file loaded entirely, and the resulting MemoryError was caught by
+    _file_read's `except Exception` fallback, which then read the file AGAIN."""
+    p = TMP / "huge.bin"
+    with p.open("wb") as handle:  # sparse: no real disk cost
+        handle.truncate(extract._MAX_BYTES + 1)
+
+    reads: list[str] = []
+    real_open = Path.open
+
+    def _counting_open(self, *a, **kw):
+        if self == p:
+            reads.append(str(a[:1]))
+        return real_open(self, *a, **kw)
+
+    Path.open = _counting_open
+    try:
+        try:
+            files._file_read({"path": str(p)})
+            assert False, "an oversized file should be refused, not read"
+        except ValueError as e:
+            assert "refusing to read" in str(e), e
+    finally:
+        Path.open = real_open
+    assert reads == [], f"the refused file was opened anyway ({len(reads)}x): {reads}"
+
+    # And a MemoryError from a converter must not fall through to the raw-read
+    # fallback -- that fallback re-reads the same file that just did not fit.
+    small = TMP / "small.md"
+    small.write_text("hi", encoding="utf-8")
+    calls: list[str] = []
+    real_extract = extract.extract_text
+
+    def _boom(path):
+        calls.append(str(path))
+        raise MemoryError("simulated allocation failure")
+
+    files.extract.extract_text = _boom
+    try:
+        try:
+            files._file_read({"path": str(small)})
+            assert False, "MemoryError should propagate, not be swallowed"
+        except MemoryError:
+            pass
+    finally:
+        files.extract.extract_text = real_extract
+    assert len(calls) == 1, f"file was read {len(calls)} times after MemoryError, expected 1"
+    print("[check 9] oversized file refused without reading; MemoryError never triggers a second read: OK")
 
 
 def check_pdf_extraction_honesty() -> None:
@@ -172,6 +279,8 @@ async def main() -> None:
     check_docx_via_mammoth()
     check_pdf_extraction_honesty()
     check_file_read_pagination_and_cap()
+    check_sheet_and_page_caps_bound_the_work()
+    check_oversized_file_refused_once()
     print("[brain.extract] self-check OK")
 
 

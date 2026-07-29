@@ -28,7 +28,7 @@ class IpcEnvelope(TypedDict):
 # envelope/field change; a major mismatch across the WS is refused loudly on
 # both sides. Hand-mirrored with ui/src/ipc/contract.ts CONTRACT_VERSION and
 # shared/ipc-contract.json "version" -- check_contract_sync.py compares them.
-CONTRACT_VERSION = "1.0"
+CONTRACT_VERSION = "1.1"
 
 
 def contract_major(version: object) -> int | None:
@@ -64,8 +64,12 @@ class ApprovalResponseMsg(IpcEnvelope):
 
 class MemoryEditMsg(IpcEnvelope):
     belief_id: str
-    op: Literal["edit", "delete", "restore"]
+    op: Literal["edit", "delete", "restore", "purge"]
     text: NotRequired[str]
+
+
+class MemoryQueryMsg(IpcEnvelope):
+    pass
 
 
 class SkillOpMsg(IpcEnvelope):
@@ -134,6 +138,7 @@ class ApprovalRequestMsg(IpcEnvelope):
 class DoneMsg(IpcEnvelope):
     conversation_id: str
     task_id: NotRequired[str]
+    interrupted: NotRequired[bool]
 
 
 class ErrorMsg(IpcEnvelope):
@@ -141,7 +146,9 @@ class ErrorMsg(IpcEnvelope):
     message: str
     recoverable: bool
     conversation_id: NotRequired[str]
-    operation_kind: NotRequired[Literal["undo", "memory_edit", "approval_response", "task_op", "lane_pin"]]
+    operation_kind: NotRequired[
+        Literal["undo", "memory_edit", "approval_response", "interrupt", "task_op", "lane_pin", "mic", "skill_op"]
+    ]
     operation_id: NotRequired[str]
 
 
@@ -175,11 +182,20 @@ class TranscriptMsg(IpcEnvelope):
 class SpendUpdateMsg(IpcEnvelope):
     session_usd: float
     month_usd: float
+    session_tokens: NotRequired[int]
+    last_turn_tokens: NotRequired[int]
 
 
 class SettingsStateMsg(IpcEnvelope):
     key: str
     status: Literal["set", "missing", "invalid", "unverified"]
+
+
+class CapabilitiesStateMsg(IpcEnvelope):
+    voice_input: bool
+    task_controls: bool
+    skill_controls: bool
+    demo_scenarios: bool
 
 
 class BeliefStateMsg(IpcEnvelope):
@@ -191,6 +207,21 @@ class BeliefStateMsg(IpcEnvelope):
     status: Literal["active", "archived", "superseded"]
     superseded_by: NotRequired[str]
     used_at: NotRequired[str]
+
+
+class BeliefDeletedMsg(IpcEnvelope):
+    belief_id: str
+
+
+class MemoryHistoryStateMsg(IpcEnvelope):
+    complete: bool
+
+
+class SnapshotCompleteMsg(IpcEnvelope):
+    """Last frame of the connect snapshot. Payload-free: a boundary marker
+    needs no state. Exists so the UI never has to infer the boundary from
+    `spend_update`, which the contract treats as a global that may arrive at
+    any time."""
 
 
 class SkillStateMsg(IpcEnvelope):
@@ -210,6 +241,7 @@ IpcMessage = Union[
     InterruptMsg,
     ApprovalResponseMsg,
     MemoryEditMsg,
+    MemoryQueryMsg,
     SkillOpMsg,
     LanePinMsg,
     TaskOpMsg,
@@ -228,7 +260,11 @@ IpcMessage = Union[
     TranscriptMsg,
     SpendUpdateMsg,
     SettingsStateMsg,
+    CapabilitiesStateMsg,
     BeliefStateMsg,
+    BeliefDeletedMsg,
+    MemoryHistoryStateMsg,
+    SnapshotCompleteMsg,
     SkillStateMsg,
 ]
 
@@ -267,8 +303,9 @@ CONTRACT_SPEC: dict = {
             "edited_args": _field(O),
         }),
         "memory_edit": _message(IN, ["belief_id", "op"], {
-            "belief_id": _field(S), "op": _field(S, ["edit", "delete", "restore"]), "text": _field(S),
+            "belief_id": _field(S), "op": _field(S, ["edit", "delete", "restore", "purge"]), "text": _field(S),
         }),
+        "memory_query": _message(IN, [], {}),
         "skill_op": _message(IN, ["skill_name", "op"], {
             "skill_name": _field(S), "op": _field(S, ["trial", "disable", "restore", "delete"]),
         }),
@@ -292,10 +329,12 @@ CONTRACT_SPEC: dict = {
             "tier": _field(I, LANES), "task_id": _field(S), "summary": _field(S),
             "destructive": _field(B), "conversation_id": _field(S),
         }),
-        "done": _message(OUT, ["conversation_id"], {"conversation_id": _field(S), "task_id": _field(S)}),
+        "done": _message(OUT, ["conversation_id"], {
+            "conversation_id": _field(S), "task_id": _field(S), "interrupted": _field(B),
+        }),
         "error": _message(OUT, ["code", "message", "recoverable"], {
             "code": _field(S), "message": _field(S), "recoverable": _field(B), "conversation_id": _field(S),
-            "operation_kind": _field(S, ["undo", "memory_edit", "approval_response", "task_op", "lane_pin", "mic", "skill_op"]),
+            "operation_kind": _field(S, ["undo", "memory_edit", "approval_response", "interrupt", "task_op", "lane_pin", "mic", "skill_op"]),
             "operation_id": _field(S),
         }),
         "task_state": _message(OUT, ["task_id", "state", "lane"], {
@@ -320,6 +359,14 @@ CONTRACT_SPEC: dict = {
         "settings_state": _message(OUT, ["key", "status"], {
             "key": _field(S), "status": _field(S, ["set", "missing", "invalid", "unverified"]),
         }),
+        "capabilities_state": _message(
+            OUT,
+            ["voice_input", "task_controls", "skill_controls", "demo_scenarios"],
+            {
+                "voice_input": _field(B), "task_controls": _field(B),
+                "skill_controls": _field(B), "demo_scenarios": _field(B),
+            },
+        ),
         "belief_state": _message(OUT, ["belief_id", "text", "kind", "provenance", "salience", "status"], {
             "belief_id": _field(S), "text": _field(S),
             "kind": _field(S, ["preference", "project", "workflow", "decision", "lesson"]),
@@ -327,6 +374,9 @@ CONTRACT_SPEC: dict = {
             "status": _field(S, ["active", "archived", "superseded"]),
             "superseded_by": _field(S), "used_at": _field(S),
         }),
+        "belief_deleted": _message(OUT, ["belief_id"], {"belief_id": _field(S)}),
+        "memory_history_state": _message(OUT, ["complete"], {"complete": _field(B)}),
+        "snapshot_complete": _message(OUT, [], {}),
         "skill_state": _message(OUT, ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"], {
             "skill_name": _field(S), "origin": _field(S, ["auto", "user"]),
             "kind": _field(S, ["skill", "playbook"]), "uses": _field(I), "success_rate": _field(N),
@@ -441,6 +491,12 @@ def _self_check() -> None:
     }
     parsed = parse_ipc_message(dict(sample))
     assert parsed == sample, "round-trip changed the message"
+
+    # The envelope's `id` is the frame's own message id, and payloads are
+    # flattened onto it -- a payload field named `id` would silently overwrite
+    # it. This is why approval_request carries `approval_id` (see CLAUDE.md).
+    for msg_type, spec in CONTRACT_SPEC["messages"].items():
+        assert "id" not in spec["fields"], f'"{msg_type}": payload field "id" collides with the envelope message id'
 
     try:
         parse_ipc_message({"type": "not_a_real_type", "id": "x", "ts": "x"})

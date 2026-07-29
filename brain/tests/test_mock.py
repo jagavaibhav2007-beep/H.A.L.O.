@@ -34,7 +34,16 @@ _frame = test_server._frame
 _connect = test_server._connect
 _authenticate = test_server._authenticate
 
-SNAPSHOT_TYPES = {"belief_state", "skill_state", "task_state", "approval_request", "settings_state", "spend_update"}
+SNAPSHOT_TYPES = {
+    "belief_state",
+    "skill_state",
+    "task_state",
+    "approval_request",
+    "settings_state",
+    "capabilities_state",
+    "spend_update",
+    "snapshot_complete",
+}
 
 
 async def _recv(ws) -> dict:
@@ -45,11 +54,11 @@ async def _recv(ws) -> dict:
 
 
 async def _drain_snapshot(ws) -> None:
-    """push_snapshot always ends with spend_update -- see mock.py."""
+    """server.py closes every connect snapshot with snapshot_complete."""
     while True:
         frame = await _recv(ws)
         assert frame["type"] in SNAPSHOT_TYPES, f"unexpected frame during snapshot: {frame}"
-        if frame["type"] == "spend_update":
+        if frame["type"] == "snapshot_complete":
             return
 
 
@@ -63,7 +72,7 @@ async def check_snapshot_after_hello_ack(port: int, token: str) -> None:
             frame = await _recv(ws)
             assert frame["type"] in SNAPSHOT_TYPES, f"unexpected non-snapshot frame before any user_msg: {frame}"
             seen_types.append(frame["type"])
-            if frame["type"] == "spend_update":
+            if frame["type"] == "snapshot_complete":
                 break
     finally:
         await ws.close()
@@ -343,13 +352,23 @@ async def check_lane_pin_round_trip(port: int, token: str) -> None:
 
 
 async def check_memory_edit_round_trip(port: int, token: str) -> None:
-    """Rule-3 memory ops: edit supersedes the old belief and emits a new
-    user-stated one; delete archives; restore reactivates. The store never
-    mutates locally -- these confirming belief_state frames are the only truth."""
+    """Rule-3 memory ops plus on-demand durable history and permanent purge."""
     ws = await _connect(port)
     try:
         await _authenticate(ws, token)
         await _drain_snapshot(ws)
+        await ws.send(json.dumps(_frame("memory_query")))
+        history = []
+        while True:
+            frame = await _recv(ws)
+            if frame["type"] == "memory_history_state":
+                if frame["complete"] is True:
+                    break
+                continue
+            assert frame["type"] == "belief_state" and frame["status"] in {"archived", "superseded"}, frame
+            history.append(frame)
+        assert history, "memory_query returned no durable history"
+
         belief_id = "belief-editor"  # seeded active belief no scenario touches
 
         await ws.send(json.dumps(_frame("memory_edit", belief_id=belief_id, op="edit", text="Prefers Neovim.")))
@@ -359,16 +378,22 @@ async def check_memory_edit_round_trip(port: int, token: str) -> None:
         assert new_belief["type"] == "belief_state" and new_belief["status"] == "active", new_belief
         assert new_belief["provenance"] == "user" and new_belief["text"] == "Prefers Neovim.", new_belief
 
+        await ws.send(json.dumps(_frame("memory_edit", belief_id=belief_id, op="restore")))
+        replaced = await _recv(ws)
+        assert replaced["type"] == "belief_state" and replaced["status"] == "superseded", replaced
+        restored = await _recv(ws)
+        assert restored["type"] == "belief_state" and restored["status"] == "active", restored
+
         await ws.send(json.dumps(_frame("memory_edit", belief_id=belief_id, op="delete")))
         archived = await _recv(ws)
         assert archived["type"] == "belief_state" and archived["status"] == "archived", archived
 
-        await ws.send(json.dumps(_frame("memory_edit", belief_id=belief_id, op="restore")))
-        restored = await _recv(ws)
-        assert restored["type"] == "belief_state" and restored["status"] == "active", restored
+        await ws.send(json.dumps(_frame("memory_edit", belief_id=belief_id, op="purge")))
+        deleted = await _recv(ws)
+        assert deleted["type"] == "belief_deleted" and deleted["belief_id"] == belief_id, deleted
     finally:
         await ws.close()
-    print("[check 13] memory_edit edit->supersede+new, delete->archived, restore->active: OK")
+    print("[check 13] memory history + edit/restore/archive/permanent purge round-trip: OK")
 
 
 async def check_settings_update_round_trip(port: int, token: str) -> None:
@@ -401,7 +426,7 @@ async def check_settings_update_round_trip(port: int, token: str) -> None:
                 f = await _recv(ws2)
                 if f["type"] == "settings_state" and f["key"] == "openrouter_key":
                     key_frames.append(f)
-                if f["type"] == "spend_update":
+                if f["type"] == "snapshot_complete":
                     break
             assert key_frames and key_frames[-1]["status"] == "set", key_frames
         finally:

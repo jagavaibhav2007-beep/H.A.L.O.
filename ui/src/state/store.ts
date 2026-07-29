@@ -5,7 +5,7 @@
 
 import { create } from "zustand";
 import type { IpcMessage } from "../ipc/contract";
-import { appendUserTurn, applyConnectionEvent, applyFrame, initialState } from "./reducer";
+import { appendUserTurn, beginUserRequest, applyConnectionEvent, applyFrame, initialState } from "./reducer";
 import type { ConnectionEvent, HaloState } from "./reducer";
 import * as chats from "./conversations";
 import type { ConversationRegistry } from "./conversations";
@@ -46,13 +46,34 @@ function saveChats(reg: ConversationRegistry): ConversationRegistry {
   return reg;
 }
 
+/** Persist a new registry AND drop the projected turns of any thread it no
+ * longer lists. Every other slice is bounded (activities ring buffer, errors
+ * .slice(-5), tasks/approvals/streams reconciled per snapshot); without this,
+ * a deleted thread, a closed-untouched tab, and every RECENT_CAP eviction
+ * leaves its full `turns` array resident for the life of an always-on session.
+ *
+ * Only the three actions that can REMOVE an id use this — rename/setActive/
+ * titleFromMessage stay on plain saveChats. titleFromMessage runs on every
+ * send, and a conversation the registry never listed (a voice-initiated
+ * thread, say — markUnread tolerates those by design) must not be swept away
+ * by an unrelated keystroke in another tab. */
+function commitChats(state: HaloState, reg: ConversationRegistry) {
+  const known = new Set(reg.all.map((c) => c.id));
+  const conversations = Object.fromEntries(
+    Object.entries(state.conversations).filter(([id]) => known.has(id)),
+  );
+  return { chats: saveChats(reg), conversations };
+}
+
 interface HaloStore extends HaloState {
   applyFrame: (frame: IpcMessage) => void;
   applyConnectionEvent: (event: ConnectionEvent) => void;
   // Chat (Step 8): record the user's own outgoing message as a turn, and
   // clear the input-restore flag once the view has consumed it (rule 8).
   appendUserTurn: (conversationId: string, text: string, id: string) => void;
+  appendLocalUserTurn: (conversationId: string, text: string, id: string) => void;
   acknowledgeInputRestore: (conversationId: string) => void;
+  dismissError: (id: string) => void;
   activeView: ActiveView;
   setActiveView: (view: ActiveView) => void;
   chats: ConversationRegistry;
@@ -82,7 +103,9 @@ export const useHaloStore = create<HaloStore>((set) => ({
       return cid ? { ...next, chats: chats.markUnread(state.chats, cid) } : next;
     }),
   applyConnectionEvent: (event) => set((state) => applyConnectionEvent(state, event)),
-  appendUserTurn: (conversationId, text, id) => set((state) => appendUserTurn(state, conversationId, text, id)),
+  appendUserTurn: (conversationId, text, id) => set((state) => beginUserRequest(state, conversationId, text, id)),
+  appendLocalUserTurn: (conversationId, text, id) =>
+    set((state) => appendUserTurn(state, conversationId, text, id)),
   acknowledgeInputRestore: (conversationId) =>
     set((state) => {
       const conv = state.conversations[conversationId];
@@ -91,15 +114,21 @@ export const useHaloStore = create<HaloStore>((set) => ({
         conversations: { ...state.conversations, [conversationId]: { ...conv, needsInputRestore: false } },
       };
     }),
+  dismissError: (id) =>
+    set((state) => ({
+      globalErrors: state.globalErrors.filter((error) => error.id !== id),
+      operationErrors: Object.fromEntries(
+        Object.entries(state.operationErrors).filter(([, error]) => error.id !== id),
+      ),
+    })),
   setActiveView: (view) => set({ activeView: view }),
   newConversation: () =>
-    set((s) => ({ chats: saveChats(chats.newConversation(s.chats, crypto.randomUUID(), Date.now())) })),
-  setActiveConversation: (id) =>
-    set((s) => ({ chats: saveChats(chats.setActive(s.chats, id, Date.now())) })),
+    set((s) => commitChats(s, chats.newConversation(s.chats, crypto.randomUUID(), Date.now()))),
+  setActiveConversation: (id) => set((s) => ({ chats: saveChats(chats.setActive(s.chats, id, Date.now())) })),
   closeConversation: (id) =>
-    set((s) => ({ chats: saveChats(chats.closeConversation(s.chats, id, crypto.randomUUID(), Date.now())) })),
+    set((s) => commitChats(s, chats.closeConversation(s.chats, id, crypto.randomUUID(), Date.now()))),
   deleteConversation: (id) =>
-    set((s) => ({ chats: saveChats(chats.deleteConversation(s.chats, id, crypto.randomUUID(), Date.now())) })),
+    set((s) => commitChats(s, chats.deleteConversation(s.chats, id, crypto.randomUUID(), Date.now()))),
   renameConversation: (id, title) =>
     set((s) => ({ chats: saveChats(chats.renameConversation(s.chats, id, title)) })),
   titleFromMessage: (id, text) =>
@@ -116,13 +145,17 @@ export const selectStream = (taskId: string) => (s: HaloStore) => s.streams[task
 export const selectApprovals = (s: HaloStore) => s.approvals;
 export const selectBeliefs = (s: HaloStore) => s.beliefs;
 export const selectOperationErrors = (s: HaloStore) => s.operationErrors;
+export const selectGlobalErrors = (s: HaloStore) => s.globalErrors;
+export const selectMemoryHistoryLoaded = (s: HaloStore) => s.memoryHistoryLoaded;
 export const selectSkills = (s: HaloStore) => s.skills;
 export const selectVoice = (s: HaloStore) => s.voice;
 export const selectSpend = (s: HaloStore) => s.spend;
+export const selectCapabilities = (s: HaloStore) => s.capabilities;
 export const selectActiveView = (s: HaloStore) => s.activeView;
 export const selectChats = (s: HaloStore) => s.chats;
 export const selectActiveConversationId = (s: HaloStore) => s.chats.activeId;
 export const selectBrainStatus = (s: HaloStore) => s.connection.brainStatus;
+export const selectVoiceStatus = (s: HaloStore) => s.connection.voiceStatus;
 export const selectPendingApprovalCount = (s: HaloStore) => Object.keys(s.approvals).length;
 export const selectRunningTask = (s: HaloStore) =>
   Object.values(s.tasks).find((t) => t.state === "running");

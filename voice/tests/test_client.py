@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -20,6 +21,13 @@ from websockets.asyncio.server import serve
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain"))
+
+# Isolate before importing brain.server: start() runs the real (mock=False)
+# Brain, whose belief-decay loop fires immediately and WRITES to the store at
+# %LOCALAPPDATA%\Halo\halo.db. Without this redirect, running this documented
+# test archives the developer's real beliefs (mirrors smoke_test.py's setup).
+os.environ["LOCALAPPDATA"] = tempfile.mkdtemp(prefix="halo-voice-test-")
+os.environ.setdefault("HALO_LLM_STUB", "1")
 
 from brain.server import start
 

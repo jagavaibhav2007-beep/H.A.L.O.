@@ -136,7 +136,7 @@ fn register_hotkey(app: &AppHandle) -> HotkeyStatus {
             notice: Some("Alt+Space is already in use. Halo is using Ctrl+Alt+Space instead."),
         },
         Err(e) => {
-            eprintln!("halo: failed to register both hotkeys: {e}");
+            crate::log(&format!("halo: failed to register both hotkeys: {e}"));
             HotkeyStatus {
                 shortcut: "none",
                 notice: Some("Halo could not register a summon hotkey. Open the workspace from the tray."),
@@ -187,11 +187,11 @@ fn clip_window_to_capsule(window: &tauri::WebviewWindow<Wry>) {
         )
     };
     if region.is_invalid() {
-        eprintln!("halo: failed to create the capsule window region");
+        crate::log("halo: failed to create the capsule window region");
         return;
     }
     if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
-        eprintln!("halo: failed to apply the capsule window region");
+        crate::log("halo: failed to apply the capsule window region");
         let _ = unsafe { DeleteObject(HGDIOBJ(region.0)) };
     }
 }

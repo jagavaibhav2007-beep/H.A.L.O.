@@ -29,25 +29,35 @@ interface OverlayProps {
   /** The conversation on screen — used ONLY as a fallback when a card carries
    * no conversation_id of its own (older frames). */
   conversationId: string;
-  sendApprovalResponse: (reply_to: string, decision: ApprovalResponseMsg["decision"], edited_args?: unknown) => void;
+  sendApprovalResponse: (reply_to: string, decision: ApprovalResponseMsg["decision"], edited_args?: unknown) => boolean;
   sendInterrupt: (conversationId: string) => void;
 }
 
-/** Bottom-center stack of every pending approval, over the current view. */
+/** Bottom-center stack of every pending approval, over the current view.
+ *
+ * The overlay wrapper is ALWAYS mounted, even with nothing pending: the
+ * announcer below is a live region, and a live region that appears in the DOM
+ * already carrying its text is routinely not announced at all. It has to exist
+ * empty first, then change. */
 export function ApprovalOverlay({ conversationId, sendApprovalResponse, sendInterrupt }: OverlayProps) {
   const approvals = useHaloStore(selectApprovals);
   const list = Object.values(approvals);
-  if (list.length === 0) return null;
+  const newest = list[list.length - 1];
   return (
     <div className="approval-overlay" role="region" aria-label="Pending approvals">
-      {list.map((a, index) => (
+      {/* An arriving approval announces itself; it must NEVER take focus. The
+          card's own initial-focus target is Deny — a destructive answer — so
+          stealing focus armed it under whatever the user typed next. */}
+      <span className="halo-sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {newest ? `Approval needed: ${newest.summary ?? `Halo wants to run ${newest.tool}.`}` : ""}
+      </span>
+      {list.map((a) => (
         <ApprovalCard
           key={a.approval_id}
           approval={a}
           conversationId={conversationId}
           sendApprovalResponse={sendApprovalResponse}
           sendInterrupt={sendInterrupt}
-          shouldFocus={index === list.length - 1}
         />
       ))}
     </div>
@@ -59,10 +69,9 @@ interface CardProps {
   conversationId: string;
   sendApprovalResponse: OverlayProps["sendApprovalResponse"];
   sendInterrupt: OverlayProps["sendInterrupt"];
-  shouldFocus: boolean;
 }
 
-function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInterrupt, shouldFocus }: CardProps) {
+function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInterrupt }: CardProps) {
   const { approval_id, tool, args_redacted, summary, destructive } = approval;
   const setActiveConversation = useHaloStore((s) => s.setActiveConversation);
   // Interrupt is keyed by conversation. With several threads open, a card
@@ -82,31 +91,34 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
   const [pending, setPending] = useState<"idle" | "approving" | "denying" | "editing-send" | "stopping">("idle");
   const [editing, setEditing] = useState(false);
   const [argsText, setArgsText] = useState(() => prettyJson(args_redacted));
+  const [editError, setEditError] = useState<string | null>(null);
   const [showArgs, setShowArgs] = useState(false);
   const busy = pending !== "idle";
   const cardId = useId();
   const titleId = `${cardId}-title`;
   const summaryId = `${cardId}-summary`;
+  const editHelpId = `${cardId}-edit-help`;
+  const editErrorId = `${cardId}-edit-error`;
+  const holdHintId = `${cardId}-hold-hint`;
 
-  useEffect(() => {
-    if (!shouldFocus) return;
-    const card = document.getElementById(cardId);
-    if (!card) return;
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    // The safe decision receives initial focus; approval is never the reflex
-    // action when a consequential request appears.
-    card.querySelector<HTMLButtonElement>("[data-safe-initial-focus]")?.focus();
-    return () => {
-      if (previous?.isConnected) previous.focus();
-    };
-  }, [cardId, shouldFocus]);
+  // No focus management here on purpose. The card arrives unprompted while the
+  // user is typing; moving focus into it put Deny — an irreversible answer —
+  // under the next keystroke. The overlay announces instead (see
+  // ApprovalOverlay), and the card is reachable by Tab and as a labelled
+  // region. WCAG 3.2.1/3.2.2: no context change the user did not initiate.
 
   const approve = useCallback(
-    (edited_args?: unknown) => {
-      if (busy) return;
+    (edited_args?: unknown): boolean => {
+      if (busy) return false;
       reveal();
+      // Send BEFORE locking: if the frame is contract-invalid (e.g. edited args
+      // with a non-finite number), dispatch returns false and we must NOT flip
+      // the rule-3 lock — nothing was sent, so no confirming frame can ever
+      // unlock it, and every button (including Stop) would be stuck disabled.
+      const ok = sendApprovalResponse(approval_id, edited_args === undefined ? "approve" : "edit", edited_args);
+      if (!ok) return false;
       setPending(edited_args === undefined ? "approving" : "editing-send");
-      sendApprovalResponse(approval_id, edited_args === undefined ? "approve" : "edit", edited_args);
+      return true;
     },
     [busy, reveal, approval_id, sendApprovalResponse],
   );
@@ -119,7 +131,17 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
   }, [busy, reveal, approval_id, sendApprovalResponse]);
 
   const saveEdit = useCallback(() => {
-    approve(parseArgs(argsText));
+    const parsed = parseArgs(argsText);
+    if (!parsed.ok) {
+      setEditError(parsed.error);
+      return;
+    }
+    if (!approve(parsed.value)) {
+      // Parsed as JSON but rejected by the contract (e.g. a non-finite number).
+      setEditError("These edited values aren't valid — check them and try again.");
+      return;
+    }
+    setEditError(null);
   }, [approve, argsText]);
 
   const stopTask = useCallback(() => {
@@ -168,13 +190,28 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
       </button>
       {showArgs && !editing && <pre className="approval-args">{prettyJson(args_redacted)}</pre>}
       {editing && (
-        <textarea
-          className="approval-args-edit"
-          value={argsText}
-          onChange={(e) => setArgsText(e.currentTarget.value)}
-          aria-label="Edit arguments"
-          rows={5}
-        />
+        <>
+          <textarea
+            className="approval-args-edit"
+            value={argsText}
+            onChange={(e) => {
+              setArgsText(e.currentTarget.value);
+              if (editError) setEditError(null);
+            }}
+            aria-label="Edit arguments"
+            aria-invalid={editError ? "true" : undefined}
+            aria-describedby={editError ? `${editHelpId} ${editErrorId}` : editHelpId}
+            rows={5}
+          />
+          <p id={editHelpId} className="approval-edit-help">
+            Redacted placeholders such as &lt;15 chars&gt; preserve the original value when left unchanged.
+          </p>
+        </>
+      )}
+      {editing && editError && (
+        <p id={editErrorId} className="approval-edit-error" role="alert">
+          {editError}
+        </p>
       )}
 
       <div className="approval-actions">
@@ -183,12 +220,26 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
             <Button variant="primary" onClick={saveEdit} disabled={busy}>
               {pending === "editing-send" ? "Sending…" : "Approve with edits"}
             </Button>
-            <Button variant="ghost" onClick={() => setEditing(false)} disabled={busy}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setEditing(false);
+                setEditError(null);
+              }}
+              disabled={busy}
+            >
               Cancel
             </Button>
           </>
         ) : destructive ? (
-          <HoldButton label="Hold to approve" busyLabel="Approving…" busy={pending === "approving"} disabled={busy} onComplete={() => approve()} />
+          <HoldButton
+            label="Hold to approve"
+            busyLabel="Approving…"
+            busy={pending === "approving"}
+            disabled={busy}
+            hintId={holdHintId}
+            onComplete={() => approve()}
+          />
         ) : (
           <Button variant="primary" onClick={() => approve()} disabled={busy}>
             {pending === "approving" ? "Approving…" : "Approve"}
@@ -201,7 +252,14 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
             <Button variant="ghost" onClick={deny} disabled={busy} data-safe-initial-focus>
               {pending === "denying" ? "Denying…" : "Deny"}
             </Button>
-            <Button variant="ghost" onClick={() => setEditing(true)} disabled={busy}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setEditing(true);
+                setEditError(null);
+              }}
+              disabled={busy}
+            >
               Edit
             </Button>
           </>
@@ -225,6 +283,9 @@ interface HoldProps {
   busyLabel: string;
   busy: boolean;
   disabled: boolean;
+  /** id of a hidden element describing the press-and-hold gesture, so a screen
+   *  reader announces how to operate the control (the hold is otherwise opaque). */
+  hintId: string;
   onComplete: () => void;
 }
 
@@ -234,7 +295,7 @@ interface HoldProps {
 // the hold's progress feedback is essential, not decoration. Cancels the
 // instant the pointer leaves or the key lifts (design: "cancels if the pointer
 // leaves the button"). Keyboard equivalent: hold Enter or Space.
-function HoldButton({ label, busyLabel, busy, disabled, onComplete }: HoldProps) {
+function HoldButton({ label, busyLabel, busy, disabled, hintId, onComplete }: HoldProps) {
   const [progress, setProgress] = useState(0);
   const rafRef = useRef<number | null>(null);
   const firedRef = useRef(false);
@@ -276,6 +337,7 @@ function HoldButton({ label, busyLabel, busy, disabled, onComplete }: HoldProps)
       className="halo-btn halo-btn-destructive approval-hold"
       disabled={disabled}
       aria-label={label}
+      aria-describedby={hintId}
       onPointerDown={(e) => {
         if (e.button !== 0 || !e.isPrimary) return;
         pointerIdRef.current = e.pointerId;
@@ -297,6 +359,9 @@ function HoldButton({ label, busyLabel, busy, disabled, onComplete }: HoldProps)
     >
       <span className="approval-hold-fill" style={{ width: `${progress * 100}%` }} aria-hidden="true" />
       <span className="approval-hold-label">{busy ? busyLabel : label}</span>
+      <span id={hintId} className="halo-sr-only">
+        Press and hold, or hold Enter or Space, to approve this destructive action.
+      </span>
     </button>
   );
 }
@@ -309,15 +374,21 @@ function prettyJson(value: unknown): string {
   }
 }
 
-// The edited args go back in approval_response.edited_args. Parse to an object
-// when possible; fall back to the raw string otherwise (there's no real
-// backend to validate against in Phase 1 — the mock only branches on the
-// decision, not the payload). # ponytail: strict schema validation of edits is
-// a Phase-2 concern when a real tool consumes edited_args.
-function parseArgs(text: string): unknown {
+// The edited args go back in approval_response.edited_args. The Brain's gate
+// expects a JSON object, so malformed JSON and non-object values remain in the
+// editor with an actionable error instead of crossing the trust boundary.
+type ParsedArgs =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; error: string };
+
+function parseArgs(text: string): ParsedArgs {
   try {
-    return JSON.parse(text);
+    const value: unknown = JSON.parse(text);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return { ok: false, error: "Arguments must be a valid JSON object." };
+    }
+    return { ok: true, value: value as Record<string, unknown> };
   } catch {
-    return text;
+    return { ok: false, error: "Arguments must be a valid JSON object." };
   }
 }

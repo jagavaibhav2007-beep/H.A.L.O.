@@ -6,6 +6,12 @@
  */
 
 :root {
+  /* Tell the UA this is a light surface by default so native scrollbars,
+     <select> popups and checkboxes render in matching chrome (the dark blocks
+     below flip it). Without this the app renders light UA controls inside its
+     dark theme. */
+  color-scheme: light;
+
   /* ---- Color (light) — ui_ux/00-design-language.md color table ---- */
   --primary: #0356c5;
   --accent-soft: #93c5fd;
@@ -68,11 +74,23 @@
   /* ---- Interaction constants ---- */
   --hit-min: 32px; /* minimum click target */
   --press-scale: 0.97;
+  /* Disabled controls were drifting per-consumer (0.4/0.55/0.6/0.7 across
+     chat-tab-more, halo-btn, approval-stop, chat-stop) — one token so
+     "disabled" reads the same everywhere. */
+  --disabled-opacity: 0.5;
+
+  /* ---- Elevation shadow (floating overlays: toasts, drawers) ---- */
+  --shadow-elevated: 0 4px 16px rgba(0, 0, 0, 0.2);
+
+  /* ---- Corner radius. 00-design-language.md: windows and cards = 16px
+     (capsule is height/2, chips are 999px — both set locally, not here). */
+  --radius-card: 16px;
 }
 
 /* Auto theme: follow OS preference unless a manual override is set. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --primary: #3d82f5;
     --accent-soft: #6b96f7;
     --midnight: #02060e;
@@ -92,6 +110,7 @@
 
 /* Manual override: explicit dark, regardless of OS preference. */
 [data-theme="dark"] {
+  color-scheme: dark;
   --primary: #3d82f5;
   --accent-soft: #6b96f7;
   --midnight: #02060e;
@@ -110,6 +129,7 @@
 
 /* Manual override: explicit light, regardless of OS preference. */
 [data-theme="light"] {
+  color-scheme: light;
   --primary: #0356c5;
   --accent-soft: #93c5fd;
   --midnight: #02060e;

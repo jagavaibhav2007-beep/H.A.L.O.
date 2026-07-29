@@ -15,6 +15,7 @@ import {
   type IpcMessage,
   type LanePinMsg,
   type MemoryEditMsg,
+  type MemoryQueryMsg,
   type MicMsg,
   type SettingsUpdateMsg,
   type SkillOpMsg,
@@ -23,6 +24,7 @@ import {
   type UserMsg,
 } from "./contract";
 import { flushQueuedMessages, sendOrQueue } from "./queue";
+import { capQueue, dropStaleControlFrames } from "../lib/outboundQueue";
 
 // Every outbound type the UI can send; one queue/dispatch path for all of them.
 type Outbound =
@@ -33,6 +35,7 @@ type Outbound =
   | InterruptMsg
   | LanePinMsg
   | MemoryEditMsg
+  | MemoryQueryMsg
   | SkillOpMsg
   | SettingsUpdateMsg
   | MicMsg;
@@ -68,6 +71,11 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const wsRef = useRef<WebSocket | null>(null);
   const authenticatedRef = useRef(false);
   const queueRef = useRef<Outbound[]>([]);
+  // Port of the Brain the queue was filled for. The Brain binds a fresh random
+  // port on every start, so a changed port is proof the process we queued for
+  // is gone (never cached for dialing — session.json is still re-read on every
+  // connect; this is only ever compared).
+  const queuedForPortRef = useRef<number | null>(null);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
@@ -102,6 +110,13 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
       invoke<Session>("read_session")
         .then((session) => {
           if (torndown) return;
+          if (queuedForPortRef.current !== null && queuedForPortRef.current !== session.port) {
+            const dropped = dropStaleControlFrames(queueRef.current);
+            if (dropped > 0) {
+              console.warn(`halo: Brain restarted — dropped ${dropped} stale queued control frame(s)`);
+            }
+          }
+          queuedForPortRef.current = session.port;
           const ws = new WebSocket(`ws://127.0.0.1:${session.port}`);
           authenticatedRef.current = false;
           wsRef.current = ws;
@@ -162,7 +177,17 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
                 stopForIncompatible(ws);
                 return;
               }
-              flushQueuedMessages(ws, queueRef.current);
+              // A throw mid-flush (socket went CLOSING, or a bad queued payload)
+              // must not escape onmessage: that would leave the socket open (so
+              // onclose never arms the reconnect ladder) with auth still false —
+              // a permanently deaf connection. Close it and let onclose recover.
+              try {
+                flushQueuedMessages(ws, queueRef.current);
+              } catch (error) {
+                console.error("halo: flush after hello_ack failed, reconnecting", error);
+                ws.close();
+                return;
+              }
               authenticatedRef.current = true;
               setConnState("connected");
               return;
@@ -235,17 +260,33 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
 
   // One send/queue path for every outbound type: validate, send if
   // authenticated, else queue for the reconnect flush (Phase-0 rules).
-  const dispatch = useCallback((msg: Outbound) => {
-    parseIpcMessage(msg);
+  // Returns false iff the frame is contract-invalid (rejected, not sent, not
+  // queued) — so a caller can decline to flip a rule-3 lock it can't unlock.
+  // parseIpcMessage must be INSIDE the guard: throwing here used to escape the
+  // React event handler *after* the caller had already locked, stranding the
+  // control forever (and the naive fix — validate inside the send catch — would
+  // queue the rejected frame for the reconnect flush).
+  const dispatch = useCallback((msg: Outbound): boolean => {
+    try {
+      parseIpcMessage(msg);
+    } catch (error) {
+      console.error("halo: refusing to send invalid frame", error);
+      return false;
+    }
     const ws = wsRef.current;
     const openSocket = ws?.readyState === WebSocket.OPEN ? ws : null;
     try {
-      if (sendOrQueue(openSocket, authenticatedRef.current, msg, queueRef.current)) return;
+      sendOrQueue(openSocket, authenticatedRef.current, msg, queueRef.current);
     } catch (error) {
       console.error("halo: send failed, queueing for reconnect", error);
       ws?.close();
       queueRef.current.push(msg);
     }
+    // The Brain can be down for a long time (its restart ladder runs to 30s),
+    // so the queue needs a ceiling like every other unbounded slice.
+    const dropped = capQueue(queueRef.current);
+    if (dropped > 0) console.warn(`halo: outbound queue full — dropped ${dropped} oldest frame(s)`);
+    return true;
   }, []);
 
   const env = () => ({ id: crypto.randomUUID(), ts: new Date().toISOString() });
@@ -275,7 +316,11 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   // approval (implicit deny) and pauses the task — the mock then broadcasts
   // task_state:paused, which removes the card from the store.
   const sendInterrupt = useCallback(
-    (conversation_id: string) => dispatch({ type: "interrupt", ...env(), conversation_id }),
+    (conversation_id: string) => {
+      const envelope = env();
+      dispatch({ type: "interrupt", ...envelope, conversation_id });
+      return envelope.id;
+    },
     [dispatch],
   );
   // Tasks view (Step 11): re-pin a task's lane. The mock confirms by
@@ -291,6 +336,10 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const sendMemoryEdit = useCallback(
     (belief_id: string, op: MemoryEditMsg["op"], text?: string) =>
       dispatch({ type: "memory_edit", ...env(), belief_id, op, text }),
+    [dispatch],
+  );
+  const sendMemoryQuery = useCallback(
+    () => dispatch({ type: "memory_query", ...env() }),
     [dispatch],
   );
   // Skills panel (Step 13): trial/disable/restore/delete a skill. The mock
@@ -325,6 +374,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     sendInterrupt,
     sendLanePin,
     sendMemoryEdit,
+    sendMemoryQuery,
     sendSkillOp,
     sendSettingsUpdate,
     sendMic,

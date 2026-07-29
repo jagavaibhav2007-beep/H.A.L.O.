@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -60,6 +61,20 @@ def check_belief_crud() -> None:
     assert all(b["belief_id"] != bid for b in active)
     assert any(b["belief_id"] == bid for b in archived)
     print("[check 2] belief CRUD: OK")
+
+
+def check_archived_belief_purge() -> None:
+    bid = store.add_belief("remove me permanently", "preference", "user")
+    try:
+        store.purge_belief(bid)
+        raise AssertionError("expected active belief purge to be rejected")
+    except ValueError:
+        pass
+    store.set_belief_status(bid, "archived")
+    assert store.purge_belief(bid) is True
+    assert store.get_belief(bid) is None
+    assert store.purge_belief(bid) is False
+    print("[check 2b] only archived beliefs can be permanently purged: OK")
 
 
 def check_supersede_provenance_matrix() -> None:
@@ -190,6 +205,61 @@ def check_vector_search_synthetic() -> None:
         store._embed = orig_embed
         store._embed_failed = orig_failed
     print("[check 4] vector search (synthetic embeddings) runs the real vec0 KNN query and ranks correctly: OK")
+
+
+def check_dead_rows_do_not_starve_search() -> None:
+    """Regression for the P0 'memory silently returns nothing': vec0 returns the
+    k nearest rows and status='active' is a POST-filter, so dead (archived/
+    superseded) rows left in the index crowd out live ones. A status change out
+    of 'active' must unindex, and an all-dead k-window must fall back to recency,
+    never []."""
+    if not store._vec_ok:
+        print("[check 4b] dead-row starvation: SKIPPED (sqlite-vec unavailable)")
+        return
+
+    fake: dict[str, list[float]] = {}
+    orig_embed, orig_failed = store._embed, store._embed_failed
+    # Isolate on a fresh DB so the all-dead-k-window case is unambiguous (the
+    # shared self-check DB already holds live beliefs from earlier checks).
+    saved_conn = store._conn
+    store._conn = None
+    store._embed = lambda text: fake[text]
+    store._embed_failed = False
+    with tempfile.TemporaryDirectory() as isolated:
+        try:
+            store.connect(Path(isolated) / "dead.db")
+
+            def vec(axis):
+                v = [0.0] * store.EMBED_DIM
+                v[axis] = 1.0
+                return v
+
+            ids = []
+            for name in ["near0", "near1", "near2", "near3"]:
+                fake[name] = vec(0)  # cluster on axis 0, right next to the query
+                ids.append(store.add_belief(name, "fact", "user"))
+            fake["survivor"] = vec(1)  # farther, on axis 1
+            store.add_belief("survivor", "fact", "user")
+            fake["q"] = vec(0)  # query points at the crowded axis
+
+            # k=4 window is exactly the 4 near rows; survivor is live but excluded.
+            # Archiving all 4 leaves the k-window all-dead: pre-fix this returned
+            # [] despite one live belief; the fix unindexes + falls back to recency.
+            for bid in ids:
+                store.set_belief_status(bid, "archived")
+
+            mapn = store.connect().execute("SELECT COUNT(*) FROM belief_map").fetchone()[0]
+            assert mapn == 1, f"archived beliefs left {mapn} index rows (expected 1 live)"
+
+            texts = [r["text"] for r in store.search_beliefs("q", k=4)]
+            assert texts, "search returned [] with a live belief present (starvation bug)"
+            assert texts == ["survivor"], texts
+        finally:
+            store.close()
+            store._conn = saved_conn
+            store._embed = orig_embed
+            store._embed_failed = orig_failed
+    print("[check 4b] dead rows are unindexed and an all-dead k-window falls back to recency: OK")
 
 
 def check_bump_salience_caps_at_one() -> None:
@@ -375,6 +445,15 @@ def check_migration_v1_to_v3(tmp: Path) -> None:
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived','superseded')),
             superseded_by TEXT, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL
         );
+
+        -- v1 shipped `action` too; the v4 index is built on it, so a fixture
+        -- without it is not actually v1-shaped.
+        CREATE TABLE action (
+            action_id TEXT PRIMARY KEY, tool TEXT, args_redacted TEXT, tier INTEGER,
+            lane INTEGER, result TEXT, undoable INTEGER NOT NULL DEFAULT 0,
+            undo_token TEXT UNIQUE, inverse_json TEXT,
+            consumed INTEGER NOT NULL DEFAULT 0, task_id TEXT, ts TEXT NOT NULL
+        );
         """
     )
     raw.execute(
@@ -394,7 +473,7 @@ def check_migration_v1_to_v3(tmp: Path) -> None:
     store.close()  # release any live module connection before opening the v1 file
     conn = store.connect(v1_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 4
         cols = {r[1] for r in conn.execute("PRAGMA table_info(belief)").fetchall()}
         assert "valid_at" in cols and "invalid_at" in cols, cols
 
@@ -410,9 +489,15 @@ def check_migration_v1_to_v3(tmp: Path) -> None:
         store.put_digest("C:/x/doc.pdf", "sha-1", 1, {"gist": "hi"})
         assert store.get_digest("C:/x/doc.pdf", "sha-1", 1) == {"gist": "hi"}
         assert store.get_digest("C:/x/doc.pdf", "sha-1", 2) is None  # keyed by version
+        # v4 in the same single hop: the whole point of the flat cumulative
+        # guards is that a v1 DB lands on SCHEMA_VERSION with every later
+        # migration's work done, never on an intermediate version.
+        indexes = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+        assert "idx_action_ts" in indexes, indexes
     finally:
         store.close()
-    print("[check 16] v1->v3 migration ALTERs belief, backfills valid_at/invalid_at, creates v2+v3 tables: OK")
+    print("[check 16] v1->v4 migration ALTERs belief, backfills valid_at/invalid_at, creates v2+v3 tables + v4 index: OK")
 
 
 def check_migration_half_migrated_is_idempotent(tmp: Path) -> None:
@@ -434,6 +519,15 @@ def check_migration_half_migrated_is_idempotent(tmp: Path) -> None:
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived','superseded')),
             superseded_by TEXT, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL
         );
+
+        -- v1 shipped `action` too; the v4 index is built on it, so a fixture
+        -- without it is not actually v1-shaped.
+        CREATE TABLE action (
+            action_id TEXT PRIMARY KEY, tool TEXT, args_redacted TEXT, tier INTEGER,
+            lane INTEGER, result TEXT, undoable INTEGER NOT NULL DEFAULT 0,
+            undo_token TEXT UNIQUE, inverse_json TEXT,
+            consumed INTEGER NOT NULL DEFAULT 0, task_id TEXT, ts TEXT NOT NULL
+        );
         """
     )
     raw.execute(
@@ -454,7 +548,7 @@ def check_migration_half_migrated_is_idempotent(tmp: Path) -> None:
     store.close()
     conn = store.connect(v1_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 4
         assert store.get_belief("a") is not None
     finally:
         store.close()
@@ -487,7 +581,7 @@ def check_migration_v2_to_v3(tmp: Path) -> None:
 
     conn = store.connect(v2_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 4
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert "digest_cache" in tables, tables
         store.put_digest("C:/y/report.docx", "sha-2", 1, {"gist": "ok"})
@@ -497,6 +591,102 @@ def check_migration_v2_to_v3(tmp: Path) -> None:
     finally:
         store.close()
     print("[check 18] v2->v3 migration adds digest_cache and preserves existing rows: OK")
+
+
+def check_action_retention_bounds_table() -> None:
+    """The activity log is spec'd as a rolling window, not an archive. Nothing
+    asserted a bound on it before, which is why it grew forever unnoticed."""
+    conn = store.connect()
+    with conn:
+        conn.execute("DELETE FROM action")
+    keep = 10
+    for i in range(keep + 15):
+        store.record_action(f"tool_{i}", {}, 1, 1, "ok", undoable=False)
+    assert conn.execute("SELECT COUNT(*) FROM action").fetchone()[0] == keep + 15
+
+    deleted = store.prune_actions(keep=keep)
+    total = conn.execute("SELECT COUNT(*) FROM action").fetchone()[0]
+    assert total <= keep, total
+    assert deleted == 15, deleted
+    # The newest survive, not an arbitrary 10.
+    kept_tools = {r["tool"] for r in store.recent_actions(limit=100)}
+    assert f"tool_{keep + 14}" in kept_tools, kept_tools
+    assert "tool_0" not in kept_tools, kept_tools
+    print("[check 19] prune_actions bounds the activity log to the newest N rows: OK")
+
+
+def check_retention_never_eats_a_live_undo_token() -> None:
+    """The one that protects user data: an offered-but-unused Undo must keep
+    working no matter how much activity has happened since."""
+    conn = store.connect()
+    with conn:
+        conn.execute("DELETE FROM action")
+    _, live = store.record_action("file_delete", {}, 3, 1, "ok", undoable=True)
+    _, spent = store.record_action("file_edit", {}, 2, 1, "ok", undoable=True)
+    assert store.consume_undo_token(spent) is True
+    for i in range(30):  # bury both well past the window
+        store.record_action(f"filler_{i}", {}, 1, 1, "ok", undoable=False)
+
+    store.prune_actions(keep=5)
+    assert conn.execute("SELECT COUNT(*) FROM action").fetchone()[0] <= 6  # 5 + the exempt row
+    row = store.get_action_by_undo_token(live)
+    assert row is not None, "an unconsumed undo token was swept away -- undo would silently break"
+    # A consumed token has no reversal left to protect, so it is ordinary garbage.
+    assert store.get_action_by_undo_token(spent) is None
+    print("[check 20] retention exempts unconsumed undo tokens and sweeps consumed ones: OK")
+
+
+def check_digest_cache_evicts_stale_sha() -> None:
+    store.connect()
+    path = "C:/x/changing.md"
+    store.put_digest(path, "sha-old", 1, {"gist": "v1"})
+    assert store.get_digest(path, "sha-old", 1) == {"gist": "v1"}
+    store.put_digest(path, "sha-new", 1, {"gist": "v2"})
+    assert store.get_digest(path, "sha-new", 1) == {"gist": "v2"}
+    assert store.get_digest(path, "sha-old", 1) is None, "stale-sha row was never evicted"
+    # Another file's rows are untouched by this path's eviction.
+    store.put_digest("C:/x/other.md", "sha-other", 1, {"gist": "keep"})
+    store.put_digest(path, "sha-newest", 1, {"gist": "v3"})
+    assert store.get_digest("C:/x/other.md", "sha-other", 1) == {"gist": "keep"}
+    print("[check 21] digest_cache drops a path's stale-sha rows on write: OK")
+
+
+def check_embedder_built_once_under_concurrency() -> None:
+    """A4 runs _embed OUTSIDE _OP_LOCK, so it is concurrent by construction:
+    without _EMBED_LOCK two turns each load a ~130MB model on cold start."""
+    import sys as _sys
+    import types
+
+    builds: list[int] = []
+
+    class _FakeEmbedding:
+        def __init__(self, model_name=None):
+            builds.append(1)
+            time.sleep(0.2)  # widen the window the unguarded check raced through
+
+        def embed(self, texts):
+            return iter([[0.0] * store.EMBED_DIM for _ in texts])
+
+    fake = types.ModuleType("fastembed")
+    fake.TextEmbedding = _FakeEmbedding
+    prev_module = _sys.modules.get("fastembed")
+    _sys.modules["fastembed"] = fake
+    # _embed short-circuits to None unless both of these hold -- without setting
+    # them the embedder is never constructed and the test asserts nothing.
+    prev_embedder, prev_vec_ok, prev_failed = store._embedder, store._vec_ok, store._embed_failed
+    store._embedder, store._vec_ok, store._embed_failed = None, True, False
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            vecs = [f.result(timeout=5) for f in [pool.submit(store._embed, f"t{i}") for i in range(4)]]
+        assert len(builds) == 1, f"embedder constructed {len(builds)} times, expected exactly 1"
+        assert all(v is not None and len(v) == store.EMBED_DIM for v in vecs), "embed returned nothing"
+    finally:
+        store._embedder, store._vec_ok, store._embed_failed = prev_embedder, prev_vec_ok, prev_failed
+        if prev_module is None:
+            _sys.modules.pop("fastembed", None)
+        else:
+            _sys.modules["fastembed"] = prev_module
+    print("[check 22] concurrent _embed builds the embedder exactly once (_EMBED_LOCK): OK")
 
 
 def check_embed_computed_outside_lock() -> None:
@@ -534,9 +724,11 @@ def main() -> None:
         tmp_path = Path(tmp)
         check_fresh_connect_and_reconnect_no_redo_ddl(tmp_path)
         check_belief_crud()
+        check_archived_belief_purge()
         check_supersede_provenance_matrix()
         check_candidate_transaction_atomicity()
         check_vector_search_synthetic()
+        check_dead_rows_do_not_starve_search()
         check_bump_salience_caps_at_one()
         check_decay_archives_old_not_fresh()
         check_undo_token_record_consume()
@@ -547,6 +739,10 @@ def main() -> None:
         check_invalidate_belief_rule_six()
         check_conversation_meta_and_dirty()
         check_session_summary_crud()
+        check_action_retention_bounds_table()
+        check_retention_never_eats_a_live_undo_token()
+        check_digest_cache_evicts_stale_sha()
+        check_embedder_built_once_under_concurrency()
         check_embed_computed_outside_lock()  # before the migration checks reconnect elsewhere
         check_migration_v1_to_v3(tmp_path)  # last: reopens store on separate files
         check_migration_half_migrated_is_idempotent(tmp_path)

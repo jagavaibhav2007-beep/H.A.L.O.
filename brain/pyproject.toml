@@ -9,8 +9,14 @@ dependencies = [
     "fastembed>=0.3",
     "httpx>=0.27",
     "keyring>=25",
-    "langgraph>=0.2",
+    # Pin below 2: StateSnapshot.interrupts (graph.rehydrate_pending) does not
+    # exist before langgraph 0.6, so a clean install landing on 0.2.x would
+    # silently fail to rehydrate pending Tier-3 approvals after a Brain restart.
+    "langgraph>=1.0,<2",
     "langgraph-checkpoint-sqlite>=2",
+    # Imported directly in graph.py; do not rely on the transitive edge from
+    # langgraph-checkpoint-sqlite.
+    "aiosqlite>=0.20",
     "pypdfium2>=4",
     "pypdf>=5",
     "mammoth>=1.9",

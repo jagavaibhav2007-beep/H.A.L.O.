@@ -6,6 +6,28 @@ body,
   width: 100%;
   height: 100%;
   overflow: hidden;
+  /* --canvas is "Halo's world" (00-design-language.md) — the workspace is the
+     one window that owns it; the glass panel inside sits on top via
+     --surface. Was flat --bg, which left --canvas defined and unused. */
+  background: var(--canvas);
+}
+
+/* Reduced-transparency fallback (00-design-language.md "Glass rules"): the
+   canvas gradient is itself a form of ambient decoration sitting behind
+   blurred glass, so it degrades to the flat tinted --bg alongside .glass. */
+@media (prefers-reduced-transparency: reduce) {
+  html,
+  body,
+  #root {
+    background: var(--bg);
+  }
+}
+/* data-transparency is set on <html> itself (documentElement), so the html
+   rule needs the attribute selector directly -- a descendant combinator on
+   html never matches (html has no ancestor). */
+html[data-transparency="off"],
+html[data-transparency="off"] body,
+html[data-transparency="off"] #root {
   background: var(--bg);
 }
 
@@ -15,8 +37,14 @@ body,
   display: flex;
 }
 
+/* min-width:0 on both: a flex item's automatic minimum is its min-content, so
+   without it the shell inherits the status strip's nowrap floor and grows past
+   the window (measured 868px inside the app's own minWidth:720 — everything
+   past 720 is clipped by html{overflow:hidden}, taking the Stop button with
+   it). .workspace-main already had this; its two ancestors did not. */
 .workspace-shell {
   flex: 1;
+  min-width: 0;
   display: flex;
   transition:
     opacity var(--motion-expand) var(--ease-out),
@@ -39,6 +67,7 @@ body,
 
 .workspace-content {
   flex: 1;
+  min-width: 0;
   margin: 0;
   border-radius: 0;
   display: flex;
@@ -124,9 +153,12 @@ body,
 }
 
 .status-hotkey-note {
-  color: var(--tier-3);
+  /* --tier-3 as *text* is 3.12:1 in light mode; --tier-3-text is the token
+     that exists for exactly this (same amber in dark mode). */
+  color: var(--tier-3-text);
   font-size: var(--text-sm);
   line-height: 1.3;
+  min-width: 0; /* it wraps, so let it give ground before the Stop button does */
   max-width: 360px;
 }
 
@@ -138,13 +170,22 @@ body,
   min-width: 0;
 }
 
+/* max-width caps it; min-width:0 is what lets it actually ellipsize. Without
+   the latter the nowrap title floors the chip at 320px and pushes Stop — the
+   primary control on this strip — off the right edge at minWidth:720. */
 .status-task-title {
   font-size: var(--text-sm);
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
   max-width: 320px;
+}
+
+.status-task-error {
+  color: var(--destructive);
+  font-size: var(--text-sm);
 }
 
 /* ---- View routing (Step 6) ---- */
@@ -157,6 +198,61 @@ body,
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+.process-health {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--tier-3) 10%, transparent);
+  font-size: var(--text-sm);
+}
+
+.process-health-error {
+  color: var(--destructive);
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+}
+
+.process-health-voice {
+  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+}
+
+.workspace-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--destructive);
+  color: var(--destructive);
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+  font-size: var(--text-sm);
+}
+
+.workspace-error span {
+  flex: 1;
+}
+
+.workspace-error button {
+  min-height: var(--hit-min);
+  padding: 0 10px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .workspace-views {
@@ -176,4 +272,21 @@ body,
 }
 .workspace-view[hidden] {
   display: none;
+}
+/* Panel transition (00-design-language.md "Motion" — --motion-slow is for
+   exactly this) — a view switch was an instant snap with no feedback that
+   navigation happened. [hidden] forces display:none for the outgoing view,
+   so only the incoming one can animate; toggling `hidden` off restarts the
+   animation for free (the element goes from not-rendered to rendered), no
+   JS needed. prefers-reduced-motion is handled globally in glass.css. */
+@keyframes workspace-view-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.workspace-view:not([hidden]) {
+  animation: workspace-view-in var(--motion-slow) var(--ease-out);
 }

@@ -7,11 +7,25 @@ Every tool invocation is classified **before execution**:
 
 | Tier | Action | Behavior |
 |---|---|---|
-| 1 Silent | read, search, open app, draft, read-only cmd, memory read | run, log |
-| 2 Notify | create/edit/move in project folders, run coding agent, non-destructive browse | run, surface event |
+| 1 Silent | read, search, open app, draft, read-only cmd, memory read | run, log, activity frame |
+| 2 Notify | create/edit/move in project folders, run coding agent, non-destructive browse | run, log, activity frame |
 | 3 Ask | delete/overwrite, send msg/email, spend money/checkout, change account/system settings, install software, edit Halo's own core code / a relied-on skill | **`interrupt()` → approval** |
 
 Classification is a single function `classify(tool, args) -> tier`, unit-tested. No per-tool scattered checks.
+
+**Tier 1 and Tier 2 are currently identical in the Brain.** Both run through the same
+execution tail (`gate.py` `_execute_tail`), which records the action and broadcasts one
+`activity` frame carrying the tier — so "Silent" names the *approval* behaviour, not the
+feed. The only tier distinction the Brain enforces is Tier 3's `interrupt()` → approval.
+`narrate` is hardcoded `false` on every tool activity frame regardless of tier, so no
+tool activity currently reaches Voice (which is only sent narrated activity); narration
+today comes from elsewhere. The tier rides on the frame for the UI to present, but the
+Brain does not gate on it.
+
+This is deliberate — the Tier-1 activity broadcast was added on purpose and its test was
+updated with it — but it means the "surface event" column above no longer discriminates.
+If Tier 1 and Tier 2 should genuinely differ in what the user sees, that difference has
+yet to be designed and implemented; do not assume the code already does it.
 
 ## Tier-3 flow
 ```

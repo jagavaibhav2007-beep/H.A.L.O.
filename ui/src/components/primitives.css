@@ -2,7 +2,7 @@
    tokens.css — no raw hex or ms literals here. */
 
 .halo-panel {
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   color: var(--text);
   font-family: var(--font-sans);
 }
@@ -38,7 +38,7 @@
 }
 /* Disabled styling is part of the primitive, not per-consumer. */
 .halo-btn:disabled {
-  opacity: 0.55;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 
@@ -133,7 +133,7 @@
 .halo-card {
   display: flex;
   flex-direction: column;
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   border: 1px solid var(--border);
   background: var(--surface);
 }
@@ -207,4 +207,25 @@
   color: var(--text);
   font-family: var(--font-sans);
   font-size: var(--text-sm);
+}
+
+/* Loading spinner: a small ring for text-only loading states (Settings key
+   check, Memory history). aria-hidden — the adjacent role="status" text is
+   what AT announces. prefers-reduced-motion freezes it to a static ring. */
+.halo-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid var(--border);
+  border-top-color: var(--text-muted);
+  border-radius: 50%;
+  animation: halo-spin 0.7s linear infinite;
+}
+@keyframes halo-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .halo-spinner { animation: none; }
 }

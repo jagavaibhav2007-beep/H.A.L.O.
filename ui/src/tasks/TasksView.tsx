@@ -15,7 +15,13 @@ import type { LucideIcon } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
-import { useHaloStore, selectTasks, selectStream, selectOperationErrors } from "../state/store";
+import {
+  useHaloStore,
+  selectTasks,
+  selectStream,
+  selectOperationErrors,
+  selectCapabilities,
+} from "../state/store";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
 import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
 import type { TaskStateMsg } from "../ipc/contract";
@@ -40,9 +46,12 @@ interface TasksViewProps {
 export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
   const tasks = useHaloStore(selectTasks);
   const operationErrors = useHaloStore(selectOperationErrors);
+  const capabilities = useHaloStore(selectCapabilities);
+  const controlsAvailable = capabilities.taskControls === true;
   const { pending, failures, begin } = usePendingConfirm(tasks, operationErrors);
 
   const op = (task: TaskStateMsg, kind: "pause" | "resume" | "stop", label: string) => {
+    if (!controlsAvailable) return;
     const confirms = (value: TaskStateMsg | undefined) => {
       if (kind === "pause") return value?.state === "paused";
       if (kind === "resume") return value?.state === "running";
@@ -51,6 +60,7 @@ export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
     if (begin(task.task_id, label, confirms, "task_op")) sendTaskOp(kind, task.task_id);
   };
   const pin = (task: TaskStateMsg, lane: 1 | 2 | 3) => {
+    if (!controlsAvailable) return;
     if (lane === task.lane) return;
     if (begin(task.task_id, "pinning", (value) => value?.lane === lane, "lane_pin")) sendLanePin(task.task_id, lane);
   };
@@ -68,10 +78,22 @@ export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
 
   return (
     <div className="halo-scroll">
+      {!controlsAvailable && (
+        <p className="task-reason" role="status">
+          Task controls are not available in this build. Task progress remains visible here.
+        </p>
+      )}
       <ul className="halo-list tasks-list">
         {ordered.map((t) => (
           <li key={t.task_id}>
-            <TaskCard task={t} pending={pending[t.task_id]} failure={failures[t.task_id]} op={op} pin={pin} />
+            <TaskCard
+              task={t}
+              pending={pending[t.task_id]}
+              failure={failures[t.task_id]}
+              controlsAvailable={controlsAvailable}
+              op={op}
+              pin={pin}
+            />
           </li>
         ))}
       </ul>
@@ -83,11 +105,12 @@ interface CardProps {
   task: TaskStateMsg;
   pending: string | undefined;
   failure: string | undefined;
+  controlsAvailable: boolean;
   op: (task: TaskStateMsg, kind: "pause" | "resume" | "stop", label: string) => void;
   pin: (task: TaskStateMsg, lane: 1 | 2 | 3) => void;
 }
 
-function TaskCard({ task, pending, failure, op, pin }: CardProps) {
+function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardProps) {
   const { title, state, lane, step, steps_total, step_label, reason } = task;
   const stream = useHaloStore(selectStream(task.task_id));
   const busy = pending !== undefined;
@@ -99,7 +122,7 @@ function TaskCard({ task, pending, failure, op, pin }: CardProps) {
       <div className="task-head">
         <span className="task-title">{title ?? "Working"}</span>
         <TaskStateChip state={state} />
-        <LanePin task={task} disabled={busy} onPin={pin} />
+        <LanePin task={task} disabled={busy || !controlsAvailable} onPin={pin} />
       </div>
 
       {!collapsed && (
@@ -140,18 +163,18 @@ function TaskCard({ task, pending, failure, op, pin }: CardProps) {
 
           <div className="task-actions">
             {(state === "running" || state === "waiting_approval") && (
-              <Button variant="ghost" disabled={busy} onClick={() => op(task, "pause", "pausing")}>
+              <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={() => op(task, "pause", "pausing")}>
                 <Icon icon={Pause} size={16} />
                 {pending === "pausing" ? "Pausing…" : "Pause"}
               </Button>
             )}
             {state === "paused" && (
-              <Button variant="primary" disabled={busy} onClick={() => op(task, "resume", "resuming")}>
+              <Button variant="primary" disabled={busy || !controlsAvailable} onClick={() => op(task, "resume", "resuming")}>
                 <Icon icon={Play} size={16} />
                 {pending === "resuming" ? "Resuming…" : "Resume"}
               </Button>
             )}
-            <Button variant="destructive" disabled={busy} onClick={() => op(task, "stop", "stopping")}>
+            <Button variant="destructive" disabled={busy || !controlsAvailable} onClick={() => op(task, "stop", "stopping")}>
               <Icon icon={Square} size={16} />
               {pending === "stopping" ? "Stopping…" : "Stop"}
             </Button>

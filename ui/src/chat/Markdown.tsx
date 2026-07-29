@@ -72,6 +72,18 @@ const COMPONENTS: Components = {
       </a>
     );
   },
+  // Model output reaches this component verbatim, and a bare `![](https://…)`
+  // is an outbound GET the moment it renders — an exfiltration channel that
+  // needs no click. Render the URL as text instead of fetching it; the CSP's
+  // `img-src 'self' data:` is the belt to this suspenders.
+  img({ src, alt, title }) {
+    const label = alt || title || "image";
+    return (
+      <span className="md-blocked-img" title={typeof src === "string" ? src : undefined}>
+        [{label}: remote image not loaded]
+      </span>
+    );
+  },
 };
 
 export function Markdown({ text }: { text: string }) {

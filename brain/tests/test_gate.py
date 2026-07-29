@@ -59,6 +59,17 @@ gate.register(
     tier=lambda args: 3 if args.get("risky") else 2,
     summary="I want to run argtool.",
 )
+gate.register(
+    "redacted_argtool",
+    _make_tool("redacted_argtool"),
+    tier=lambda args: 3 if args.get("risky") else 2,
+    redact=lambda args: {
+        "risky": args.get("risky"),
+        "secret": f"<{len(args.get('secret', ''))} chars>",
+        "label": args.get("label"),
+    },
+    summary="I want to run redacted_argtool.",
+)
 gate.register("t_broken_rule", _make_tool("t_broken_rule"), tier=lambda args: 1 / 0)
 
 
@@ -76,10 +87,10 @@ async def _connect_auth(port: int, token: str):
     await ws.send(json.dumps(_frame("hello", token=token)))
     ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
     assert ack["type"] == "hello_ack", ack
-    # Step 9: drain the whole snapshot. `spend_update` is always its last
-    # frame (the "snapshot done" sentinel), so draining to it stays correct as
-    # the snapshot grows -- no per-suite frame counting.
-    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
+    # Step 9: drain the whole snapshot. `snapshot_complete` is always its
+    # last frame (the explicit "snapshot done" marker), so draining to it stays
+    # correct as the snapshot grows -- no per-suite frame counting.
+    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "snapshot_complete":
         pass
     return ws
 
@@ -202,14 +213,16 @@ async def check_tier1(port: int, token: str) -> None:
     ws = await _connect_auth(port, token)
     try:
         await _call_tool(ws, "gate-t1", "t1_tool", {"path": "x"})
-        frame = await _recv(ws)
+        activity = await _recv_type(ws, "activity")
+        assert activity["tier"] == 1 and activity["narrate"] is False, activity
+        frame = await _recv_type(ws, "done")
         assert frame["type"] == "done" and frame["conversation_id"] == "gate-t1", frame
         assert ("t1_tool", {"path": "x"}) in EXECUTED
         rows = _actions_for("t1_tool")
         assert rows and rows[0]["tier"] == 1 and rows[0]["result"] == "ok", rows
     finally:
         await ws.close()
-    print("[check 2] Tier 1: runs silently, action row written, no approval, done: OK")
+    print("[check 2] Tier 1: runs without narration, live activity written/broadcast, no approval, done: OK")
 
 
 async def check_tier2(port: int, token: str) -> None:
@@ -311,9 +324,34 @@ async def check_tier3_edit(port: int, token: str) -> None:
         frame = await _recv_type(ws, "done")
         assert frame["conversation_id"] == "gate-edit2", frame
         assert ("argtool", {"risky": False, "v": 4}) in EXECUTED
+
+        # The editor receives display-only redacted args. Leaving a placeholder
+        # unchanged must preserve the original secret while other fields change.
+        await _call_tool(
+            ws,
+            "gate-edit-redacted",
+            "redacted_argtool",
+            {"risky": True, "secret": "actual-secret", "label": "before"},
+        )
+        req4 = await _recv_type(ws, "approval_request")
+        assert req4["args_redacted"]["secret"] == "<13 chars>", req4
+        await _respond(
+            ws,
+            req4["approval_id"],
+            "edit",
+            {"risky": False, "secret": "<13 chars>", "label": "after"},
+        )
+        await _recv_type(ws, "activity")
+        frame = await _recv_type(ws, "done")
+        assert frame["conversation_id"] == "gate-edit-redacted", frame
+        assert (
+            "redacted_argtool",
+            {"risky": False, "secret": "actual-secret", "label": "after"},
+        ) in EXECUTED
     finally:
         await ws.close()
-    print("[check 6] Tier 3 edit: edited args re-classified; still-Tier-3 edit -> second approval; Tier-2 edit -> executes: OK")
+    print("[check 6] Tier 3 edit: edited args re-classified; still-Tier-3 edit -> second approval; "
+          "Tier-2 edit executes; unchanged redaction placeholders preserve original values: OK")
 
 
 async def check_destructive(port: int, token: str) -> None:

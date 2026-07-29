@@ -87,8 +87,11 @@ def _file_read(args: dict) -> str:
     p = _resolve(args["path"])
     try:
         text = extract.extract_text(p)
-    except ValueError:
-        raise  # honest "no extractable text"/unsupported-format error -> the tool error
+    except (ValueError, MemoryError):
+        # ValueError: honest "no extractable text"/unsupported-format/too-large
+        # error -> the tool error. MemoryError: the file did not fit once, so
+        # the raw-read fallback below would only try the same allocation again.
+        raise
     except Exception:
         # Extraction library choked on a malformed file -- fall back to the
         # old best-effort raw read rather than losing the file entirely.
@@ -280,11 +283,39 @@ def _run_cmd(args: dict) -> dict:
 # ---------------------------------------------------------------- writes ---
 
 
+def _atomic_write(p: Path, text: str) -> None:
+    """Write `text` to `p` all-or-nothing. `open("w")` truncates and then
+    streams, so a crash/full disk/AV grab mid-write leaves a half file -- and
+    since the recorded inverse's sha256 precondition then no longer matches,
+    undo *refuses* and the original is simply gone. Write a sibling temp (same
+    directory: os.replace cannot cross volumes on Windows) and rename it over.
+
+    newline="" is load-bearing on both this and every read: without it Python
+    translates "\\n" to os.linesep, which silently rewrites an LF file's every
+    line ending -- irreversibly, since the inverse records the post-write hash.
+    """
+    tmp = p.with_name(f"{p.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.replace(tmp, p)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _file_create(args: dict) -> dict:
     p = _resolve(args["path"])
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("x", encoding="utf-8") as handle:
-        handle.write(args["content"])
+    # open("x") reserves the name so a raced create still raises FileExistsError
+    # from the OS -- no hand-rolled exists() check, which would be TOCTOU.
+    with p.open("x", encoding="utf-8", newline=""):
+        pass
+    try:
+        _atomic_write(p, args["content"])
+    except BaseException:
+        p.unlink(missing_ok=True)  # don't leave the empty reservation behind
+        raise
     return {"path": str(p), "sha256": _sha(p)}
 
 
@@ -304,13 +335,17 @@ def _create_inverse(args: dict, result: dict) -> dict:
 
 def _file_edit(args: dict) -> dict:
     p = _resolve(args["path"])
-    text = p.read_text(encoding="utf-8")
+    # newline="" on the read too: read_text normalizes line endings, so editing
+    # one snippet in an LF-only file on Windows would silently rewrite every
+    # line to CRLF (and the recorded inverse could never restore them).
+    with p.open("r", encoding="utf-8", newline="") as handle:
+        text = handle.read()
     count = text.count(args["old"])
     if count == 0:
         raise ValueError("old text not found in file")
     if count > 1:
         raise ValueError(f"old text is ambiguous: {count} occurrences (need exactly 1)")
-    p.write_text(text.replace(args["old"], args["new"], 1), encoding="utf-8")
+    _atomic_write(p, text.replace(args["old"], args["new"], 1))
     return {"path": str(p), "sha256": _sha(p)}
 
 
@@ -392,6 +427,7 @@ async def _dir_organize(args: dict) -> dict:
         )
         done: list[dict] = []
         skipped: list[str] = []
+        failed: list[dict] = []
         # ponytail: no cooperative cancel between files yet -- arrives with
         # real long tasks; and no stepped task_state progress frames -- tool
         # fns get a broadcast context in Step 9.
@@ -400,12 +436,20 @@ async def _dir_organize(args: dict) -> dict:
             if not src.exists():
                 skipped.append(str(src))  # vanished mid-plan: skip, don't crash (D6)
                 continue
-            dst = _uncollide(_resolve(m["dst"]))
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
+            # A single failed move (locked file, full disk, MAX_PATH, cross-device)
+            # must not abandon the batch: that would strand every already-moved
+            # file with no undo record (inverse builds from `moves`). Record the
+            # failure and keep going so `done` still yields a reversal for the rest.
+            try:
+                dst = _uncollide(_resolve(m["dst"]))
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+            except OSError as exc:
+                failed.append({"src": str(src), "error": str(exc)})
+                continue
             done.append({"src": str(src), "dst": str(dst)})
         store.upsert_task(task_id, state="done", step=len(done), steps_total=len(moves))
-        return {"task_id": task_id, "moves": done, "skipped": skipped}
+        return {"task_id": task_id, "moves": done, "skipped": skipped, "failed": failed}
 
     return await asyncio.to_thread(run)
 

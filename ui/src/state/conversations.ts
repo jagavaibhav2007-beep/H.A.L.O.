@@ -24,6 +24,9 @@ export interface ConversationMeta {
   id: string;
   title: string;
   lastUsedAt: number;
+  /** True only after the user submits at least one non-empty message. Drafts,
+   * manual renames, and merely opening a tab do not make it durable. */
+  hasUserMessage: boolean;
   /** Received token/done/error while not active. Transient — never persisted. */
   unread?: boolean;
   /** Loaded from a previous session, so the store holds no turns for it.
@@ -47,11 +50,15 @@ function touch(reg: ConversationRegistry, id: string, patch: Partial<Conversatio
 }
 
 export function createRegistry(id: string, now: number): ConversationRegistry {
-  return { all: [{ id, title: DEFAULT_TITLE, lastUsedAt: now }], open: [id], activeId: id };
+  return {
+    all: [{ id, title: DEFAULT_TITLE, lastUsedAt: now, hasUserMessage: false }],
+    open: [id],
+    activeId: id,
+  };
 }
 
 export function newConversation(reg: ConversationRegistry, id: string, now: number): ConversationRegistry {
-  const meta: ConversationMeta = { id, title: DEFAULT_TITLE, lastUsedAt: now };
+  const meta: ConversationMeta = { id, title: DEFAULT_TITLE, lastUsedAt: now, hasUserMessage: false };
   const all = [meta, ...reg.all].slice(0, RECENT_CAP);
   const kept = new Set(all.map((c) => c.id));
   return { all, open: [...reg.open.filter((i) => kept.has(i)), id], activeId: id };
@@ -68,21 +75,26 @@ export function setActive(reg: ConversationRegistry, id: string, now: number): C
   };
 }
 
-/** Close the tab; the thread stays in `all` (Recent). `fallbackId` is only
- * used when this was the last open tab — a chat view with no conversation has
- * nowhere to type. */
+/** Close the tab. Started threads stay in `all` (Recent); untouched tabs are
+ * discarded. `fallbackId` is only used when this was the last open tab — a
+ * chat view with no conversation has nowhere to type. */
 export function closeConversation(
   reg: ConversationRegistry,
   id: string,
   fallbackId: string,
   now: number,
 ): ConversationRegistry {
+  const meta = reg.all.find((c) => c.id === id);
+  const base =
+    meta && !meta.hasUserMessage
+      ? { ...reg, all: reg.all.filter((c) => c.id !== id) }
+      : reg;
   const open = reg.open.filter((i) => i !== id);
-  if (open.length === 0) return newConversation({ ...reg, open }, fallbackId, now);
-  if (reg.activeId !== id) return { ...reg, open };
+  if (open.length === 0) return newConversation({ ...base, open }, fallbackId, now);
+  if (reg.activeId !== id) return { ...base, open };
   // Prefer the tab that slid into this one's slot, else the new last one.
   const wasAt = reg.open.indexOf(id);
-  return setActive({ ...reg, open }, open[Math.min(wasAt, open.length - 1)], now);
+  return setActive({ ...base, open }, open[Math.min(wasAt, open.length - 1)], now);
 }
 
 /** Forget the thread entirely (tab strip + Recent). The Brain's checkpoints
@@ -111,9 +123,13 @@ export function renameConversation(reg: ConversationRegistry, id: string, title:
  * short to mean anything. */
 export function titleFromMessage(reg: ConversationRegistry, id: string, text: string): ConversationRegistry {
   const meta = reg.all.find((c) => c.id === id);
-  if (!meta || meta.title !== DEFAULT_TITLE) return reg;
-  if (text.trim().length < TITLE_MIN_SOURCE) return reg;
-  return touch(reg, id, { title: truncate(text), restored: false });
+  if (!meta) return reg;
+  const started = meta.hasUserMessage
+    ? reg
+    : touch(reg, id, { hasUserMessage: true, restored: false });
+  if (meta.title !== DEFAULT_TITLE) return started;
+  if (text.trim().length < TITLE_MIN_SOURCE) return started;
+  return touch(started, id, { title: truncate(text), restored: false });
 }
 
 /** A frame landed for `id`: dot it if the user isn't looking at it. Unknown
@@ -126,20 +142,26 @@ export function markUnread(reg: ConversationRegistry, id: string): ConversationR
 }
 
 // ---- Persistence (localStorage) ----
-// Only `{id, title, lastUsedAt}` + which tabs were open + the active id.
-// `unread` is per-session by definition; `restored` is derived on load.
+// Only `{id, title, lastUsedAt, hasUserMessage}` + which tabs were open + the
+// active id. `unread` is per-session by definition; `restored` is derived on
+// load.
 
 export const STORAGE_KEY = "halo.conversations.v1";
 
 interface Persisted {
-  all: { id: string; title: string; lastUsedAt: number }[];
+  all: { id: string; title: string; lastUsedAt: number; hasUserMessage?: boolean }[];
   open: string[];
   activeId: string;
 }
 
 export function serialize(reg: ConversationRegistry): string {
   const payload: Persisted = {
-    all: reg.all.map(({ id, title, lastUsedAt }) => ({ id, title, lastUsedAt })),
+    all: reg.all.map(({ id, title, lastUsedAt, hasUserMessage }) => ({
+      id,
+      title,
+      lastUsedAt,
+      hasUserMessage,
+    })),
     open: reg.open,
     activeId: reg.activeId,
   };
@@ -154,7 +176,15 @@ export function deserialize(raw: string | null): ConversationRegistry | null {
     const p = JSON.parse(raw) as Persisted;
     const all = (p.all ?? [])
       .filter((c) => typeof c?.id === "string" && typeof c.title === "string")
-      .map((c) => ({ ...c, lastUsedAt: Number(c.lastUsedAt) || 0, restored: true }));
+      .map((c) => ({
+        ...c,
+        lastUsedAt: Number(c.lastUsedAt) || 0,
+        // v1 blobs created before this field existed may include real short
+        // conversations still titled "New chat". Preserve them rather than
+        // guessing and deleting history.
+        hasUserMessage: typeof c.hasUserMessage === "boolean" ? c.hasUserMessage : true,
+        restored: true,
+      }));
     if (all.length === 0) return null;
     const ids = new Set(all.map((c) => c.id));
     const open = (p.open ?? []).filter((i) => ids.has(i));

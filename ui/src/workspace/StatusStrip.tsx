@@ -10,8 +10,16 @@ import { Mic, MicOff } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
-import { useHaloStore, selectRunningTask, selectVoice } from "../state/store";
+import {
+  useHaloStore,
+  selectRunningTask,
+  selectVoice,
+  selectCapabilities,
+  selectTasks,
+  selectOperationErrors,
+} from "../state/store";
 import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
+import { usePendingConfirm } from "../lib/usePendingConfirm";
 
 const MIC_LABEL: Record<string, string> = {
   idle: "Mic idle",
@@ -34,10 +42,13 @@ interface HotkeyStatus {
 export function StatusStrip({ sendTaskOp }: StatusStripProps) {
   const runningTask = useHaloStore(selectRunningTask);
   const voice = useHaloStore(selectVoice);
+  const capabilities = useHaloStore(selectCapabilities);
+  const tasks = useHaloStore(selectTasks);
+  const operationErrors = useHaloStore(selectOperationErrors);
+  const { pending, failures, begin } = usePendingConfirm(tasks, operationErrors);
   // rule 3: the stop button disables on press and resolves only once the
   // Brain confirms via task_state (the task leaves "running" or vanishes) —
   // never optimistically.
-  const [stoppingId, setStoppingId] = useState<string | null>(null);
   const [hotkeyNotice, setHotkeyNotice] = useState<string | null>(null);
 
   useEffect(() => {
@@ -46,12 +57,6 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
       .then((status) => setHotkeyNotice(status.notice))
       .catch(() => setHotkeyNotice("Halo could not read the summon hotkey. Open the workspace from the tray."));
   }, []);
-
-  useEffect(() => {
-    if (!stoppingId) return;
-    const stillRunning = runningTask?.task_id === stoppingId && runningTask.state === "running";
-    if (!stillRunning) setStoppingId(null);
-  }, [runningTask, stoppingId]);
 
   return (
     <div className="status-strip">
@@ -63,8 +68,14 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
         />
       )}
       <span className="status-mic">
-        <Icon icon={voice.state === "muted" ? MicOff : Mic} size={16} />
-        <span>{MIC_LABEL[voice.state] ?? voice.state}</span>
+        <Icon icon={capabilities.voiceInput === true && voice.state !== "muted" ? Mic : MicOff} size={16} />
+        <span>
+          {capabilities.voiceInput === false
+            ? "Voice unavailable"
+            : capabilities.voiceInput == null
+              ? "Checking voice"
+              : MIC_LABEL[voice.state] ?? voice.state}
+        </span>
       </span>
       {hotkeyNotice && <span className="status-hotkey-note" role="status">{hotkeyNotice}</span>}
       {runningTask && (
@@ -78,14 +89,28 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
           </span>
           <Button
             variant="destructive"
-            disabled={stoppingId === runningTask.task_id}
+            disabled={capabilities.taskControls !== true || pending[runningTask.task_id] !== undefined}
             onClick={() => {
-              setStoppingId(runningTask.task_id);
-              sendTaskOp("stop", runningTask.task_id);
+              if (
+                begin(
+                  runningTask.task_id,
+                  "stopping",
+                  (value) => value == null || value.state === "done" || value.state === "failed",
+                  "task_op",
+                )
+              ) {
+                sendTaskOp("stop", runningTask.task_id);
+              }
             }}
+            title={capabilities.taskControls === false ? "Task controls are not available in this build" : undefined}
           >
-            {stoppingId === runningTask.task_id ? "Stopping…" : "Stop"}
+            {pending[runningTask.task_id] === "stopping" ? "Stopping…" : "Stop"}
           </Button>
+          {failures[runningTask.task_id] && (
+            <span className="status-task-error" role="alert">
+              {failures[runningTask.task_id]}
+            </span>
+          )}
         </div>
       )}
     </div>

@@ -18,7 +18,8 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and 
 | `user_msg` | `text, conversation_id, source:"ui"\|"voice"` | **one shape for both clients** — voice includes conversation_id too |
 | `interrupt` | `conversation_id` | typed **or** spoken "stop" — both clients can send it |
 | `approval_response` | `reply_to (approval_request approval_id), decision:"approve"\|"deny"\|"edit", edited_args?` | closes the Tier-3 round-trip |
-| `memory_edit` | `belief_id, op:"edit"\|"delete"\|"restore", text?` | memory panel |
+| `memory_edit` | `belief_id, op:"edit"\|"delete"\|"restore"\|"purge", text?` | memory panel; `purge` is allowed only for archived beliefs |
+| `memory_query` | — | request archived and superseded memory history on demand |
 | `skill_op` | `skill_name, op:"trial"\|"disable"\|"restore"\|"delete"` | skills panel |
 | `lane_pin` | `task_id, lane:1\|2\|3` | user pins a lane |
 | `task_op` | `task_id?, op:"pause"\|"resume"\|"stop"` | per-task controls (tasks view, orb menu); omitted `task_id` = all tasks. `stop` ≠ `interrupt`: stop kills a task, interrupt redirects a conversation |
@@ -33,15 +34,18 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and 
 | `token` | `text, conversation_id` | streamed reply tokens |
 | `activity` | `text, narrate:bool, task_id, undoable:bool, undo_token?, tier?:1\|2\|3, lane?:1\|2\|3` | feed events; `narrate:true` → Voice speaks it; **`undoable:false` shown explicitly** (sent email ≠ reversible); `tier`/`lane` drive the feed's chips and filters |
 | `approval_request` | `approval_id, tool, args_redacted, tier, task_id, summary?, destructive?:bool, conversation_id?` | suspends via `interrupt()`; resumed by `approval_response` whose `reply_to` = this `approval_id`; `summary` is the one plain sentence the card leads with; `destructive` drives the red-border / hold-to-approve / no-voice-approval variant; `conversation_id` names the suspended thread — approve/deny/edit don't need it (the Brain resolves them by `approval_id`), but the card's "Stop this task" sends `interrupt`, which **is** keyed by conversation, so without it a UI with several conversations open would interrupt whichever thread is on screen rather than the one that asked. Optional (older frames may omit it); the UI falls back to the active conversation |
-| `done` | `conversation_id, task_id?` | turn/task complete |
-| `error` | `code, message, recoverable:bool, conversation_id?` | never silently drop a turn |
+| `done` | `conversation_id, task_id?, interrupted?:bool` | turn/task complete; `interrupted:true` closes the active assistant turn as stopped rather than completed |
+| `error` | `code, message, recoverable:bool, conversation_id?, operation_kind?, operation_id?` | never silently drop a turn; operation correlation is an all-or-nothing pair and includes `interrupt` |
 | `task_state` | `task_id, state:"running"\|"paused"\|"waiting_approval"\|"done"\|"failed", lane, title?, step?, steps_total?, step_label?, reason?` | tasks panel + lane indicator; `step`/`steps_total`/`step_label` drive progress text, `reason` explains a paused task |
 | `stream_frame` | `task_id, jpeg_b64, seq` | live desktop view, Lanes 2/3 only, throttled (~2 fps) |
 | `voice_state` | `state:"idle"\|"wake"\|"listening"\|"thinking"\|"speaking"\|"muted"` | originates in the Voice worker, relayed by Brain → UI; drives the orb's state language |
 | `transcript` | `text, final:bool, conversation_id` | STT partials for live ghost-text; `final:true` coincides with the `user_msg` the Voice worker submits |
 | `spend_update` | `session_usd, month_usd` | Brain accumulates per-call cost (OpenRouter usage fields) into SQLite; feeds the Settings spend view |
 | `settings_state` | `key, status:"set"\|"missing"\|"invalid"\|"unverified"` | per-client reply to `settings_update` (sent only to the client that changed it) and pushed once on a fresh non-mock UI connection with the key's current status; `"unverified"` = stored but not yet confirmed against the provider (e.g. offline at save time) |
-| `belief_state` | `belief_id, text, kind:"preference"\|"project"\|"workflow"\|"decision"\|"lesson", provenance:"user"\|"inferred", salience, status:"active"\|"archived"\|"superseded", superseded_by?, used_at?` | memory panel cards; pushed as snapshot-on-connect + delta-on-change (same pattern as `task_state`) |
+| `capabilities_state` | `voice_input:bool, task_controls:bool, skill_controls:bool, demo_scenarios:bool` | snapshot truth for optional UI controls; the real Brain advertises only implemented capabilities, while the mock enables its scripted demo controls |
+| `belief_state` | `belief_id, text, kind:"preference"\|"project"\|"workflow"\|"decision"\|"lesson", provenance:"user"\|"inferred", salience, status:"active"\|"archived"\|"superseded", superseded_by?, used_at?` | memory panel cards; active rows are pushed on connect, archived/superseded rows on `memory_query`, and changes as deltas |
+| `belief_deleted` | `belief_id` | confirms permanent deletion of an archived belief |
+| `memory_history_state` | `complete` | marks completion of an on-demand memory history response |
 | `skill_state` | `skill_name, origin:"auto"\|"user", kind:"skill"\|"playbook", uses, success_rate, status:"active"\|"paused"\|"retired", born_at, reason?` | skills panel cards; same snapshot+delta pattern |
 
 ## Concurrency model

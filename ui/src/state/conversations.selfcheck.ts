@@ -24,16 +24,17 @@ function assert(cond: unknown, msg: string): asserts cond {
 const title = (reg: ReturnType<typeof createRegistry>, id: string) =>
   reg.all.find((c) => c.id === id)?.title;
 
-// ---- Scenario 1: new / active / close keeps the thread in Recent ----
+// ---- Scenario 1: only a started conversation survives close in Recent ----
 {
   let reg = createRegistry("a", 1);
   reg = newConversation(reg, "b", 2);
   assert(reg.activeId === "b", "new conversation becomes active");
   assert(reg.open.join() === "a,b", "new tab appends to the strip");
 
+  reg = titleFromMessage(reg, "b", "hi");
   reg = closeConversation(reg, "b", "fallback", 3);
   assert(reg.open.join() === "a", "closed tab leaves the strip");
-  assert(reg.all.some((c) => c.id === "b"), "closing does NOT delete the thread");
+  assert(reg.all.some((c) => c.id === "b"), "a conversation with a user message stays in Recent");
   assert(reg.activeId === "a", "closing the active tab activates a neighbour");
 
   reg = setActive(reg, "b", 4);
@@ -43,13 +44,19 @@ const title = (reg: ReturnType<typeof createRegistry>, id: string) =>
   assert(!reg.all.some((c) => c.id === "b"), "delete removes the thread from Recent too");
 }
 
-// ---- Scenario 2: closing the LAST tab opens a fresh one ----
+// ---- Scenario 2: untouched tabs are disposable, including the last tab ----
 {
   let reg = createRegistry("a", 1);
-  reg = closeConversation(reg, "a", "fresh", 2);
+  reg = newConversation(reg, "b", 2);
+  reg = closeConversation(reg, "b", "unused", 3);
+  assert(!reg.all.some((c) => c.id === "b"), "closing an untouched tab does not save it in Recent");
+  assert(reg.open.join() === "a", "the neighbouring tab remains open");
+
+  reg = closeConversation(reg, "a", "fresh", 4);
   assert(reg.open.join() === "fresh", "last close opens the fallback conversation");
   assert(reg.activeId === "fresh", "and activates it — chat is never tab-less");
-  assert(reg.all.some((c) => c.id === "a"), "the closed thread is still in Recent");
+  assert(!reg.all.some((c) => c.id === "a"), "an untouched last tab is discarded rather than saved");
+  assert(reg.all.length === 1, "only the fresh replacement remains");
 }
 
 // ---- Scenario 3: titling heuristic ----
@@ -57,6 +64,7 @@ const title = (reg: ReturnType<typeof createRegistry>, id: string) =>
   let reg = createRegistry("a", 1);
   reg = titleFromMessage(reg, "a", "hey");
   assert(title(reg, "a") === DEFAULT_TITLE, "a too-short first message does not title the thread");
+  assert(reg.all.find((c) => c.id === "a")?.hasUserMessage === true, "a short sent message still marks the chat as started");
 
   reg = titleFromMessage(reg, "a", "  summarise the   quarterly report for me  ");
   assert(title(reg, "a") === "summarise the quarterly report for me", "substantive message titles it, whitespace collapsed");
@@ -101,6 +109,7 @@ const title = (reg: ReturnType<typeof createRegistry>, id: string) =>
 {
   let reg = createRegistry("a", 1);
   reg = newConversation(reg, "b", 2);
+  reg = titleFromMessage(reg, "a", "hello");
   reg = renameConversation(reg, "a", "First thread");
   reg = markUnread(reg, "a");
   reg = closeConversation(reg, "a", "unused", 3);
@@ -109,12 +118,15 @@ const title = (reg: ReturnType<typeof createRegistry>, id: string) =>
   assert(back.open.join() === reg.open.join(), "open tabs survive a round-trip");
   assert(back.activeId === reg.activeId, "active id survives a round-trip");
   assert(title(back, "a") === "First thread", "titles survive a round-trip");
+  assert(back.all.find((c) => c.id === "a")?.hasUserMessage === true, "started state survives a round-trip");
   assert(!back.all.find((c) => c.id === "a")!.unread, "unread is per-session, never persisted");
   assert(back.all.every((c) => c.restored), "loaded threads are flagged restored (honest empty state)");
 
   assert(deserialize(null) === null, "no stored blob -> null");
   assert(deserialize("{not json") === null, "malformed blob -> null, not a crash");
   assert(deserialize('{"all":[],"open":[],"activeId":"x"}') === null, "empty blob -> null");
+  const legacy = deserialize('{"all":[{"id":"old","title":"New chat","lastUsedAt":1}],"open":["old"],"activeId":"old"}')!;
+  assert(legacy.all[0].hasUserMessage === true, "legacy saved chats are preserved during migration");
 }
 
 console.log("[conversations.selfcheck] OK — 6 scenarios passed.");

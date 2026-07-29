@@ -300,3 +300,81 @@
 2. **No system prompt.** After wiring real tool calling, Tier 1 worked but Tier 3 still didn't: the model was never told the app gates its actions, so it asked for consent in prose — which never reaches the approval step — instead of calling the tool. The approval UI was bypassed by the model being polite.
 **Fix:** real OpenRouter tool calling (schemas on the registry, `tools` on every request, per-`index` accumulation of fragmented streaming tool-call deltas, `respond ⇄ gate` loop with a round cap), plus a system prompt stating that calling the tool IS how you ask for permission. Verified live: Tier-1 `dir_list` executed; Tier-3 `file_delete` raised a real card and, on deny, left the file on disk with `denied` in the action log.
 **Never do:** never accept a test seam as evidence the real path works. `HALO_LLM_STUB` made ~60 assertions pass across five suites while the production path did nothing — the seam tested itself. When a feature's only proof runs through a stub, the honest status is "unverified", not "done". And an offline stub can never surface a prompt-level failure: layer 2 was invisible to every test and only appeared when a real model chose politeness over the tool.
+
+## Correlated and global errors disappeared from the visible UI — 2026-07-27
+**Severity:** High.
+**Symptom:** a failed approval resume could remove the approval card but leave its assistant placeholder streaming forever; errors without a conversation or operation target were silently discarded.
+**Root cause:** the reducer returned immediately after recording an operation-correlated error, so it never closed the correlated conversation turn, and its no-conversation branch returned state unchanged.
+**Fix:** correlated errors now update both the operation and conversation projections; uncorrelated errors enter a bounded global-error list rendered as a dismissible workspace alert. Disconnect closes every queued streaming placeholder, not only the first.
+**Never do:** never model error destinations as mutually exclusive when one frame can carry both operation and conversation correlation, and never drop an authenticated backend error solely because it has no conversation ID.
+
+## Archived memory and superseded history vanished after restart — 2026-07-27
+**Severity:** High.
+**Symptom:** the archived count/filter and earlier-version chain were empty after reconnect even though SQLite still held the rows; the documented permanent-delete action did not exist.
+**Root cause:** connect hydration intentionally sends active beliefs only, but the panel had no implemented on-demand history request. The mock also restored an old superseded belief without superseding its active successor, creating two active versions.
+**Fix:** contract 1.1 adds `memory_query`, `memory_history_state`, and `belief_deleted`; real and mock workers hydrate history on demand, reconcile it between start/complete markers, restore one active version per chain, and permit permanent purge only for archived rows after explicit UI confirmation.
+**Never do:** when bounding a connect snapshot, implement and test the complementary query before relying on historical data in the UI; mock mutation semantics must preserve the same invariants as the durable store.
+
+## Denied or stopped approval remained modal and blocked chat — 2026-07-27
+**Severity:** Critical UX (user-reported and reproduced in the real no-mock app).
+**Symptom:** after Deny or Stop, the approval card stayed on screen in a disabled terminal state. Its modal layer continued to cover the composer, so the user could not send another message even though the backend had already ended the turn.
+**Root cause:** approval cleanup was tied to the presence of an open assistant turn. When the terminal `done` or `error` arrived after that turn had already been closed, the reducer skipped cleanup and retained the approval entity indefinitely.
+**Fix:** terminal `done` and `error` frames now resolve every approval belonging to their `conversation_id`, independently of assistant-turn state. Reducer regressions prove cleanup is conversation-scoped and does not remove another conversation's approval. Real no-mock replay confirmed the card disappears and a follow-up message is accepted.
+**Never do:** do not make modal-entity cleanup conditional on an unrelated projection still being open. Terminal backend frames must converge every UI projection they own.
+
+## Stop during approval re-entered the tool queue and spammed permissions — 2026-07-27
+**Severity:** Critical control failure (user-reported and reproduced with a real model).
+**Symptom:** clicking Stop dismissed one permission request, but the task continued and immediately raised the next approval, sometimes repeatedly.
+**Root cause:** interrupting an approval marked the graph state as `redirected`, but `_after_gate` still routed to the pending tool queue whenever queued calls remained. Stop therefore behaved like “deny this one tool and continue” rather than terminating the task.
+**Fix:** `_after_gate` routes a redirected state directly to `END` before considering queued tools. The graph regression includes multiple pending Tier-3 calls and proves no replacement approval can execute. The real no-mock replay showed zero replacement cards, an enabled composer, and a successful follow-up response.
+**Never do:** a user-level Stop is a terminal control signal. Check it before all continuation queues, retries, or follow-up tool routing.
+
+## Approval editor could execute a redaction placeholder as real data — 2026-07-27
+**Severity:** High.
+**Symptom:** entering Edit on a redacted approval and submitting without changing a placeholder such as `<15 chars>` replaced the original argument with that literal placeholder.
+**Root cause:** the backend treated the redacted payload shown to the user as the complete edited payload, so unchanged display-only values were indistinguishable from intentional edits.
+**Fix:** edits are recursively merged against the original arguments: values unchanged from the redacted representation preserve the original, while actual edits replace it. The UI explains this behavior and the gate regression covers nested redacted values.
+**Never do:** never round-trip a display-redacted object as an executable source of truth. Preserve the original server-side and apply only observable user changes.
+
+## Untouched new chats were saved into Recent — 2026-07-27
+**Severity:** Medium (user-reported UI lifecycle bug).
+**Symptom:** creating a New chat and closing it without submitting anything added the empty thread to Recent.
+**Root cause:** the conversation registry treated every closed tab as durable and had no state distinguishing a merely opened tab from a conversation containing a user message.
+**Fix:** conversation metadata now records `hasUserMessage` only when a non-empty message is submitted. Closing an untouched tab removes it from the registry; closing the last untouched tab creates one clean replacement. Short submitted messages still count, and old persisted records are conservatively preserved during migration.
+**Evidence:** the registry self-check failed against the old behavior, then passed after the fix; all 32 UI tests and the production build passed. A real no-mock native replay created and closed an untouched tab, and Recent remained limited to the four previously used conversations with no extra New chat.
+**Never do:** tab creation is not conversation creation. Persist a chat as history only after the user crosses the send boundary.
+
+## Belief vector search silently returned nothing while every gate stayed green — 2026-07-28
+**Severity:** Critical. Found by the DEEPSCAN_AUDIT.md deep-scan; confirmed live against this machine's real DB (all 12 indexed rows dead, all 8 active beliefs unindexed — `search_beliefs` returned `[]` for every query, so Halo was injecting zero memory into every prompt).
+**Symptom:** memory retrieval and AUDN neighbor lookup returned empty results with no error, no log, no user-visible signal.
+**Root cause:** three compounding bugs in `store.py`. (1) vec0's `k` limit is consumed BEFORE the `status='active'` filter applies (it's a post-filter), so dead rows crowd out the k-window. (2) nothing ever removed a belief from `belief_vec`/`belief_map` when it left the active status (archived/superseded/invalidated) — only the explicit "delete permanently" path did. (3) an empty vector-query result was returned verbatim instead of falling through to the recency-based fallback query two lines below it.
+**Fix:** added `_unindex()`, called at all 7 sites a belief leaves the live set (`set_belief_status`, `supersede`, `invalidate_belief`, `decay`, `add_candidate_belief` supersession, `restore_belief` successor, `purge_belief`); `search_beliefs` now falls through to recency on an empty vector result (`if rows: return ...`). New regression test `check_dead_rows_do_not_starve_search` in `test_store.py` (archives 4/5 seeded beliefs, asserts the index holds exactly 1 row and search still returns the survivor, not `[]`).
+**Never do:** never return a vector-search result verbatim without checking it's non-empty when a non-empty fallback exists right below it — an empty list is a valid SQL answer but not always a valid business answer. Any code path that changes a row's membership in a "live" set (status enum, soft-delete flag) must unindex it at the same call site that changes the status, not just at the one explicit hard-delete path.
+
+## Undo of a file delete/edit corrupted every CRLF line ending — 2026-07-28
+**Severity:** Critical (silent data corruption). Found by DEEPSCAN_AUDIT.md; confirmed empirically (`line1\r\nline2\r\n` round-tripped through delete→undo became `line1\r\r\nline2\r\r\n`).
+**Symptom:** restoring a deleted Windows text file via undo, or editing one snippet in an LF-only file, silently rewrote line endings across the whole file. The file "looked fine" in most editors — corruption was invisible until something diffed, parsed, or hashed it.
+**Root cause:** `_file_delete`'s undo path read the prior bytes in binary (preserving literal `\r\n`) but `_file_create` restored via `p.open("x", encoding="utf-8")` with `newline=None`, which translates every `\n` to `os.linesep` (`\r\n` on Windows) — doubling every CR. `_file_edit` had the mirror bug: `read_text`/`write_text` normalize line endings on both ends, so editing one snippet in an LF file silently converted the entire file to CRLF, and the recorded inverse (another `file_edit`) could never restore the original endings.
+**Fix:** `newline=""` on every read/write in both `_file_create` and `_file_edit` (`files.py`) so bytes round-trip verbatim.
+**Never do:** never use text-mode `open()`/`read_text()`/`write_text()` with default `newline=None` on a round-trip path (undo, edit-then-restore) where the original bytes must be reproduced exactly — the default newline translation is silently lossy on any file whose line endings don't match the platform.
+
+## `dir_organize` failing mid-batch left already-moved files with no undo record — 2026-07-28
+**Severity:** High. Found by DEEPSCAN_AUDIT.md.
+**Symptom:** a `dir_organize` batch (up to 200 file moves) that failed partway through — full disk, a locked file, `MAX_PATH`, cross-device move — propagated the exception out of the whole tool, so `_record` wrote `undoable: false` and every file already moved before the failure was permanently unreversible.
+**Root cause:** the move loop's only guard was `src.exists()` (for files that vanished mid-plan); any other `OSError` was uncaught.
+**Fix:** wrapped each move in `try/except OSError`, appending to a `failed` list and continuing instead of aborting, so `done` (and therefore the recorded inverse) always reflects exactly what actually moved.
+**Never do:** a batch tool whose inverse is built from "what actually succeeded" must isolate each unit of work in its own try/except — one exception must never discard the undo record for everything that already committed.
+
+## Settings → Save/Remove OpenRouter key locked the row forever — 2026-07-28
+**Severity:** Critical (matches the exact failure class that already cost a user a paid key rotation, see the 2026-07-21 entry above). Found by DEEPSCAN_AUDIT.md.
+**Symptom:** clicking Save or Remove on the OpenRouter key locked the input/button permanently — no restart-free recovery, and the status line stuck on "checking…" instead of the real key status.
+**Root cause:** `SettingsView.tsx` was the only `begin()` call site in the entire codebase that passed no `confirms` predicate. `usePendingConfirm`'s `begin` defaulted a missing predicate to `() => false`, and no `operationKind` meant the error-unlock path was dead too — both unlock paths were permanently unreachable. Every other caller (MemoryView, SkillsView, TasksView) passes an explicit semantic predicate.
+**Fix:** `confirms` is now optional; with none supplied, `usePendingConfirm` unlocks on any change to `collection[key]` (the correct default for a primitive settings-status collection, which has no entity identity to compare against). New test in `usePendingConfirm.test.tsx`.
+**Never do:** a shared hook whose lock has no default unlock condition is a trap for every future caller that forgets the predicate — default to the least-surprising safe behavior (unlock on change), not permanently-false.
+
+## Approval-card edits could lock the whole card with nothing ever sent — 2026-07-28
+**Severity:** High. Found by DEEPSCAN_AUDIT.md; reachable with e.g. an edited value containing a non-finite number (`1e999`).
+**Symptom:** `dispatch()` validated the outbound frame (`parseIpcMessage`) OUTSIDE its try/catch, so a contract-rejected frame threw AFTER the caller (`ApprovalCard.approve`) had already flipped its rule-3 lock. Nothing was sent, so no confirming frame could ever arrive — every button on the card, including Stop, stayed disabled forever.
+**Root cause:** the lock-then-send ordering assumed `dispatch` could not throw after being called; it could, and did, on invalid payloads.
+**Fix:** `dispatch` now returns `boolean` instead of throwing — it validates inside its own guard and returns `false` on a rejected frame instead of propagating. `ApprovalCard.approve` sends BEFORE locking and declines to lock when `dispatch` returns `false`, surfacing an inline edit error instead. One shared fix covers all 11 `send*` callers, not just the approval card.
+**Never do:** a function whose caller flips a rule-3 lock immediately after calling it must never be allowed to throw after doing its real work — return a status the caller checks before locking, don't rely on try/catch ordering when the lock and the call are two separate statements.

@@ -17,6 +17,7 @@ import {
   selectPendingApprovalCount,
   selectTasks,
   selectVoice,
+  selectCapabilities,
 } from "../state/store";
 import { LANE_ICON, LANE_LABEL } from "../lib/lanes";
 import { usePeekSource, PEEK_DISMISS_MS } from "./usePeekSource";
@@ -31,8 +32,9 @@ const DRAG_THRESHOLD_PX = 4;
 interface DragState {
   startScreenX: number;
   startScreenY: number;
-  windowStartX: number;
-  windowStartY: number;
+  origin: Promise<{ x: number; y: number } | null>;
+  latestDx: number;
+  latestDy: number;
   moved: boolean;
 }
 
@@ -67,6 +69,7 @@ export function OrbRoot() {
   const brainStatus = useHaloStore(selectBrainStatus);
   const tasks = useHaloStore(selectTasks);
   const voice = useHaloStore(selectVoice);
+  const capabilities = useHaloStore(selectCapabilities);
 
   const runningTasks = Object.values(tasks).filter((t) => t.state === "running");
   const primaryTask = runningTasks[0];
@@ -80,7 +83,7 @@ export function OrbRoot() {
         .join(" — ")
     : undefined;
 
-  const onPointerDown = useCallback(async (e: React.PointerEvent) => {
+  const onPointerDown = useCallback((e: React.PointerEvent) => {
     if (e.button !== 0) return;
     // Capture on this element so move/up keep firing even if the pointer
     // leaves the tiny window mid-gesture.
@@ -92,13 +95,21 @@ export function OrbRoot() {
     // drag (moved at 1/scale speed) on a 2x-DPI display. See Bugs.md "DPI
     // mismatch".
     const win = getCurrentWindow();
-    const scale = await win.scaleFactor();
-    const pos = (await win.outerPosition()).toLogical(scale);
+    const origin = (async () => {
+      try {
+        const scale = await win.scaleFactor();
+        const pos = (await win.outerPosition()).toLogical(scale);
+        return { x: pos.x, y: pos.y };
+      } catch {
+        return null;
+      }
+    })();
     dragRef.current = {
       startScreenX: e.screenX,
       startScreenY: e.screenY,
-      windowStartX: pos.x,
-      windowStartY: pos.y,
+      origin,
+      latestDx: 0,
+      latestDy: 0,
       moved: false,
     };
   }, []);
@@ -108,9 +119,16 @@ export function OrbRoot() {
     if (!drag) return;
     const dx = e.screenX - drag.startScreenX;
     const dy = e.screenY - drag.startScreenY;
+    drag.latestDx = dx;
+    drag.latestDy = dy;
     if (!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
     drag.moved = true;
-    void getCurrentWindow().setPosition(new LogicalPosition(drag.windowStartX + dx, drag.windowStartY + dy));
+    void drag.origin.then((origin) => {
+      if (!origin || dragRef.current !== drag || !drag.moved) return;
+      void getCurrentWindow().setPosition(
+        new LogicalPosition(origin.x + drag.latestDx, origin.y + drag.latestDy),
+      );
+    });
   }, []);
 
   const onPointerUp = useCallback(async (e: React.PointerEvent) => {
@@ -120,10 +138,21 @@ export function OrbRoot() {
     if (!drag) return;
 
     if (!drag.moved) {
+      const origin = await drag.origin;
+      if (!origin) return;
       // A click, not a drag — expand the workspace, anchored at the orb.
       // D3: show -> focus goes to the workspace, never the orb (the Rust
       // command does the focusing; this window never calls setFocus).
-      await invoke("toggle_workspace", { orbX: drag.windowStartX, orbY: drag.windowStartY });
+      await invoke("toggle_workspace", { orbX: origin.x, orbY: origin.y });
+    } else {
+      // A fast drag can finish before the asynchronous DPI/position lookup.
+      // Commit the final delta here as well so releasing early never turns the
+      // gesture into a no-op.
+      const origin = await drag.origin;
+      if (!origin) return;
+      await getCurrentWindow().setPosition(
+        new LogicalPosition(origin.x + drag.latestDx, origin.y + drag.latestDy),
+      );
     }
     // A drag ends wherever the user released it -- free placement, no
     // edge-snapping. (window-state plugin persists the final position.)
@@ -163,6 +192,15 @@ export function OrbRoot() {
     // capsule must look identical in light/dark theme.
     <div className="capsule">
       <div className="capsule-glow" aria-hidden="true" />
+      {/* Narration is the live transcript ("you always see what it heard",
+          ui_ux/04-voice.md) — but this window never takes focus, so a screen
+          reader only ever reaches it through a live region. The region is
+          mounted unconditionally and empty: a live region that appears
+          already-populated is frequently not announced at all. The visible
+          span below is aria-hidden so it isn't read twice. */}
+      <span className="halo-sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {narration ?? ""}
+      </span>
 
       <div className="capsule-left">
         <span className="chip lane-chip" role="status" aria-label={`Active lane: ${LANE_LABEL[lane]}`}>
@@ -176,7 +214,14 @@ export function OrbRoot() {
             onPointerDown={stopChipPointer}
             onClick={onChipClick}
             title={taskTitle}
-            aria-label={`${runningTasks.length} task${runningTasks.length > 1 ? "s" : ""} running`}
+            // The title attribute is hover-only; keyboard and screen-reader
+            // users get the same detail through the accessible name.
+            aria-label={[
+              `${runningTasks.length} task${runningTasks.length > 1 ? "s" : ""} running`,
+              taskTitle,
+            ]
+              .filter(Boolean)
+              .join(": ")}
           >
             <TaskRing progress={taskProgress} indeterminate={!hasProgress} />
             <span>{runningTasks.length}</span>
@@ -189,7 +234,13 @@ export function OrbRoot() {
           <div className="orb-halo" aria-hidden="true" />
           <div className="orb-core" aria-hidden="true" />
         </div>
-        {narration && <span className="narration">{narration}</span>}
+        {/* Truncates to whatever the chip clusters leave (OrbRoot.css
+            .narration); title carries the full line on hover. */}
+        {narration && (
+          <span className="narration" title={narration} aria-hidden="true">
+            {narration}
+          </span>
+        )}
       </div>
 
       <div className="capsule-right">
@@ -212,9 +263,17 @@ export function OrbRoot() {
         <span
           className="mic-indicator"
           role="status"
-          aria-label={voice.state === "muted" ? "Microphone muted" : "Microphone live"}
+          aria-label={
+            capabilities.voiceInput === true
+              ? voice.state === "muted"
+                ? "Microphone muted"
+                : "Microphone live"
+              : capabilities.voiceInput === false
+                ? "Voice input unavailable"
+                : "Checking voice availability"
+          }
         >
-          <Icon icon={voice.state === "muted" ? MicOff : Mic} size={16} />
+          <Icon icon={capabilities.voiceInput === true && voice.state !== "muted" ? Mic : MicOff} size={16} />
         </span>
       </div>
     </div>
@@ -246,13 +305,14 @@ function TaskRing({ progress, indeterminate }: { progress: number; indeterminate
   const c = 2 * Math.PI * r;
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" className={indeterminate ? "task-ring task-ring-spin" : "task-ring"}>
-      <circle cx="7" cy="7" r={r} fill="none" stroke="var(--border)" strokeWidth="2" />
+      {/* Capsule-local palette, not the theme tokens — see .capsule in OrbRoot.css. */}
+      <circle cx="7" cy="7" r={r} fill="none" stroke="var(--cap-border)" strokeWidth="2" />
       <circle
         cx="7"
         cy="7"
         r={r}
         fill="none"
-        stroke="var(--primary)"
+        stroke="var(--cap-primary)"
         strokeWidth="2"
         strokeDasharray={c}
         strokeDashoffset={c * (1 - progress)}

@@ -11,7 +11,12 @@ import { Archive, ChevronDown, ChevronRight, Pencil, RotateCcw, Sparkles, Trash2
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
-import { useHaloStore, selectBeliefs, selectOperationErrors } from "../state/store";
+import {
+  useHaloStore,
+  selectBeliefs,
+  selectMemoryHistoryLoaded,
+  selectOperationErrors,
+} from "../state/store";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
 import type { BeliefStateMsg, MemoryEditMsg } from "../ipc/contract";
 import "./MemoryView.css";
@@ -28,11 +33,15 @@ const KIND_LABEL: Record<BeliefStateMsg["kind"], string> = {
 const DELETE_UNDO_MS = 5000;
 
 interface MemoryViewProps {
+  active: boolean;
   sendMemoryEdit: (belief_id: string, op: MemoryEditMsg["op"], text?: string) => void;
+  sendMemoryQuery: () => void;
 }
 
-export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
+export function MemoryView({ active: viewActive, sendMemoryEdit, sendMemoryQuery }: MemoryViewProps) {
   const beliefs = useHaloStore(selectBeliefs);
+  const historyLoaded = useHaloStore(selectMemoryHistoryLoaded);
+  const wsStatus = useHaloStore((state) => state.connection.wsStatus);
   const operationErrors = useHaloStore(selectOperationErrors);
   const all = useMemo(() => Object.values(beliefs), [beliefs]);
 
@@ -43,6 +52,9 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
   const deleteTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => () => clearTimeout(deleteTimer.current), []);
+  useEffect(() => {
+    if (viewActive && !historyLoaded && wsStatus === "connected") sendMemoryQuery();
+  }, [viewActive, historyLoaded, wsStatus, sendMemoryQuery]);
 
   // Predecessors of an active belief (the superseded chain behind it).
   const historyOf = (id: string) => all.filter((b) => b.superseded_by === id);
@@ -85,6 +97,13 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
     if (begin(id, "Restoring…", (value) => value?.status === "active", "memory_edit")) sendMemoryEdit(id, "restore");
   };
 
+  const purge = (b: BeliefStateMsg) => {
+    if (!window.confirm(`Permanently delete “${b.text}”? This cannot be undone.`)) return;
+    if (begin(b.belief_id, "Deleting permanently…", (value) => value === undefined, "memory_edit")) {
+      sendMemoryEdit(b.belief_id, "purge");
+    }
+  };
+
   const archived = all.filter((b) => b.status === "archived");
   const archivedVisible = archived.filter(matches);
   const active = all.filter((b) => b.status === "active").filter(matches);
@@ -92,6 +111,11 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
   return (
     <div className="memory-view">
       {Object.values(failures)[0] && <p role="alert">{Object.values(failures)[0]}</p>}
+      {viewActive && !historyLoaded && (
+        <p className="memory-loading" role="status">
+          <span className="halo-spinner" aria-hidden="true" />Loading memory history…
+        </p>
+      )}
       <div className="memory-toolbar">
         <input
           aria-label="Search memory"
@@ -129,6 +153,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
                     onEdit={saveEdit}
                     onDelete={requestDelete}
                     onRestore={restore}
+                    onPurge={purge}
                   />
                 </li>
               ))}
@@ -158,6 +183,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
                         onEdit={saveEdit}
                         onDelete={requestDelete}
                         onRestore={restore}
+                        onPurge={purge}
                       />
                     </li>
                   ))}
@@ -170,7 +196,7 @@ export function MemoryView({ sendMemoryEdit }: MemoryViewProps) {
 
       {pendingDelete && (
         <div className="memory-toast" role="status">
-          <span>Deleted “{truncate(pendingDelete.text)}”.</span>
+          <span>Will archive “{truncate(pendingDelete.text)}” in 5 seconds.</span>
           <button type="button" onClick={undoDelete}>
             <Icon icon={RotateCcw} size={16} />
             Undo
@@ -190,9 +216,20 @@ interface CardProps {
   onEdit: (id: string, text: string) => void;
   onDelete: (b: BeliefStateMsg) => void;
   onRestore: (id: string) => void;
+  onPurge: (b: BeliefStateMsg) => void;
 }
 
-function BeliefCard({ belief, history, pending, pendingFor, archivedView, onEdit, onDelete, onRestore }: CardProps) {
+function BeliefCard({
+  belief,
+  history,
+  pending,
+  pendingFor,
+  archivedView,
+  onEdit,
+  onDelete,
+  onRestore,
+  onPurge,
+}: CardProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(belief.text);
   const [showHistory, setShowHistory] = useState(false);
@@ -267,10 +304,16 @@ function BeliefCard({ belief, history, pending, pendingFor, archivedView, onEdit
 
           <div className="belief-actions">
             {archivedView ? (
-              <Button variant="ghost" disabled={busy} onClick={() => onRestore(belief.belief_id)}>
-                <Icon icon={RotateCcw} size={16} />
-                {pending ?? "Restore"}
-              </Button>
+              <>
+                <Button variant="ghost" disabled={busy} onClick={() => onRestore(belief.belief_id)}>
+                  <Icon icon={RotateCcw} size={16} />
+                  {pending ?? "Restore"}
+                </Button>
+                <Button variant="destructive" disabled={busy} onClick={() => onPurge(belief)}>
+                  <Icon icon={Trash2} size={16} />
+                  {pending ?? "Delete permanently"}
+                </Button>
+              </>
             ) : (
               <>
                 <Button variant="ghost" disabled={busy} onClick={() => { setDraft(belief.text); setEditing(true); }}>

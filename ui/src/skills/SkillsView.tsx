@@ -10,7 +10,13 @@ import { useEffect, useRef, useState } from "react";
 import { Pencil, Play, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
-import { useHaloStore, selectSkills, selectActivities } from "../state/store";
+import {
+  useHaloStore,
+  selectSkills,
+  selectActivities,
+  selectCapabilities,
+  selectOperationErrors,
+} from "../state/store";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
 import type { ActivityMsg, SkillOpMsg, SkillStateMsg } from "../ipc/contract";
 import "./SkillsView.css";
@@ -28,19 +34,25 @@ function trialTaskId(name: string): string {
 export function SkillsView({ sendSkillOp }: SkillsViewProps) {
   const skills = useHaloStore(selectSkills);
   const activities = useHaloStore(selectActivities);
+  const capabilities = useHaloStore(selectCapabilities);
+  const operationErrors = useHaloStore(selectOperationErrors);
+  const controlsAvailable = capabilities.skillControls === true;
   const all = Object.values(skills);
 
   const [filter, setFilter] = useState<Filter>("all");
-  const { pending, begin } = usePendingConfirm(skills);
+  const { pending, failures, begin } = usePendingConfirm(skills, operationErrors);
   const [trialOpenFor, setTrialOpenFor] = useState<string | null>(null);
   const trialOpenerRef = useRef<HTMLButtonElement | null>(null);
 
   const op = (s: SkillStateMsg, kind: "disable" | "restore" | "delete", label: string) => {
+    if (!controlsAvailable) return;
     const expected = kind === "disable" ? "paused" : kind === "restore" ? "active" : "retired";
-    if (begin(s.skill_name, label, (value) => value?.status === expected)) sendSkillOp(s.skill_name, kind);
+    if (begin(s.skill_name, label, (value) => value?.status === expected, "skill_op"))
+      sendSkillOp(s.skill_name, kind);
   };
 
   const trial = (s: SkillStateMsg, opener: HTMLButtonElement) => {
+    if (!controlsAvailable) return;
     trialOpenerRef.current = opener;
     setTrialOpenFor(s.skill_name);
     sendSkillOp(s.skill_name, "trial"); // no rule-3 lock — a dry run doesn't change skill_state
@@ -54,8 +66,9 @@ export function SkillsView({ sendSkillOp }: SkillsViewProps) {
   if (all.length === 0) {
     return (
       <div className="halo-empty skills-empty">
-        No skills yet — I create them when I notice you repeating a task. Do something a few times and watch this
-        space.
+        {capabilities.skillControls === false
+          ? "Skills are not available in this build."
+          : "No skills yet — I create them when I notice you repeating a task. Do something a few times and watch this space."}
       </div>
     );
   }
@@ -79,10 +92,10 @@ export function SkillsView({ sendSkillOp }: SkillsViewProps) {
       </div>
 
       <div className="halo-scroll">
-        <SkillGroup title="Auto-learned ✨" skills={auto} pending={pending} op={op} onTrial={trial} />
-        <SkillGroup title="User-made 🛠" skills={user} pending={pending} op={op} onTrial={trial} />
+        <SkillGroup title="Auto-learned ✨" skills={auto} pending={pending} failures={failures} controlsAvailable={controlsAvailable} op={op} onTrial={trial} />
+        <SkillGroup title="User-made 🛠" skills={user} pending={pending} failures={failures} controlsAvailable={controlsAvailable} op={op} onTrial={trial} />
         {retired.length > 0 && (
-          <SkillGroup title="Retired" skills={retired} pending={pending} op={op} onTrial={trial} retiredGroup />
+          <SkillGroup title="Retired" skills={retired} pending={pending} failures={failures} controlsAvailable={controlsAvailable} op={op} onTrial={trial} retiredGroup />
         )}
       </div>
 
@@ -102,6 +115,8 @@ function SkillGroup({
   title,
   skills,
   pending,
+  failures,
+  controlsAvailable,
   op,
   onTrial,
   retiredGroup,
@@ -109,6 +124,8 @@ function SkillGroup({
   title: string;
   skills: SkillStateMsg[];
   pending: Record<string, string>;
+  failures: Record<string, string>;
+  controlsAvailable: boolean;
   op: (s: SkillStateMsg, kind: "disable" | "restore" | "delete", label: string) => void;
   onTrial: (s: SkillStateMsg, opener: HTMLButtonElement) => void;
   retiredGroup?: boolean;
@@ -120,7 +137,15 @@ function SkillGroup({
       <ul className="halo-list skills-list">
         {skills.map((s) => (
           <li key={s.skill_name}>
-            <SkillCard skill={s} pending={pending[s.skill_name]} op={op} onTrial={onTrial} retiredGroup={retiredGroup} />
+            <SkillCard
+              skill={s}
+              pending={pending[s.skill_name]}
+              failure={failures[s.skill_name]}
+              controlsAvailable={controlsAvailable}
+              op={op}
+              onTrial={onTrial}
+              retiredGroup={retiredGroup}
+            />
           </li>
         ))}
       </ul>
@@ -131,12 +156,16 @@ function SkillGroup({
 function SkillCard({
   skill,
   pending,
+  failure,
+  controlsAvailable,
   op,
   onTrial,
   retiredGroup,
 }: {
   skill: SkillStateMsg;
   pending: string | undefined;
+  failure: string | undefined;
+  controlsAvailable: boolean;
   op: (s: SkillStateMsg, kind: "disable" | "restore" | "delete", label: string) => void;
   onTrial: (s: SkillStateMsg, opener: HTMLButtonElement) => void;
   retiredGroup?: boolean;
@@ -164,29 +193,30 @@ function SkillCard({
       {retiredGroup && (
         <p className="skill-reason">{skill.reason ?? "Retired."}</p>
       )}
+      {failure && <p className="skill-reason" role="alert">{failure}</p>}
 
       <div className="skill-actions">
         {retiredGroup ? (
-          <Button variant="ghost" disabled={busy} onClick={() => op(skill, "restore", "Restoring…")}>
+          <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={() => op(skill, "restore", "Restoring…")}>
             <Icon icon={RotateCcw} size={16} />
             {pending ?? "Restore"}
           </Button>
         ) : (
           <>
-            <Button variant="ghost" disabled={busy} onClick={(event) => onTrial(skill, event.currentTarget)}>
+            <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={(event) => onTrial(skill, event.currentTarget)}>
               <Icon icon={Play} size={16} />
               Trial run
             </Button>
             {skill.status === "paused" ? (
-              <Button variant="ghost" disabled={busy} onClick={() => op(skill, "restore", "Enabling…")}>
+              <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={() => op(skill, "restore", "Enabling…")}>
                 {pending === "Enabling…" ? pending : "Enable"}
               </Button>
             ) : (
-              <Button variant="ghost" disabled={busy} onClick={() => op(skill, "disable", "Pausing…")}>
+              <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={() => op(skill, "disable", "Pausing…")}>
                 {pending === "Pausing…" ? pending : "Pause"}
               </Button>
             )}
-            <Button variant="ghost" disabled={busy} onClick={() => op(skill, "delete", "Deleting…")}>
+            <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={() => op(skill, "delete", "Deleting…")}>
               <Icon icon={Trash2} size={16} />
               {pending === "Deleting…" ? pending : "Delete"}
             </Button>

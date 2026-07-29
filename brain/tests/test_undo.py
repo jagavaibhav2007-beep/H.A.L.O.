@@ -89,7 +89,7 @@ async def _recv_type(ws, msg_type: str, timeout: float = 10) -> dict:
         frame = await _recv(ws, timeout)
         if frame["type"] == msg_type:
             return frame
-        assert frame["type"] in ("spend_update", "token"), f"unexpected frame waiting for {msg_type}: {frame}"
+        assert frame["type"] in ("spend_update", "snapshot_complete", "token"), f"unexpected frame waiting for {msg_type}: {frame}"
 
 
 async def _connect_auth(port: int, token: str, drain_backlog: bool = True):
@@ -100,8 +100,8 @@ async def _connect_auth(port: int, token: str, drain_backlog: bool = True):
     settings = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
     assert settings["type"] == "settings_state", settings
     if drain_backlog:
-        # Step 9: drain the rest of the snapshot via its `spend_update` sentinel.
-        while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
+        # Step 9: drain the rest of the snapshot via its `snapshot_complete` marker.
+        while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "snapshot_complete":
             pass
     return ws
 
@@ -225,10 +225,12 @@ async def check_connect_backlog(ws, port: int, token: str) -> None:
     ws2 = await _connect_auth(port, token, drain_backlog=False)
     try:
         backlog = []
-        for _ in range(expected):
+        while len(backlog) < expected:
             frame = await _recv(ws2, timeout=2)
-            assert frame["type"] == "activity", frame
-            backlog.append(frame)
+            if frame["type"] == "activity":
+                backlog.append(frame)
+                continue
+            assert frame["type"] == "capabilities_state", frame
         assert backlog, "no backlog replayed"
         # Newest lands last (feed appends): the file_create is the most recent action.
         assert backlog[-1].get("undo_token") == live_token and backlog[-1]["undoable"] is True, backlog[-1]

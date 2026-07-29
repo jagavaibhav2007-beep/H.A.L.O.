@@ -127,6 +127,37 @@ def redact(tool: str, args: dict) -> dict:
         return {}
 
 
+def _apply_redacted_edits(original, redacted, edited):
+    """Apply user edits without turning display-only redaction placeholders
+    into executable arguments.
+
+    The approval contract deliberately exposes only ``args_redacted``. When an
+    editor leaves a redacted value unchanged, that means "preserve the original
+    value", not "replace it with '<15 chars>'". Changed values remain explicit
+    edits, omitted object keys remain omitted, and nested objects/lists follow
+    the same rule.
+    """
+    if edited == redacted:
+        return original
+    if isinstance(edited, dict) and isinstance(redacted, dict):
+        source = original if isinstance(original, dict) else {}
+        return {
+            key: _apply_redacted_edits(source.get(key), redacted.get(key), value)
+            for key, value in edited.items()
+        }
+    if isinstance(edited, list) and isinstance(redacted, list):
+        source = original if isinstance(original, list) else []
+        return [
+            _apply_redacted_edits(
+                source[index] if index < len(source) else None,
+                redacted[index] if index < len(redacted) else None,
+                value,
+            )
+            for index, value in enumerate(edited)
+        ]
+    return edited
+
+
 # ------------------------------------------------- pending approval registry
 
 
@@ -218,7 +249,9 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
             # Re-classify the edited args -- an edit can RAISE the tier (or
             # stay Tier 3, which emits a fresh approval card for what will
             # actually run); it never silently lowers it.
-            args = decision.get("edited_args") or args
+            edited_args = decision.get("edited_args")
+            if edited_args is not None:
+                args = _apply_redacted_edits(args, redact(tool, args), edited_args)
             continue
         break  # approve
 
@@ -231,14 +264,19 @@ _RESULT_CAP = 8 * 1024  # serialized tool-result bytes fed back to the model
 def _cap_result(out) -> tuple[str, int]:
     """Serialize a tool result under _RESULT_CAP, returning (json, omitted).
 
-    Slicing already-serialized JSON to a byte cap (the old behavior) cut the
-    string mid-token, so the model got un-parseable output. Instead: for lists
-    (dir_list/file_search -- the only genuinely unbounded results, and Track A
-    orders them newest/most-relevant first) drop trailing entries until the
-    JSON fits, so what remains is always valid. Non-list results (str/dict)
-    are already self-capped by their own tools (file_read's 8KB, run_cmd's
-    head/tail elision); if one ever isn't, fall back to a marked byte-slice
-    rather than silently emit invalid JSON.
+    Slicing already-serialized JSON to a byte cap cut the string mid-token, so
+    the model got un-parseable output. Instead drop trailing entries until the
+    JSON fits, so what remains always parses -- for a list directly, and for a
+    dict by trimming its longest list value. The dict case is dir_organize (up
+    to 200 moves across `moves`/`skipped`/`failed`), the one unbounded producer
+    left now that dir_list/file_search return pre-bounded strings; it used to
+    take exactly the mid-string byte slice this exists to avoid. Anything with
+    no list to trim falls back to a marked byte-slice rather than silently emit
+    invalid JSON.
+
+    Capping here and not in the tool is deliberate: _execute_tail builds the
+    undo inverse from the UNCAPPED return, so trimming dir_organize's own
+    result would silently destroy the reversal for every dropped move.
     """
     def dump(x) -> str:
         return json.dumps(x, ensure_ascii=False, default=str)
@@ -251,6 +289,22 @@ def _cap_result(out) -> tuple[str, int]:
         while len(kept) > 1 and len(dump(kept)) > _RESULT_CAP:
             kept = kept[: len(kept) // 2]
         return dump(kept), len(out) - len(kept)
+    if isinstance(out, dict):
+        kept = dict(out)
+        omitted = 0
+        while len(dump(kept)) > _RESULT_CAP:
+            key = max(
+                (k for k, v in kept.items() if isinstance(v, list) and v),
+                key=lambda k: len(kept[k]),
+                default=None,
+            )
+            if key is None:
+                break  # nothing left to trim: byte-slice below
+            trimmed = kept[key][: len(kept[key]) // 2]
+            omitted += len(kept[key]) - len(trimmed)
+            kept[key] = trimmed
+        if omitted and len(dump(kept)) <= _RESULT_CAP:
+            return dump(kept), omitted
     return payload[:_RESULT_CAP] + " …[truncated]", 0
 
 
@@ -298,6 +352,10 @@ async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broad
                 content = f"I ran {tool}."
             else:
                 payload, omitted = _cap_result(out)
+                # An empty result needs an explicit "no matches" or the model
+                # confabulates "not found" from the content-free ack (see above).
+                # Not dead despite no production list-returning tool: file_search
+                # et al. can legitimately return [], and check_empty_result guards it.
                 extra = " (no matches)" if out == [] else ""
                 if omitted:
                     extra += f" [{omitted} more result(s) omitted at the {_RESULT_CAP // 1024}KB cap; narrow the query]"
@@ -311,7 +369,7 @@ async def _execute_tail(tool: str, args: dict, tier: int, frame_task: str, broad
     undo_token = await asyncio.to_thread(
         _record, tool, args_redacted, tier, result, frame_task, inverse is not None, inverse
     )
-    if tier >= 2 and result == "ok":
+    if result == "ok":
         await broadcast(
             "activity", _activity_frame(tool, args, frame_task, undo_token is not None, tier, 1, undo_token)
         )

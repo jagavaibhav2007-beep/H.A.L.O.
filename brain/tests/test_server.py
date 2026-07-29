@@ -57,8 +57,10 @@ async def _authenticate(ws, token: str) -> None:
 
 
 async def _drain_snapshot(ws) -> None:
-    """Drain the Step-9 connect snapshot; it always ends with spend_update."""
-    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "spend_update":
+    """Drain the Step-9 connect snapshot; server.py ends it with the explicit
+    `snapshot_complete` marker (spend_update used to be the de-facto sentinel,
+    a role the contract never gave it)."""
+    while json.loads(await asyncio.wait_for(ws.recv(), timeout=5))["type"] != "snapshot_complete":
         pass
 
 
@@ -247,10 +249,8 @@ async def check_snapshot_not_interleaved() -> None:
         assert ws.sent == [], "broadcast leaked into a snapshot that was still streaming"
         assert len(server._deferred[ws]) == 1, server._deferred[ws]
 
-        # Snapshot finishes -> held frames flush, in order.
-        held = server._deferred.pop(ws)
-        for raw in held:
-            await ws.send(raw)
+        # Snapshot finishes -> the REAL _release_deferred flushes held frames.
+        await server._release_deferred(ws, authenticated)
         assert [json.loads(r)["type"] for r in ws.sent] == ["spend_update"], ws.sent
 
         # Once released, broadcasts pass straight through again.
@@ -260,6 +260,105 @@ async def check_snapshot_not_interleaved() -> None:
         server._deferred.pop(ws, None)
         server._deferred_bytes.pop(ws, None)
     print("[check 11] broadcast during a snapshot is held, then flushed in order: OK")
+
+
+async def check_broadcast_during_flush_queues_behind_held_frames() -> None:
+    """The other half of the interleave window, which had no coverage at all:
+    a broadcast landing DURING the flush must queue behind the frames still
+    held, not overtake them. The previous test reimplemented the drain inline,
+    so it could never see that the real function popped the deferral key before
+    draining -- leaving `_deferred[ws]` absent for the whole flush, which sends
+    every live frame straight out ahead of held ones.
+
+    Driven by a socket whose send() fires one live broadcast while the flush is
+    still in progress -- exactly the window that reopened."""
+
+    class ReentrantWS:
+        """Fires a live broadcast from inside the first flushed send."""
+
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+            self.authenticated: dict = {}
+            self.fired = False
+
+        async def send(self, raw: str) -> None:
+            self.sent.append(json.loads(raw))
+            if not self.fired:
+                self.fired = True
+                await server._broadcast(self.authenticated, "voice_state", {"state": "listening"})
+
+    ws = ReentrantWS()
+    authenticated = {ws: "ui"}
+    ws.authenticated = authenticated
+    server._deferred[ws] = []
+    server._deferred_bytes[ws] = 0
+    try:
+        for state in ("idle", "wake", "thinking"):
+            await server._broadcast(authenticated, "voice_state", {"state": state})
+        assert ws.sent == [], "broadcasts leaked during the snapshot"
+
+        await server._release_deferred(ws, authenticated)
+        assert [f["state"] for f in ws.sent] == ["idle", "wake", "thinking", "listening"], ws.sent
+        assert ws not in server._deferred, "deferral key survived an emptied queue"
+        assert ws not in server._deferred_bytes, "deferral byte count survived an emptied queue"
+    finally:
+        server._deferred.pop(ws, None)
+        server._deferred_bytes.pop(ws, None)
+    print("[check 20] a broadcast during the flush queues behind still-held frames: OK")
+
+
+async def check_broadcast_closes_a_stalled_client() -> None:
+    """A client that stopped reading (send buffer full, socket still OPEN) must
+    be dropped from routing AND closed. Leaving teardown to the connection
+    handler's `finally` never happens: that handler is parked in
+    `async for raw in ws` and only reaches `finally` once the socket closes --
+    so the socket, its handler task and its state leak for the process
+    lifetime. The overflow branch already closes with 1013; this mirrors it."""
+
+    class StalledWS:
+        def __init__(self) -> None:
+            self.closed: tuple | None = None
+
+        async def send(self, raw: str) -> None:
+            await asyncio.Event().wait()
+
+        async def close(self, code=None, reason=None) -> None:
+            self.closed = (code, reason)
+
+    stalled = StalledWS()
+    authenticated = {stalled: "ui"}
+    old_timeout = server._SEND_TIMEOUT_S
+    server._SEND_TIMEOUT_S = 0.02
+    try:
+        await server._broadcast(authenticated, "voice_state", {"state": "idle"})
+    finally:
+        server._SEND_TIMEOUT_S = old_timeout
+    assert stalled not in authenticated, "stalled client stayed routable"
+    assert stalled.closed == (1013, "send timeout"), stalled.closed
+    print("[check 21] a stalled client is de-routed AND its socket closed: OK")
+
+
+async def check_non_ascii_token_is_rejected_not_raised() -> None:
+    """The contract validates `hello.token` as a str only, so a non-ASCII token
+    reaches compare_digest -- which raises TypeError on str operands that
+    aren't pure ASCII, from OUTSIDE every try. No auth bypass (the connection
+    drops either way), but the traceback was reachable by any unauthenticated
+    local process. Driven through _auth directly: over the wire, "raised" and
+    "rejected" both look like a closed socket."""
+
+    class OneFrameWS:
+        def __init__(self, frame: dict) -> None:
+            self.raw = json.dumps(frame)
+
+        async def recv(self) -> str:
+            return self.raw
+
+    for supplied in ("é", "你好", "wrong-but-ascii"):
+        role = await server._auth(OneFrameWS(_frame("hello", token=supplied)), "real-token", 1)
+        assert role is None, supplied
+    accepted = await server._auth(OneFrameWS(_frame("hello", token="real-token")), "real-token", 1)
+    assert accepted == "ui", accepted
+    print("[check 22] a non-ASCII hello token is rejected, not raised: OK")
 
 
 async def check_sends_and_deferred_queue_are_bounded() -> None:
@@ -299,6 +398,16 @@ async def check_sends_and_deferred_queue_are_bounded() -> None:
     print("[check 12] direct sends time out and deferred snapshot queues are bounded: OK")
 
 
+async def _recv_settings_state(ws) -> dict:
+    """Next settings_state, skipping an earlier check's global spend_update --
+    same unsolicited-broadcast race check 4 documents."""
+    while True:
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        if frame["type"] == "settings_state":
+            return frame
+        assert frame["type"] == "spend_update", frame
+
+
 async def check_settings_update_round_trip(port: int, token: str) -> None:
     """settings_update for openrouter_key -> a settings_state reply to the
     sender only (not broadcast), reporting "set" (HALO_LLM_STUB makes
@@ -311,13 +420,13 @@ async def check_settings_update_round_trip(port: int, token: str) -> None:
         await _drain_snapshot(ws)  # rest of the Step-9 connect snapshot
 
         await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="sk-or-test")))
-        saved = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
-        assert saved["type"] == "settings_state" and saved["key"] == "openrouter_key", saved
+        saved = await _recv_settings_state(ws)
+        assert saved["key"] == "openrouter_key", saved
         assert saved["status"] == "set", saved  # HALO_LLM_STUB -> validate_key() is instant True
 
         await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="")))
-        cleared = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
-        assert cleared["type"] == "settings_state" and cleared["status"] == "missing", cleared
+        cleared = await _recv_settings_state(ws)
+        assert cleared["status"] == "missing", cleared
     finally:
         await ws.close()
     print("[check 10] settings_update -> settings_state reply (set, then missing on clear): OK")
@@ -456,7 +565,8 @@ async def check_real_task_controls_fail_honestly() -> None:
         frames.append((kind, payload))
     await server._send_unsupported_operation(_frame("task_op", task_id="task-1", op="pause"), send)
     await server._send_unsupported_operation(_frame("lane_pin", task_id="task-2", lane=3), send)
-    # mic/skill_op carry no domain id -> correlate by the envelope id (fallback).
+    # mic carries no domain id -> correlates by the envelope id (fallback);
+    # skill_op correlates by skill_name, which is what SkillsView locks on.
     mic = _frame("mic", op="mute")
     skill = _frame("skill_op", skill_name="demo", op="disable")
     await server._send_unsupported_operation(mic, send)
@@ -464,8 +574,10 @@ async def check_real_task_controls_fail_honestly() -> None:
     assert frames[0][1]["operation_kind"] == "task_op" and frames[0][1]["operation_id"] == "task-1", frames
     assert frames[1][1]["operation_kind"] == "lane_pin" and frames[1][1]["operation_id"] == "task-2", frames
     assert frames[2][1]["operation_kind"] == "mic" and frames[2][1]["operation_id"] == mic["id"], frames
-    assert frames[3][1]["operation_kind"] == "skill_op" and frames[3][1]["operation_id"] == skill["id"], frames
+    assert frames[3][1]["operation_kind"] == "skill_op" and frames[3][1]["operation_id"] == "demo", frames
     assert all(payload["code"] == "operation_unsupported" for _, payload in frames), frames
+    assert "Voice input" in frames[2][1]["message"], frames
+    assert "Skill controls" in frames[3][1]["message"], frames
     print("[check 15] real task/mic/skill controls return correlated unsupported errors: OK")
 
 
@@ -487,6 +599,27 @@ def check_real_dispatch_covers_all_ui_inbound_types() -> None:
     print("[check 17] real dispatch covers every UI-sendable inbound type: OK")
 
 
+def check_mock_dispatch_covers_all_ui_inbound_types() -> None:
+    """The same guard for the OTHER dispatch table -- which never had one, even
+    though the documented "affordance hangs forever waiting for a confirming
+    frame" incident (mem/Bugs.md #12) happened on the MOCK side. `user_msg` is
+    excluded with `hello`: it has its own branch ahead of the table. Also
+    resolves each handler name on mock.py, since a typo there is the same hang
+    one layer down."""
+    from brain import mock as mock_engine
+    from brain.ipc.contract import CONTRACT_SPEC
+
+    inbound = {
+        name
+        for name, spec in CONTRACT_SPEC["messages"].items()
+        if spec["direction"] == "inbound" and name not in ("hello", "user_msg")
+    }
+    assert inbound == set(server._MOCK_DISPATCH), inbound ^ set(server._MOCK_DISPATCH)
+    for handler_name, _needs_send in server._MOCK_DISPATCH.values():
+        assert callable(getattr(mock_engine, handler_name, None)), handler_name
+    print("[check 23] mock dispatch covers every UI-sendable inbound type: OK")
+
+
 async def check_real_dispatch_routes_unsupported_over_wire(port: int, token: str) -> None:
     """Proves the dispatch BRANCH (not just the helper) routes mic/skill_op:
     the exact regression the mock-only handler masked. Each returns a correlated
@@ -497,14 +630,20 @@ async def check_real_dispatch_routes_unsupported_over_wire(port: int, token: str
         settings = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
         assert settings["type"] == "settings_state", settings
         await _drain_snapshot(ws)
-        for frame in (_frame("mic", op="mute"), _frame("skill_op", skill_name="x", op="disable")):
+        # mic has no domain id -> correlates by the envelope id; skill_op does
+        # (skill_name), which is what the SkillsView rule-3 lock keys off.
+        for frame, expected_id in (
+            (_frame("mic", op="mute"), None),
+            (_frame("skill_op", skill_name="x", op="disable"), "x"),
+        ):
             await ws.send(json.dumps(frame))
             while True:
                 reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
                 if reply["type"] != "spend_update":  # unsolicited global broadcast
                     break
             assert reply["type"] == "error" and reply["code"] == "operation_unsupported", reply
-            assert reply["operation_kind"] == frame["type"] and reply["operation_id"] == frame["id"], reply
+            assert reply["operation_kind"] == frame["type"], reply
+            assert reply["operation_id"] == (expected_id or frame["id"]), reply
     finally:
         await ws.close()
     print("[check 18] real dispatch routes mic/skill_op to unsupported over the wire: OK")
@@ -618,6 +757,8 @@ async def main() -> None:
         await check_settings_update_round_trip(port, token)
         await check_settings_failures_and_status_persistence(port, token)
         await check_snapshot_not_interleaved()
+        await check_broadcast_during_flush_queues_behind_held_frames()
+        await check_broadcast_closes_a_stalled_client()
         await check_sends_and_deferred_queue_are_bounded()
         await check_real_dispatch_routes_unsupported_over_wire(port, token)
         await check_contract_version_negotiation(port, token)
@@ -634,6 +775,8 @@ async def main() -> None:
     await check_tasks_are_supervised_and_cancelled_on_close()
     await check_real_task_controls_fail_honestly()
     check_real_dispatch_covers_all_ui_inbound_types()
+    check_mock_dispatch_covers_all_ui_inbound_types()
+    await check_non_ascii_token_is_rejected_not_raised()
     await check_turn_admission_and_ordering()
     print("[brain.server] self-check OK")
 

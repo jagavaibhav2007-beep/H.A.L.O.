@@ -147,8 +147,14 @@ export function ChatTabs() {
                 <button
                   type="button"
                   className="chat-tabs-menu-del"
-                  aria-label={`Delete ${c.title}`}
-                  onClick={() => deleteConversation(c.id)}
+                  aria-label={`Remove ${c.title} from recent conversations`}
+                  title="Remove from recent conversations on this device"
+                  onClick={() => {
+                    const confirmed = window.confirm(
+                      `Remove "${c.title}" from recent conversations on this device? This local removal can't be undone here.`,
+                    );
+                    if (confirmed) deleteConversation(c.id);
+                  }}
                 >
                   <Icon icon={X} size={16} />
                 </button>

@@ -83,8 +83,8 @@
 .chat-tabs-menu-del {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  min-width: var(--hit-min);
+  min-height: var(--hit-min);
   margin-right: 4px;
   border: 0;
   border-radius: 6px;
@@ -141,7 +141,7 @@
   color: var(--text);
 }
 .chat-tab-more:disabled {
-  opacity: 0.4;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 

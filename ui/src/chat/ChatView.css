@@ -73,6 +73,12 @@
 .md-body > :last-child {
   margin-bottom: 0;
 }
+/* Links must use the theme-aware primary, not the UA default #0000EE, which
+   computes to ~1.88:1 on the dark chat bubble — effectively invisible. */
+.md-body a {
+  color: var(--primary);
+  text-decoration: underline;
+}
 .md-inline-code {
   font-family: var(--font-mono);
   font-size: 0.9em;
@@ -165,6 +171,45 @@
   color: var(--text-muted);
 }
 
+.chat-stop {
+  min-width: var(--hit-min);
+  min-height: var(--hit-min);
+  margin-top: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.chat-stop:hover:not(:disabled) {
+  color: var(--destructive);
+  border-color: var(--destructive);
+}
+.chat-stop:disabled {
+  cursor: default;
+  opacity: var(--disabled-opacity);
+}
+
+.chat-retry {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--hit-min);
+  margin-top: 8px;
+  padding: 0 12px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--destructive);
+  font: inherit;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+.chat-retry:hover {
+  background: color-mix(in srgb, var(--destructive) 12%, transparent);
+}
+
 /* ---- "What I did" row ---- */
 
 .chat-did {
@@ -231,6 +276,10 @@
 .chat-chip:hover {
   background: color-mix(in srgb, var(--primary) 16%, transparent);
 }
+.chat-chip:disabled {
+  cursor: default;
+  opacity: var(--disabled-opacity);
+}
 
 /* ---- Input bar ---- */
 
@@ -251,9 +300,24 @@
   padding: 0;
   background: none;
   border: none;
+  border-radius: 8px;
   color: var(--text-muted);
   cursor: pointer;
   margin-bottom: 6px;
+  transition: color var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out);
+}
+/* :not([data-muted]) so hover never overrides the louder muted-red state
+   above it in specificity terms — [data-muted] must always win over hover. */
+.chat-input-mic:hover:not(:disabled):not([data-muted]) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+.chat-input-mic[data-muted]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+}
+.chat-input-mic:disabled {
+  opacity: var(--disabled-opacity);
+  cursor: default;
 }
 /* Muted is visually loud (design rule) — the slashed mic goes red. */
 .chat-input-mic[data-muted] {
@@ -264,9 +328,15 @@
   vertical-align: -2px;
   opacity: 0.7;
 }
+/* field-sizing:content grows the textarea with its content, so Shift+Enter
+   actually shows a second line and max-height stops being dead code (it was:
+   rows=1 pinned the box to one row forever). Chromium 123+, which every
+   WebView2 this app can run on satisfies; browsers without it fall back to the
+   old fixed single row rather than breaking. */
 .chat-input {
   flex: 1;
   resize: none;
+  field-sizing: content;
   max-height: 160px;
   min-height: var(--hit-min);
   padding: 8px 12px;
@@ -278,10 +348,16 @@
   font-size: var(--text-chat);
   line-height: var(--line-height);
 }
+.chat-input:disabled {
+  cursor: not-allowed;
+  color: var(--text-muted);
+}
 .chat-queued-badge {
   flex-shrink: 0;
   align-self: center;
   font-size: var(--text-xs);
-  color: var(--tier-3);
+  /* --tier-3 is a fill/border amber (3.12:1 as light-mode text); --tier-3-text
+     is the AA-passing text variant of the same signal. */
+  color: var(--tier-3-text);
   white-space: nowrap;
 }

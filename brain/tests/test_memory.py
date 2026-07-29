@@ -225,18 +225,37 @@ async def check_memory_edit() -> None:
     sink = Sink()
     bid = _belief_by_text("my shell is bash")["belief_id"]
     await memory.handle_memory_edit({"belief_id": bid, "op": "edit", "text": "my shell is nushell now"}, sink)
-    frame = sink.of("belief_state")[-1]
-    assert frame["text"] == "my shell is nushell now" and frame["provenance"] == "user", frame
+    old = store.get_belief(bid)
+    replacement = _belief_by_text("my shell is nushell now")
+    assert old["status"] == "superseded" and old["superseded_by"] == replacement["belief_id"], old
+    assert replacement["status"] == "active" and replacement["provenance"] == "user", replacement
+    edit_frames = sink.of("belief_state")[-2:]
+    assert {frame["belief_id"] for frame in edit_frames} == {bid, replacement["belief_id"]}, edit_frames
+
+    # Restoring an earlier version makes it live again and invalidates the
+    # version that had replaced it. No active row may keep invalid_at set.
+    await memory.handle_memory_edit({"belief_id": bid, "op": "restore"}, sink)
+    restored = store.get_belief(bid)
+    replaced = store.get_belief(replacement["belief_id"])
+    assert restored["status"] == "active" and restored["invalid_at"] is None, restored
+    assert restored["superseded_by"] is None, restored
+    assert replaced["status"] == "superseded" and replaced["superseded_by"] == bid, replaced
 
     await memory.handle_memory_edit({"belief_id": bid, "op": "delete"}, sink)
     assert sink.of("belief_state")[-1]["status"] == "archived", sink.frames
     await memory.handle_memory_edit({"belief_id": bid, "op": "restore"}, sink)
-    assert sink.of("belief_state")[-1]["status"] == "active", sink.frames
+    restored = store.get_belief(bid)
+    assert restored["status"] == "active" and restored["invalid_at"] is None, restored
+
+    await memory.handle_memory_edit({"belief_id": bid, "op": "delete"}, sink)
+    await memory.handle_memory_edit({"belief_id": bid, "op": "purge"}, sink)
+    assert store.get_belief(bid) is None
+    assert sink.of("belief_deleted")[-1]["belief_id"] == bid, sink.frames
 
     await memory.handle_memory_edit({"belief_id": "nope", "op": "delete"}, sink)
     err = sink.of("error")[-1]
     assert err["code"] == "belief_not_found" and err["recoverable"] is True, err
-    print("[check 8] memory_edit: edit (provenance->user) / delete / restore round-trip; unknown id errors: OK")
+    print("[check 8] memory_edit: transactional supersession + safe restore/delete round-trip; unknown id errors: OK")
 
 
 async def check_push_beliefs_live_and_capped() -> None:
@@ -252,6 +271,13 @@ async def check_push_beliefs_live_and_capped() -> None:
     assert all(f["status"] == "active" for f in frames), frames
     assert superseded["belief_id"] not in ids, "superseded belief leaked into hydration"
     assert archived not in ids, "archived belief leaked into hydration"
+
+    history = Sink()
+    await memory.push_history(history)
+    history_ids = {f["belief_id"] for f in history.of("belief_state")}
+    assert superseded["belief_id"] in history_ids and archived in history_ids, history.frames
+    states = history.of("memory_history_state")
+    assert states[0]["complete"] is False and states[-1]["complete"] is True, history.frames
 
     # Cap at 50: seed well past 50 live beliefs, confirm the snapshot is bounded.
     for i in range(60):
@@ -290,8 +316,8 @@ async def check_note_turn_triggers() -> None:
         await asyncio.gather(first, return_exceptions=True)
         assert first.done(), "prior idle timer not cancelled on re-arm"
 
-        # (c) pressure (Letta): a large un-consolidated span consolidates NOW, arming
-        # no timer. One bulk assistant message pushes est past _PRESSURE_TOKENS while
+        # (c) pressure (Letta): a large un-consolidated span consolidates NOW.
+        # One bulk assistant message pushes est past _PRESSURE_TOKENS while
         # leaving exactly one extractable fact.
         second.cancel()
         memory._idle_tasks.pop(cid, None)
@@ -299,9 +325,24 @@ async def check_note_turn_triggers() -> None:
         bulk = {"role": "assistant", "content": "x" * 33000}  # ~8.2k est tokens > _PRESSURE_TOKENS
         before = set(memory._bg_tasks)
         await memory.note_turn(pcid, _span("remember: I love pizza") + [bulk], "stub-key", Sink())
-        assert pcid not in memory._idle_tasks, "pressure span armed an idle timer instead of consolidating now"
-        await asyncio.gather(*[t for t in memory._bg_tasks if t not in before], return_exceptions=True)
+        # It must ALSO arm the idle timer: the pressure pass can fail (LLM down),
+        # and the branch used to return early, leaving nothing pending at all --
+        # the span then waited for a further turn to get a second chance.
+        retry = memory._idle_tasks.get(pcid)
+        assert retry is not None, "pressure path armed no retry: a failed pass would be dropped"
+        # Don't gather the retry timer itself -- it is deliberately sleeping
+        # HALO_MEMORY_IDLE_S (an hour here); only the consolidation is awaited.
+        retry.cancel()
+        memory._idle_tasks.pop(pcid, None)
+        await asyncio.gather(
+            *[t for t in memory._bg_tasks if t not in before], return_exceptions=True
+        )
         assert _belief_by_text("I love pizza") is not None, "pressure consolidation did not persist the fact"
+
+        # (d) growth bound: a consolidated conversation must not stay in _dirty.
+        # The entry pins the whole message list AND the live broadcast closure
+        # (which holds the websocket) for the process lifetime otherwise.
+        assert pcid not in memory._dirty, "_dirty was never popped after a successful consolidation"
     finally:
         for t in list(memory._idle_tasks.values()):
             t.cancel()

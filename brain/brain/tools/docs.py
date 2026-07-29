@@ -48,9 +48,12 @@ async def _llm_text(messages: list[dict], api_key: str) -> str:
 
 
 def _degraded(path: str, gist: str, confidence: float) -> dict:
+    # "degraded" is an explicit flag, not a confidence threshold a future prompt
+    # tweak could collide with: it is what keeps a parse failure out of a cache
+    # that has no invalidation path short of bumping DIGEST_VERSION.
     return {
         "path": path, "gist": gist, "key_points": [], "entities": [],
-        "numbers": [], "caveats": [], "confidence": confidence,
+        "numbers": [], "caveats": [], "confidence": confidence, "degraded": True,
     }
 
 
@@ -114,16 +117,23 @@ async def _doc_digest(args: dict) -> dict:
     async def one(raw: str) -> dict:
         p = _resolve(raw)
         try:
+            # Hash BEFORE extracting, and look up before extracting too. The
+            # old order read the file twice either side of an LLM round-trip:
+            # save the file in between and the OLD content's digest gets cached
+            # under the NEW content's sha -- a permanent hit no invalidation can
+            # reach. This also skips re-parsing entirely on a cache hit.
+            sha = await asyncio.to_thread(_sha, p)
+            cached = await asyncio.to_thread(store.get_digest, str(p), sha, DIGEST_VERSION)
+            if cached is not None:
+                return cached
             text = await asyncio.to_thread(extract.extract_text, p)
         except Exception as exc:  # noqa: BLE001 - one bad file must not kill the batch
             return _degraded(str(p), f"could not extract this file: {exc}", 0.0)
-        text = text[:_EXTRACT_CAP]
-        sha = await asyncio.to_thread(_sha, p)
-        cached = await asyncio.to_thread(store.get_digest, str(p), sha, DIGEST_VERSION)
-        if cached is not None:
-            return cached
-        digest = await _digest_one(p, text, api_key)
-        await asyncio.to_thread(store.put_digest, str(p), sha, DIGEST_VERSION, digest)
+        digest = await _digest_one(p, text[:_EXTRACT_CAP], api_key)
+        # A parse failure is a transient fact about one reply, not about the
+        # file's content -- caching it would pin the degraded answer forever.
+        if not digest.get("degraded"):
+            await asyncio.to_thread(store.put_digest, str(p), sha, DIGEST_VERSION, digest)
         return digest
 
     digests = await asyncio.gather(*(one(raw) for raw in paths))

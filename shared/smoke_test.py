@@ -43,7 +43,9 @@ Exit code is 0 iff all four criteria pass (non-zero otherwise, for CI).
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -53,7 +55,9 @@ from pathlib import Path
 # network-free and never touches %LOCALAPPDATA%\Halo. (test_server sets the
 # same env on import; set it here too so ordering never matters.)
 os.environ["HALO_LLM_STUB"] = "1"
-os.environ["LOCALAPPDATA"] = tempfile.mkdtemp(prefix="halo-smoke-")
+_TMP = tempfile.mkdtemp(prefix="halo-smoke-")
+os.environ["LOCALAPPDATA"] = _TMP
+atexit.register(shutil.rmtree, _TMP, ignore_errors=True)  # don't leak on every run
 
 ROOT = Path(__file__).resolve().parents[1]
 # ponytail: brain/tests and voice/tests have no __init__.py (plain scripts,
