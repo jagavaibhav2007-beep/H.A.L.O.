@@ -46,6 +46,42 @@ test("a queued follow-up does not split the assistant turn already streaming", (
   expect(state.conversations.chat.turns[2]).toMatchObject({ role: "user", text: "second" });
 });
 
+test("stored history hydrates only an empty conversation", () => {
+  const history = {
+    type: "conversation_history_state" as const,
+    ...envelope(),
+    conversation_id: "old-chat",
+    turns: [
+      { role: "user" as const, text: "What did we decide?" },
+      { role: "assistant" as const, text: "Use the smaller implementation." },
+    ],
+  };
+  let state = applyFrame(initialState, history);
+  expect(state.conversations["old-chat"].historyLoaded).toBe(true);
+  expect(state.conversations["old-chat"].turns).toMatchObject([
+    { role: "user", text: "What did we decide?" },
+    { role: "assistant", text: "Use the smaller implementation.", status: "done" },
+  ]);
+  const hydrated = state;
+  state = applyFrame(state, {
+    ...history,
+    id: "duplicate-history",
+    turns: [{ role: "assistant", text: "A duplicate must not replace the transcript." }],
+  });
+  expect(state).toBe(hydrated);
+
+  state = appendUserTurn(state, "live-chat", "A newer message", "live-user");
+  state = applyFrame(state, { ...history, conversation_id: "live-chat" });
+  expect(state.conversations["live-chat"].turns).toHaveLength(1);
+  expect(state.conversations["live-chat"].turns[0]).toMatchObject({ role: "user", text: "A newer message" });
+  expect(state.conversations["live-chat"].historyLoaded).toBe(true);
+});
+
+test("terminal discovery failure has a distinct unavailable connection state", () => {
+  const state = applyConnectionEvent(initialState, { type: "ws_unavailable" });
+  expect(state.connection.wsStatus).toBe("unavailable");
+});
+
 test("a queued follow-up placeholder does not steal the turn already streaming", () => {
   let state = beginUserRequest(initialState, "chat", "first", "req-1");
   state = applyFrame(state, { type: "token", ...envelope(), text: "Hel", conversation_id: "chat" });

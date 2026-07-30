@@ -31,3 +31,13 @@ test("shows an unknown key state and never claims mock model IDs", () => {
   view.rerender(<SettingsView sendSettingsUpdate={vi.fn()} />);
   expect(screen.getByRole("status").textContent).toContain("not set");
 });
+
+test("an unavailable Brain disables key controls without an endless status spinner", () => {
+  useHaloStore.getState().applyConnectionEvent({ type: "ws_unavailable" });
+  render(<SettingsView sendSettingsUpdate={vi.fn()} />);
+
+  expect(screen.getByRole("status").textContent).toContain("unavailable until Halo is running");
+  expect((screen.getByLabelText("OpenRouter") as HTMLInputElement).disabled).toBe(true);
+  expect(screen.getByText("Voice input is not available in this build; typed chat still works.")).toBeTruthy();
+  expect(document.querySelector(".halo-spinner")).toBeNull();
+});

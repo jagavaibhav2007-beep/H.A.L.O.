@@ -113,7 +113,11 @@ export function MemoryView({ active: viewActive, sendMemoryEdit, sendMemoryQuery
       {Object.values(failures)[0] && <p role="alert">{Object.values(failures)[0]}</p>}
       {viewActive && !historyLoaded && (
         <p className="memory-loading" role="status">
-          <span className="halo-spinner" aria-hidden="true" />Loading memory history…
+          {wsStatus === "unavailable"
+            ? "Memory is unavailable until Halo is running."
+            : wsStatus === "connected"
+              ? <><span className="halo-spinner" aria-hidden="true" />Loading memory history…</>
+              : "Memory history will load when Halo reconnects."}
         </p>
       )}
       <div className="memory-toolbar">

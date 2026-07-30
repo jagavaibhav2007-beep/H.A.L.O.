@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { useHaloStore } from "../state/store";
@@ -17,6 +18,133 @@ beforeEach(() => {
   });
 });
 afterEach(cleanup);
+
+test("a restored conversation requests its stored transcript", () => {
+  useHaloStore.setState({
+    chats: {
+      ...useHaloStore.getState().chats,
+      all: useHaloStore.getState().chats.all.map((chat) =>
+        chat.id === "a" ? { ...chat, restored: true } : chat,
+      ),
+    },
+  });
+  const sendConversationHistoryQuery = vi.fn();
+  render(
+    <StrictMode>
+      <ChatView
+        conversationId="a"
+        connState="connected"
+        sendUserMsg={vi.fn()}
+        sendConversationHistoryQuery={sendConversationHistoryQuery}
+        sendInterrupt={vi.fn()}
+        sendMic={vi.fn()}
+        inputId="composer"
+      />
+    </StrictMode>,
+  );
+  expect(sendConversationHistoryQuery).toHaveBeenCalledWith("a");
+  expect(sendConversationHistoryQuery).toHaveBeenCalledTimes(1);
+});
+
+test("a restored conversation retries history after reconnecting", () => {
+  useHaloStore.setState({
+    chats: {
+      ...useHaloStore.getState().chats,
+      all: useHaloStore.getState().chats.all.map((chat) =>
+        chat.id === "a" ? { ...chat, restored: true } : chat,
+      ),
+    },
+  });
+  const sendConversationHistoryQuery = vi.fn();
+  const props = {
+    conversationId: "a",
+    sendUserMsg: vi.fn(),
+    sendConversationHistoryQuery,
+    sendInterrupt: vi.fn(),
+    sendMic: vi.fn(),
+    inputId: "composer",
+  };
+  const view = render(<ChatView {...props} connState="connected" />);
+  view.rerender(<ChatView {...props} connState="reconnecting" />);
+  view.rerender(<ChatView {...props} connState="connected" />);
+  expect(sendConversationHistoryQuery).toHaveBeenCalledTimes(2);
+});
+
+test("an empty stored transcript finishes loading instead of requesting forever", () => {
+  useHaloStore.setState({
+    chats: {
+      ...useHaloStore.getState().chats,
+      all: useHaloStore.getState().chats.all.map((chat) =>
+        chat.id === "a" ? { ...chat, restored: true } : chat,
+      ),
+    },
+  });
+  const sendConversationHistoryQuery = vi.fn();
+  render(
+    <ChatView
+      conversationId="a"
+      connState="connected"
+      sendUserMsg={vi.fn()}
+      sendConversationHistoryQuery={sendConversationHistoryQuery}
+      sendInterrupt={vi.fn()}
+      sendMic={vi.fn()}
+      inputId="composer"
+    />,
+  );
+  act(() => {
+    useHaloStore.getState().applyFrame({
+      type: "conversation_history_state",
+      id: "empty-history",
+      ts: "2026-07-30T00:00:00Z",
+      conversation_id: "a",
+      turns: [],
+    });
+  });
+
+  expect(screen.getByText("This conversation has no earlier messages.")).toBeTruthy();
+  expect(sendConversationHistoryQuery).toHaveBeenCalledTimes(1);
+});
+
+test("out-of-order history responses stay with their own conversation", () => {
+  useHaloStore.setState({
+    chats: {
+      ...useHaloStore.getState().chats,
+      all: useHaloStore.getState().chats.all.map((chat) => ({ ...chat, restored: true })),
+    },
+  });
+  const props = {
+    connState: "connected" as const,
+    sendUserMsg: vi.fn(),
+    sendConversationHistoryQuery: vi.fn(),
+    sendInterrupt: vi.fn(),
+    sendMic: vi.fn(),
+    inputId: "composer",
+  };
+  const view = render(<ChatView {...props} conversationId="a" />);
+  view.rerender(<ChatView {...props} conversationId="b" />);
+  act(() => {
+    useHaloStore.getState().applyFrame({
+      type: "conversation_history_state",
+      id: "history-a",
+      ts: "2026-07-30T00:00:00Z",
+      conversation_id: "a",
+      turns: [{ role: "assistant", text: "Answer from A" }],
+    });
+  });
+  expect(screen.queryByText("Answer from A")).toBeNull();
+  act(() => {
+    useHaloStore.getState().applyFrame({
+      type: "conversation_history_state",
+      id: "history-b",
+      ts: "2026-07-30T00:00:01Z",
+      conversation_id: "b",
+      turns: [{ role: "assistant", text: "Answer from B" }],
+    });
+  });
+  expect(screen.getByText("Answer from B")).toBeTruthy();
+  view.rerender(<ChatView {...props} conversationId="a" />);
+  expect(screen.getByText("Answer from A")).toBeTruthy();
+});
 
 test("drafts and failed-message restoration stay scoped to their conversation", () => {
   const props = {
@@ -103,6 +231,48 @@ test("an incompatible contract preserves the draft and cannot queue a send", () 
   expect(sendUserMsg).not.toHaveBeenCalled();
   expect(composer.value).toBe("do not lose this");
   expect(composer.disabled).toBe(true);
+});
+
+test("an unavailable browser bridge preserves the draft and cannot queue a send", () => {
+  const sendUserMsg = vi.fn();
+  render(
+    <ChatView
+      conversationId="a"
+      connState="unavailable"
+      sendUserMsg={sendUserMsg}
+      sendInterrupt={vi.fn()}
+      sendMic={vi.fn()}
+      inputId="composer"
+    />,
+  );
+
+  const composer = screen.getByRole("textbox", { name: "Message Halo" }) as HTMLTextAreaElement;
+  fireEvent.change(composer, { target: { value: "keep this draft" } });
+  fireEvent.keyDown(composer, { key: "Enter", shiftKey: false });
+
+  expect(sendUserMsg).not.toHaveBeenCalled();
+  expect(composer.value).toBe("keep this draft");
+  expect(composer.disabled).toBe(true);
+  expect(screen.getByText("Start Halo with ./dev.ps1 -Browser to chat here.")).toBeTruthy();
+});
+
+test("a message queued during reconnect is labelled queued and cannot be stopped", () => {
+  render(
+    <ChatView
+      conversationId="a"
+      connState="reconnecting"
+      sendUserMsg={vi.fn()}
+      sendInterrupt={vi.fn()}
+      sendMic={vi.fn()}
+      inputId="composer"
+    />,
+  );
+  const composer = screen.getByRole("textbox", { name: "Message Halo" });
+  fireEvent.change(composer, { target: { value: "send after reconnect" } });
+  fireEvent.keyDown(composer, { key: "Enter", shiftKey: false });
+
+  expect(screen.getByText("Queued — waiting for Halo to reconnect.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Stop response" })).toBeNull();
 });
 
 test("the active Halo turn exposes the existing conversation interrupt", () => {

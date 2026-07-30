@@ -1,7 +1,7 @@
 import type { LucideIcon as LucideIconType } from "lucide-react";
 import "./primitives.css";
 
-export type IconSize = 16 | 20 | 24;
+type IconSize = 16 | 20 | 24;
 
 interface IconProps {
   icon: LucideIconType;

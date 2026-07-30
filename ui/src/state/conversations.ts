@@ -12,15 +12,15 @@
 // conversations.selfcheck.ts.
 
 export const DEFAULT_TITLE = "New chat";
-export const TITLE_MAX = 40;
+const TITLE_MAX = 40;
 /** Shorter than this and it's "hey" / "thanks" — not a title. Wait for the
  * next substantive message instead of pinning a meaningless label. */
-export const TITLE_MIN_SOURCE = 15;
+const TITLE_MIN_SOURCE = 15;
 // ponytail: flat cap, oldest-used dropped first. A real "archive" view with
 // search is the upgrade path if 50 ever feels small.
 export const RECENT_CAP = 50;
 
-export interface ConversationMeta {
+interface ConversationMeta {
   id: string;
   title: string;
   lastUsedAt: number;

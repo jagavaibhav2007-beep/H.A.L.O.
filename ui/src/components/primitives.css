@@ -112,17 +112,6 @@
   color: var(--text-muted);
 }
 
-/* Icon — hit area for icon-only buttons stays >= --hit-min even though
-   the glyph itself is smaller. */
-.halo-icon-hit {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: var(--hit-min);
-  min-height: var(--hit-min);
-  color: inherit;
-}
-
 /* Shared view primitives — cards, meters, empty states, lists, scroll
    bodies, and input chrome duplicated (or near-duplicated) across
    TasksView/MemoryView/SkillsView/ActivityFeed/SettingsView. Views keep

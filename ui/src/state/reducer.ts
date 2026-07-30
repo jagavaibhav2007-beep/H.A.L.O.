@@ -22,13 +22,13 @@ const operationCorrelationKey = (kind: string, id: string) => `${kind}:${id}`;
 
 // ---- Slice types ----
 
-export type WsStatus = "connecting" | "connected" | "reconnecting";
-export type SidecarStatus = "unknown" | "starting" | "running" | "restarting" | "error";
+type WsStatus = "connecting" | "connected" | "reconnecting" | "unavailable";
+type SidecarStatus = "unknown" | "starting" | "running" | "restarting" | "error";
 
 // Two distinct signals that must never be conflated (Phase-0 rule, D5):
 // WS-connected+authenticated (drives chat input / reconnect indicator) vs
 // sidecar process health (drives the separate "Brain failed to start" banner).
-export interface ConnectionState {
+interface ConnectionState {
   wsStatus: WsStatus;
   brainStatus: SidecarStatus;
   voiceStatus: SidecarStatus;
@@ -38,7 +38,7 @@ export interface ConnectionState {
 // and Phase 2's real Brain won't either) — the reducer records them locally
 // via appendUserTurn at send time, so one ordered `turns` array holds the
 // whole conversation in arrival order (D7). `role` is the discriminant.
-export interface UserTurn {
+interface UserTurn {
   id: string;
   role: "user";
   text: string;
@@ -57,25 +57,26 @@ export interface AssistantTurn {
 
 export type Turn = UserTurn | AssistantTurn;
 
-export interface ConversationState {
+interface ConversationState {
   conversationId: string;
   turns: Turn[]; // full history, arrival order (D7) — never sorted by ts
   needsInputRestore: boolean; // rule 8: error/disconnect restores the user's text
+  historyLoaded?: boolean;
 }
 
-export interface VoiceState {
+interface VoiceState {
   state: VoiceStateMsg["state"];
   transcript: { text: string; final: boolean; conversationId: string } | null;
 }
 
-export interface SpendState {
+interface SpendState {
   sessionUsd: number;
   monthUsd: number;
   sessionTokens: number;
   lastTurnTokens: number;
 }
 
-export interface CapabilityState {
+interface CapabilityState {
   voiceInput: boolean | null;
   taskControls: boolean | null;
   skillControls: boolean | null;
@@ -91,7 +92,7 @@ interface SnapshotState {
 
 // Keyed by settings key (only "openrouter_key" exists so far) so the reducer
 // stays total if Settings grows more server-confirmed keys later.
-export type SettingsState = Record<string, "set" | "missing" | "invalid" | "unverified">;
+type SettingsState = Record<string, "set" | "missing" | "invalid" | "unverified">;
 
 export interface HaloState {
   connection: ConnectionState;
@@ -369,6 +370,19 @@ function resolveApprovalsForConversation(state: HaloState, conversationId: strin
 
 export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
   switch (frame.type) {
+    case "conversation_history_state": {
+      const conv = getConversation(state, frame.conversation_id);
+      if (conv.turns.length > 0) {
+        return conv.historyLoaded ? state : replaceConversation(state, { ...conv, historyLoaded: true });
+      }
+      const turns: Turn[] = frame.turns.map((turn, index) =>
+        turn.role === "user"
+          ? { id: `${frame.id}:${index}`, role: "user", text: turn.text }
+          : { id: `${frame.id}:${index}`, role: "assistant", status: "done", text: turn.text },
+      );
+      return replaceConversation(state, { ...conv, turns, historyLoaded: true });
+    }
+
     case "token": {
       // Unknown conversation_id -> open a turn anyway; arrival order is
       // truth (the user_msg echo may be local-only).
@@ -568,6 +582,7 @@ export type ConnectionEvent =
   | { type: "ws_open" }
   | { type: "authenticated" }
   | { type: "ws_closed" }
+  | { type: "ws_unavailable" }
   | { type: "sidecar_state"; process: "brain" | "voice"; state: Exclude<SidecarStatus, "unknown"> };
 
 export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): HaloState {
@@ -595,7 +610,7 @@ export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): 
         const interrupted = conv.turns.some(
           (turn) => turn.role === "assistant" && turn.status === "streaming",
         );
-        conversations[id] = interrupted
+        const next: ConversationState = interrupted
           ? {
               ...conv,
               turns: conv.turns.map((turn) =>
@@ -606,6 +621,7 @@ export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): 
               needsInputRestore: true,
             }
           : conv;
+        conversations[id] = { ...next, historyLoaded: false };
       }
       return {
         ...state,
@@ -613,6 +629,15 @@ export function applyConnectionEvent(state: HaloState, event: ConnectionEvent): 
         memoryHistoryLoaded: false,
         connection: { ...state.connection, wsStatus: "reconnecting" },
         snapshot: { pending: true, taskIds: {}, approvalIds: {}, activityCounts: {} },
+      };
+    }
+
+    case "ws_unavailable": {
+      const disconnected = applyConnectionEvent(state, { type: "ws_closed" });
+      return {
+        ...disconnected,
+        connection: { ...disconnected.connection, wsStatus: "unavailable" },
+        snapshot: { pending: false, taskIds: {}, approvalIds: {}, activityCounts: {} },
       };
     }
 

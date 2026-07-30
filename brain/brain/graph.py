@@ -1,9 +1,8 @@
-"""LangGraph chat spine (Phase 2 Step 4, D1).
+"""LangGraph chat spine for the real Brain backend.
 
-The real Brain's user_msg handler: a small StateGraph (route -> respond) with
-an AsyncSqliteSaver checkpointer on checkpoints.db (D3), thread_id ==
-conversation_id. Perceive is the messages reducer itself (input append), and
-gate/execute nodes arrive in Step 5 -- no empty placeholder nodes here.
+The ``user_msg`` handler runs a checkpointed route/gate/respond graph with
+``thread_id == conversation_id``. Tool calls execute through the shared
+permission gate and registry.
 
 Error ownership: run_turn emits every error frame for its turn (no_api_key,
 turn_failed). server.py calls it bare -- no wrapper, no double emission.
@@ -501,6 +500,22 @@ async def _ensure_graph():
         _recovery_started = True
         _recovery_task = asyncio.create_task(_recover_consolidation())
     return _graph
+
+
+async def push_conversation_history(msg: dict, send) -> None:
+    graph = await _ensure_graph()
+    snap = await graph.aget_state({"configurable": {"thread_id": msg["conversation_id"]}})
+    turns = [
+        {"role": item["role"], "text": item["content"]}
+        for item in snap.values.get("messages", [])
+        if item.get("role") in {"user", "assistant"}
+        and isinstance(item.get("content"), str)
+        and item["content"]
+    ]
+    await send("conversation_history_state", {
+        "conversation_id": msg["conversation_id"],
+        "turns": turns,
+    })
 
 
 async def _recover_consolidation() -> None:

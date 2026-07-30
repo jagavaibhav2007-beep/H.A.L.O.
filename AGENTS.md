@@ -28,6 +28,7 @@ Three independent process trees (`ui/` Rust+Node, `brain/` Python, `voice/` Pyth
 **Run everything for local dev:**
 ```powershell
 ./dev.ps1               # launches Tauri with the real Brain and Voice
+./dev.ps1 -Browser      # launches the real Brain in a functional browser workspace
 ./dev.ps1 -Only brain   # standalone worker debugging: brain | voice | ui
 ./dev.ps1 -Mock         # launches Tauri against the scripted mock Brain
 ./dev.ps1 -Smoke        # runs Phase 0/1/2 automated gates in-place (no windows)
@@ -39,7 +40,7 @@ Three independent process trees (`ui/` Rust+Node, `brain/` Python, `voice/` Pyth
 # Run these from ui/ unless the comment says otherwise.
 npm install
 npm run tauri dev       # native window; needs Rust/cargo + MSVC Build Tools (C++ workload) on Windows
-npm run dev             # browser-only fallback, no Rust toolchain needed
+npm run dev             # UI-only browser preview; use ../dev.ps1 -Browser for a live Brain
 npx tsc --noEmit        # typecheck
 node ui/src/ipc/contract.selfcheck.ts   # contract self-check (from repo root)
 node ui/src/ipc/queue.selfcheck.ts      # interrupted queue flush preserves unsent messages

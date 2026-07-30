@@ -61,6 +61,14 @@ test("an interrupted history request is retried after reconnection", () => {
   expect(sendMemoryQuery).toHaveBeenCalledTimes(2);
 });
 
+test("an unavailable Brain shows a stable empty state instead of a loading spinner", () => {
+  useHaloStore.getState().applyConnectionEvent({ type: "ws_unavailable" });
+  render(<MemoryView active sendMemoryEdit={vi.fn()} sendMemoryQuery={vi.fn()} />);
+
+  expect(screen.getByRole("status").textContent).toContain("Memory is unavailable");
+  expect(document.querySelector(".halo-spinner")).toBeNull();
+});
+
 test("soft delete copy stays truthful until the delayed archive request is sent", () => {
   const sendMemoryEdit = vi.fn();
   useHaloStore.setState({ beliefs: { [archived.belief_id]: { ...archived, status: "active" } } });

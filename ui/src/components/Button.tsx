@@ -1,7 +1,7 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import "./primitives.css";
 
-export type ButtonVariant = "primary" | "ghost" | "destructive";
+type ButtonVariant = "primary" | "ghost" | "destructive";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;

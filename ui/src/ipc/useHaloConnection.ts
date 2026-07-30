@@ -4,13 +4,14 @@
 // and reconnects on close. Spec: phase-0-plan.md Step 7.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   CONTRACT_VERSION,
   contractMajor,
   parseIpcMessage,
   type ApprovalResponseMsg,
+  type ConversationHistoryQueryMsg,
   type InterruptMsg,
   type IpcMessage,
   type LanePinMsg,
@@ -25,10 +26,12 @@ import {
 } from "./contract";
 import { flushQueuedMessages, sendOrQueue } from "./queue";
 import { capQueue, dropStaleControlFrames } from "../lib/outboundQueue";
+import { readSession, SessionDiscoveryError } from "./sessionSource";
 
 // Every outbound type the UI can send; one queue/dispatch path for all of them.
 type Outbound =
   | UserMsg
+  | ConversationHistoryQueryMsg
   | TaskOpMsg
   | UndoMsg
   | ApprovalResponseMsg
@@ -40,16 +43,11 @@ type Outbound =
   | SettingsUpdateMsg
   | MicMsg;
 
-interface Session {
-  port: number;
-  token: string;
-}
-
 // "incompatible": the Brain speaks a different contract major — terminal, the
 // reconnect loop stops and the UI tells the user to restart (a retry can't fix
 // a version skew). Distinct from the recoverable "reconnecting".
-export type ConnState = "connecting" | "connected" | "reconnecting" | "incompatible";
-export type SidecarStatus = "unknown" | "starting" | "running" | "restarting" | "error";
+export type ConnState = "connecting" | "connected" | "reconnecting" | "incompatible" | "unavailable";
+type SidecarStatus = "unknown" | "starting" | "running" | "restarting" | "error";
 
 export interface SidecarSnapshot {
   revision: number;
@@ -85,14 +83,21 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
 
   useEffect(() => {
     let torndown = false;
-    let incompatible = false; // terminal contract-major skew: stop reconnecting for good
+    let terminal = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryAttempt = 0;
+    let discoveryFailureReported = false;
+
+    function scheduleRetry() {
+      const delay = [1000, 5000, 30_000][Math.min(retryAttempt++, 2)];
+      retryTimer = setTimeout(connect, delay);
+    }
 
     // Enter the terminal incompatible state: detach handlers before closing so
     // the intentional close doesn't fall into the reconnect loop (same pattern
     // the effect cleanup uses), then surface the persistent state.
     function stopForIncompatible(ws: WebSocket) {
-      incompatible = true;
+      terminal = true;
       if (retryTimer) clearTimeout(retryTimer);
       ws.onclose = null;
       ws.onmessage = null;
@@ -104,10 +109,10 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     }
 
     function connect() {
-      if (torndown || incompatible) return;
+      if (torndown || terminal) return;
       setConnState((s) => (s === "connected" ? "reconnecting" : s));
 
-      invoke<Session>("read_session")
+      readSession()
         .then((session) => {
           if (torndown) return;
           if (queuedForPortRef.current !== null && queuedForPortRef.current !== session.port) {
@@ -189,6 +194,8 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
                 return;
               }
               authenticatedRef.current = true;
+              retryAttempt = 0;
+              discoveryFailureReported = false;
               setConnState("connected");
               return;
             }
@@ -204,46 +211,57 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
               wsRef.current = null;
               authenticatedRef.current = false;
             }
-            if (torndown || incompatible) return;
+            if (torndown || terminal) return;
             setConnState("reconnecting");
-            // ponytail: fixed ~1s retry; the real backoff ladder (1s/5s/30s)
-            // already lives in supervisor.rs for the process itself.
-            retryTimer = setTimeout(connect, 1000);
+            scheduleRetry();
           };
         })
         .catch((e) => {
           if (torndown) return;
-          console.error("halo: read_session failed, retrying", e);
-          retryTimer = setTimeout(connect, 1000);
+          if (e instanceof SessionDiscoveryError && !e.retryable) {
+            terminal = true;
+            setConnState("unavailable");
+            return;
+          }
+          setConnState("reconnecting");
+          if (!discoveryFailureReported) {
+            console.warn("halo: Brain session is not ready; retrying");
+            discoveryFailureReported = true;
+          }
+          scheduleRetry();
         });
     }
 
     connect();
 
-    const unlisten = listen<SidecarEvent>("sidecar-state", (e) => {
-      setSidecars((current) =>
-        e.payload.revision > current.revision
-          ? { ...current, revision: e.payload.revision, [e.payload.process]: e.payload.state }
-          : current,
-      );
-    });
-    // Register for deltas first, then hydrate. Revisions prevent an older
-    // command response from overwriting an event that arrived in between.
-    void unlisten
-      .then(() => invoke<SidecarSnapshot>("sidecar_snapshot"))
-      .then((snapshot) => {
-        if (!torndown) {
-          setSidecars((current) => (snapshot.revision > current.revision ? snapshot : current));
-        }
-      })
-      .catch((error) => {
-        if (!torndown) console.error("halo: failed to hydrate sidecar state", error);
-      });
+    const unlisten = isTauri()
+      ? listen<SidecarEvent>("sidecar-state", (e) => {
+          setSidecars((current) =>
+            e.payload.revision > current.revision
+              ? { ...current, revision: e.payload.revision, [e.payload.process]: e.payload.state }
+              : current,
+          );
+        })
+      : undefined;
+    if (unlisten) {
+      // Register for deltas first, then hydrate. Revisions prevent an older
+      // command response from overwriting an event that arrived in between.
+      void unlisten
+        .then(() => invoke<SidecarSnapshot>("sidecar_snapshot"))
+        .then((snapshot) => {
+          if (!torndown) {
+            setSidecars((current) => (snapshot.revision > current.revision ? snapshot : current));
+          }
+        })
+        .catch((error) => {
+          if (!torndown) console.error("halo: failed to hydrate sidecar state", error);
+        });
+    }
 
     return () => {
       torndown = true;
       if (retryTimer) clearTimeout(retryTimer);
-      void unlisten.then((f) => f()).catch(() => {});
+      if (unlisten) void unlisten.then((f) => f()).catch(() => {});
       const ws = wsRef.current;
       if (ws) {
         // Clear handlers first so the intentional teardown close doesn't
@@ -294,6 +312,11 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const sendUserMsg = useCallback(
     (conversation_id: string, text: string) =>
       dispatch({ type: "user_msg", ...env(), text, conversation_id, source: "ui" }),
+    [dispatch],
+  );
+  const sendConversationHistoryQuery = useCallback(
+    (conversation_id: string) =>
+      dispatch({ type: "conversation_history_query", ...env(), conversation_id }),
     [dispatch],
   );
   const sendTaskOp = useCallback(
@@ -349,10 +372,8 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     (skill_name: string, op: SkillOpMsg["op"]) => dispatch({ type: "skill_op", ...env(), skill_name, op }),
     [dispatch],
   );
-  // Settings view (Step 13): a toggle/value change. No confirming frame is
-  // expected — settings apply locally (theme) or are display-only against the
-  // mock (rule: "settings that need a real backend render disabled" — this
-  // sender exists for the toggles that ARE wired, not a promise every key does).
+  // Settings view: send a toggle/value change. The Brain confirms persisted
+  // settings with settings_state; theme remains a local UI preference.
   const sendSettingsUpdate = useCallback(
     (key: string, value: unknown) => dispatch({ type: "settings_update", ...env(), key, value }),
     [dispatch],
@@ -368,6 +389,7 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
     connState,
     sidecars,
     sendUserMsg,
+    sendConversationHistoryQuery,
     sendTaskOp,
     sendUndo,
     sendApprovalResponse,

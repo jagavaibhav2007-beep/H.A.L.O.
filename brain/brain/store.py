@@ -17,7 +17,7 @@ import sqlite3
 import uuid
 from functools import wraps
 from threading import RLock
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import sqlite_vec  # hard dep -- hoisted so it isn't re-imported inside three hot functions

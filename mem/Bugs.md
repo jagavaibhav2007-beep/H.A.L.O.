@@ -386,6 +386,18 @@
 **Fix:** `minmax(0, 1fr)` on the grid tracks + `min-width:0` on the narration flex child. Verified empirically (not just by reading CSS) via the browser preview at the real 360×52 size with a 512px-wide narration string injected: `.capsule` scrollWidth == clientWidth (0 overflow), mic indicator's rect fully inside the pill.
 **Never do:** don't mark a CSS overflow finding "fixed" from source reading alone when it was deferred for exactly that reason the first time — measure `scrollWidth`/`getBoundingClientRect()` in the actual running window size.
 
+## Restored chat sessions showed storage status instead of their transcript - 2026-07-30
+**Severity:** High UX/data-visibility defect. **Symptom:** selecting an old session showed that its messages were stored in the Brain, but the conversation itself was blank and could not be read before continuing.
+**Root cause:** LangGraph checkpoints persisted the messages, but connect hydration intentionally replayed only tasks, approvals, beliefs, and activity. There was no IPC request to fetch displayable checkpoint messages, and the UI copy treated an empty store as a deliberate final state.
+**Fix:** added the versioned `conversation_history_query`/`conversation_history_state` contract, a real-Brain checkpoint reader, a mock response, reducer hydration, and ChatView request/retry/loading/empty states. Regression coverage proves filtering of internal messages, unknown-thread emptiness, cross-conversation ordering, duplicate protection, and continuation after hydration; live browser QA confirmed reload plus a context-dependent follow-up.
+**Never do:** never treat "the backend still has context" as equivalent to "the user can see the conversation." Whenever connect snapshots omit durable transcript data for boundedness, provide and test an explicit on-demand history path.
+
+## Browser launcher could leave a stale session file after stopping its Brain - 2026-07-30
+**Severity:** High development reliability/security boundary risk. **Symptom:** force-stopping the browser-mode Brain could leave `%LOCALAPPDATA%\\Halo\\session.json` behind, allowing the next browser start to discover a dead port/token pair.
+**Root cause:** Brain shutdown cleanup is not guaranteed when the launcher terminates the child process directly, and the first launcher cleanup path did not own the session-file lifecycle.
+**Fix:** `dev.ps1 -Browser` records the token from the Brain it started and, in `finally`, removes `session.json` only when the current file still contains that exact token. It also stops only its tracked child and restores the environment/location.
+**Never do:** never delete a shared session file by path alone during cleanup; compare the ownership token first so a replacement or independently started Brain cannot be disrupted.
+
 ## An audit's "dead branch" finding was tool-specific; removing it broke a live guard — 2026-07-29
 **Severity:** High (test-breaking regression introduced while fixing the audit's own P2 list).
 **Symptom:** `gate.py`'s `_execute_tail` stopped appending `(no matches)` to an empty tool result, based on the audit's note that "no registered tool returns a list any more." `test_toolcall.py`'s `check_empty_result` (which registers a `[]`-returning test tool specifically to exercise this path) started failing: `assert "no matches" in tool_msg["content"]`.

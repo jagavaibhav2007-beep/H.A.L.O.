@@ -7,6 +7,7 @@ The canonical WebSocket message schema between the three processes, plus who lau
 - **Port:** Brain binds a random free loopback port and writes `{port, token}` to a user-only file (`%LOCALAPPDATA%\Halo\session.json`). UI and Voice read it to connect. No hard-coded ports.
 - **Auth:** every WS connection's first frame is `{type:"hello", token}` — the per-session random token from that file. Wrong/missing token → connection dropped; success → Brain sends `hello_ack`. Clients must not send or flush application messages until that acknowledgement arrives. This closes the "any local process can drive the Brain or approve its own Tier-3 gates" hole; the permission gate is only a real choke point if the transport is authenticated.
 - **Supervision:** Tauri watches sidecar exit; restarts with backoff (1s/5s/30s, then surface error state in UI). Brain death → UI "reconnecting", inputs queued locally; Voice buffers the last utterance.
+- **Browser development adapter:** `dev.ps1 -Browser` starts a tracked real Brain and enables a loopback-only Vite endpoint that fresh-reads `session.json` for the web UI. It is disabled by default, sends `Cache-Control: no-store`, and does not change the Brain endpoint or production Tauri process model.
 
 ## Message envelope
 All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and is the **message** id; replies reference `reply_to`. Payload fields never reuse the key `id` (a payload `id` would clobber the envelope `id` once flattened) — domain identities get their own name, e.g. `approval_request.approval_id`.
@@ -16,6 +17,7 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and 
 |---|---|---|
 | `hello` | `token, role?:"ui"\|"voice"` | first frame, both clients; `role` (default `"ui"`) selects the outbound routing subset — see Routing below |
 | `user_msg` | `text, conversation_id, source:"ui"\|"voice"` | **one shape for both clients** — voice includes conversation_id too |
+| `conversation_history_query` | `conversation_id` | request the latest persisted user/assistant transcript for a restored thread |
 | `interrupt` | `conversation_id` | typed **or** spoken "stop" — both clients can send it |
 | `approval_response` | `reply_to (approval_request approval_id), decision:"approve"\|"deny"\|"edit", edited_args?` | closes the Tier-3 round-trip |
 | `memory_edit` | `belief_id, op:"edit"\|"delete"\|"restore"\|"purge", text?` | memory panel; `purge` is allowed only for archived beliefs |
@@ -32,6 +34,7 @@ All messages: `{type, id, ts, ...payload}`. `id` is sender-generated (uuid) and 
 |---|---|---|
 | `hello_ack` | none | confirms the connection is authenticated; clients may now flush queued application messages |
 | `token` | `text, conversation_id` | streamed reply tokens |
+| `conversation_history_state` | `conversation_id, turns:[{role:"user"\|"assistant", text}]` | displayable transcript from the latest LangGraph checkpoint; tool/system messages stay internal |
 | `activity` | `text, narrate:bool, task_id, undoable:bool, undo_token?, tier?:1\|2\|3, lane?:1\|2\|3` | feed events; `narrate:true` → Voice speaks it; **`undoable:false` shown explicitly** (sent email ≠ reversible); `tier`/`lane` drive the feed's chips and filters |
 | `approval_request` | `approval_id, tool, args_redacted, tier, task_id, summary?, destructive?:bool, conversation_id?` | suspends via `interrupt()`; resumed by `approval_response` whose `reply_to` = this `approval_id`; `summary` is the one plain sentence the card leads with; `destructive` drives the red-border / hold-to-approve / no-voice-approval variant; `conversation_id` names the suspended thread — approve/deny/edit don't need it (the Brain resolves them by `approval_id`), but the card's "Stop this task" sends `interrupt`, which **is** keyed by conversation, so without it a UI with several conversations open would interrupt whichever thread is on screen rather than the one that asked. Optional (older frames may omit it); the UI falls back to the active conversation |
 | `done` | `conversation_id, task_id?, interrupted?:bool` | turn/task complete; `interrupted:true` closes the active assistant turn as stopped rather than completed |

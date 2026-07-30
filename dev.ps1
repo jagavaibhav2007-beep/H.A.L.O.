@@ -5,6 +5,8 @@
 #        ./dev.ps1 -Smoke  runs only the Phase 0/1/2 protocol phase checks.
 #        ./dev.ps1 -Verify runs the full automated repository gate: contract
 #        sync, Python suites, UI checks/build, Rust tests, and phase checks.
+#        ./dev.ps1 -Browser starts the real Brain plus a loopback-only Vite
+#        workspace; the tracked Brain child stops when this script exits.
 #        ./dev.ps1 -Mock  runs the scripted mock Brain (Phase 1 Step 2). With
 #        the default (-Only all) it launches the full app: Tauri spawns the
 #        Brain with --mock via the HALO_MOCK env var, so the real UI talks to
@@ -20,6 +22,7 @@ param(
 
     [switch]$Smoke,
     [switch]$Verify,
+    [switch]$Browser,
     [switch]$Mock,
     [switch]$WatchNative
 )
@@ -32,8 +35,13 @@ if ($Smoke -and $Verify) {
     exit 2
 }
 
-if (($Smoke -or $Verify) -and ($Mock -or $WatchNative -or $Only -ne "all")) {
+if (($Smoke -or $Verify) -and ($Mock -or $Browser -or $WatchNative -or $Only -ne "all")) {
     Write-Error "-Smoke and -Verify cannot be combined with -Only, -Mock, or -WatchNative."
+    exit 2
+}
+
+if ($Browser -and ($Mock -or $WatchNative -or $Only -ne "all")) {
+    Write-Error "-Browser cannot be combined with -Only, -Mock, or -WatchNative."
     exit 2
 }
 
@@ -83,6 +91,77 @@ function Start-Voice {
     Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\voice'; python -m voice"
 }
 
+function Start-Browser {
+    $python = Resolve-PythonLauncher
+    $logDir = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Halo"
+    $sessionPath = Join-Path $logDir "session.json"
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $brainArguments = @($python.Arguments | Where-Object { $_ }) + @("-m", "brain")
+    $brainStartedAfter = [DateTime]::UtcNow
+    $brainProcess = Start-Process `
+        -FilePath $python.Command `
+        -ArgumentList $brainArguments `
+        -WorkingDirectory "$root\brain" `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $logDir "brain-browser.out.log") `
+        -RedirectStandardError (Join-Path $logDir "brain-browser.err.log") `
+        -PassThru `
+        -ErrorAction Stop
+    $ownedToken = $null
+    $hadBrowserEnv = Test-Path Env:HALO_BROWSER_DEV
+    $previousBrowserEnv = $env:HALO_BROWSER_DEV
+    $locationPushed = $false
+    try {
+        for ($attempt = 0; $attempt -lt 100 -and -not $ownedToken; $attempt++) {
+            if ($brainProcess.HasExited) {
+                throw "Brain exited before browser mode was ready. See $logDir\brain-browser.err.log."
+            }
+            if (Test-Path -LiteralPath $sessionPath -PathType Leaf) {
+                $sessionFile = Get-Item -LiteralPath $sessionPath
+                if ($sessionFile.LastWriteTimeUtc -ge $brainStartedAfter) {
+                    try {
+                        $ownedToken = (Get-Content -Raw -LiteralPath $sessionPath | ConvertFrom-Json).token
+                    } catch {
+                        $ownedToken = $null
+                    }
+                }
+            }
+            if (-not $ownedToken) { Start-Sleep -Milliseconds 50 }
+        }
+        if (-not $ownedToken) {
+            throw "Brain did not create a valid browser session. See $logDir\brain-browser.err.log."
+        }
+        $env:HALO_BROWSER_DEV = "1"
+        Write-Host "Browser workspace: http://127.0.0.1:1420/"
+        Write-Host "Brain logs: $logDir"
+        Push-Location "$root\ui"
+        $locationPushed = $true
+        & npm run dev -- --open
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    } finally {
+        if ($locationPushed) { Pop-Location }
+        if ($hadBrowserEnv) {
+            $env:HALO_BROWSER_DEV = $previousBrowserEnv
+        } else {
+            Remove-Item Env:HALO_BROWSER_DEV -ErrorAction SilentlyContinue
+        }
+        if (-not $brainProcess.HasExited) {
+            Stop-Process -Id $brainProcess.Id
+            $brainProcess.WaitForExit()
+        }
+        if ($ownedToken -and (Test-Path -LiteralPath $sessionPath -PathType Leaf)) {
+            try {
+                $currentToken = (Get-Content -Raw -LiteralPath $sessionPath | ConvertFrom-Json).token
+                if ($currentToken -eq $ownedToken) {
+                    Remove-Item -LiteralPath $sessionPath
+                }
+            } catch {
+                Write-Warning "Could not clean up the browser Brain session file: $sessionPath"
+            }
+        }
+    }
+}
+
 if ($Smoke) {
     $python = Resolve-PythonLauncher
     Invoke-Python -Launcher $python -Arguments @("$root\shared\smoke_test.py")
@@ -97,6 +176,11 @@ if ($Smoke) {
 
 if ($Verify) {
     & "$root\verify.ps1"
+    exit $LASTEXITCODE
+}
+
+if ($Browser) {
+    Start-Browser
     exit $LASTEXITCODE
 }
 

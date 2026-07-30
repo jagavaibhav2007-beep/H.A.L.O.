@@ -136,6 +136,31 @@ expectRejected(
   { type: "error", id: "x", ts: "x", code: "x", message: "x", recoverable: true, operation_kind: "undo" },
   "operation correlation fields must be paired",
 );
+const historyFrame = {
+  type: "conversation_history_state",
+  id: "history",
+  ts: "2026-07-30T00:00:00Z",
+  conversation_id: "chat",
+  turns: [{ role: "user", text: "hello" }],
+};
+expectRejected({ ...historyFrame, turns: {} }, "history turns must be an array");
+expectRejected(
+  { ...historyFrame, turns: [{ role: "system", text: "hidden" }] },
+  "history roles are user or assistant only",
+);
+expectRejected(
+  { ...historyFrame, turns: [{ role: [], text: "hidden" }] },
+  "history roles must be scalar strings",
+);
+expectRejected({ ...historyFrame, turns: [null] }, "history turns must be objects");
+expectRejected(
+  { ...historyFrame, turns: [{ role: "user", text: 42 }] },
+  "history turn text must be a string",
+);
+expectRejected(
+  { ...historyFrame, turns: [{ role: "user", text: "hello", tool_calls: [] }] },
+  "history turns cannot smuggle undeclared fields",
+);
 
 function expectAccepted(raw: unknown, why: string) {
   try {
@@ -144,6 +169,8 @@ function expectAccepted(raw: unknown, why: string) {
     throw new Error(`expected acceptance (${why}): ${e}`);
   }
 }
+
+expectAccepted(historyFrame, "well-formed conversation history");
 
 // Regression: useHaloConnection.ts builds outbound messages via object-literal
 // spread of an optional param, e.g. `{ ..., belief_id, op, text }` where `text`
@@ -177,6 +204,7 @@ for (const [type, spec] of Object.entries(CONTRACT_SPEC.messages)) {
   for (const [field, fieldSpec] of Object.entries(spec.fields)) {
     frame[field] = sampleValue(fieldSpec);
   }
+  if (type === "conversation_history_state") frame.turns = historyFrame.turns;
   expectAccepted(frame, `generated complete ${type}`);
   for (const [field, fieldSpec] of Object.entries(spec.fields)) {
     expectRejected({ ...frame, [field]: invalidValue(fieldSpec) }, `${type}.${field} invalid value`);

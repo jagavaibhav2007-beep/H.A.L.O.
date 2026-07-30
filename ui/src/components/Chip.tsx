@@ -2,7 +2,7 @@ import type { LucideIcon as LucideIconType } from "lucide-react";
 import { Icon } from "./Icon";
 import "./primitives.css";
 
-export type ChipTone = "default" | "primary" | "tier3" | "destructive" | "success" | "muted";
+type ChipTone = "default" | "primary" | "tier3" | "destructive" | "success" | "muted";
 
 interface ChipProps {
   icon: LucideIconType;

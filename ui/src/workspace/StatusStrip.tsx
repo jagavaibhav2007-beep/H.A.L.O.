@@ -43,6 +43,7 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
   const runningTask = useHaloStore(selectRunningTask);
   const voice = useHaloStore(selectVoice);
   const capabilities = useHaloStore(selectCapabilities);
+  const wsStatus = useHaloStore((state) => state.connection.wsStatus);
   const tasks = useHaloStore(selectTasks);
   const operationErrors = useHaloStore(selectOperationErrors);
   const { pending, failures, begin } = usePendingConfirm(tasks, operationErrors);
@@ -70,7 +71,7 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
       <span className="status-mic">
         <Icon icon={capabilities.voiceInput === true && voice.state !== "muted" ? Mic : MicOff} size={16} />
         <span>
-          {capabilities.voiceInput === false
+          {capabilities.voiceInput === false || wsStatus === "unavailable"
             ? "Voice unavailable"
             : capabilities.voiceInput == null
               ? "Checking voice"

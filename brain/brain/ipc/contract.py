@@ -28,7 +28,7 @@ class IpcEnvelope(TypedDict):
 # envelope/field change; a major mismatch across the WS is refused loudly on
 # both sides. Hand-mirrored with ui/src/ipc/contract.ts CONTRACT_VERSION and
 # shared/ipc-contract.json "version" -- check_contract_sync.py compares them.
-CONTRACT_VERSION = "1.1"
+CONTRACT_VERSION = "1.2"
 
 
 def contract_major(version: object) -> int | None:
@@ -50,6 +50,10 @@ class UserMsg(IpcEnvelope):
     text: str
     conversation_id: str
     source: Literal["ui", "voice"]
+
+
+class ConversationHistoryQueryMsg(IpcEnvelope):
+    conversation_id: str
 
 
 class InterruptMsg(IpcEnvelope):
@@ -110,6 +114,16 @@ class HelloAckMsg(IpcEnvelope):
 class TokenMsg(IpcEnvelope):
     text: str
     conversation_id: str
+
+
+class ConversationHistoryTurn(TypedDict):
+    role: Literal["user", "assistant"]
+    text: str
+
+
+class ConversationHistoryStateMsg(IpcEnvelope):
+    conversation_id: str
+    turns: list[ConversationHistoryTurn]
 
 
 class ActivityMsg(IpcEnvelope):
@@ -238,6 +252,7 @@ class SkillStateMsg(IpcEnvelope):
 IpcMessage = Union[
     HelloMsg,
     UserMsg,
+    ConversationHistoryQueryMsg,
     InterruptMsg,
     ApprovalResponseMsg,
     MemoryEditMsg,
@@ -250,6 +265,7 @@ IpcMessage = Union[
     UndoMsg,
     HelloAckMsg,
     TokenMsg,
+    ConversationHistoryStateMsg,
     ActivityMsg,
     ApprovalRequestMsg,
     DoneMsg,
@@ -297,6 +313,7 @@ CONTRACT_SPEC: dict = {
         "user_msg": _message(IN, ["text", "conversation_id", "source"], {
             "text": _field(S), "conversation_id": _field(S), "source": _field(S, ["ui", "voice"]),
         }),
+        "conversation_history_query": _message(IN, ["conversation_id"], {"conversation_id": _field(S)}),
         "interrupt": _message(IN, ["conversation_id"], {"conversation_id": _field(S)}),
         "approval_response": _message(IN, ["reply_to", "decision"], {
             "reply_to": _field(S), "decision": _field(S, ["approve", "deny", "edit"]),
@@ -319,6 +336,9 @@ CONTRACT_SPEC: dict = {
         "hello_ack": _message(OUT, [], {"contract_version": _field(S)}),
         "token": _message(OUT, ["text", "conversation_id"], {
             "text": _field(S), "conversation_id": _field(S),
+        }),
+        "conversation_history_state": _message(OUT, ["conversation_id", "turns"], {
+            "conversation_id": _field(S), "turns": _field(J),
         }),
         "activity": _message(OUT, ["text", "narrate", "task_id", "undoable"], {
             "text": _field(S), "narrate": _field(B), "task_id": _field(S), "undoable": _field(B),
@@ -388,9 +408,6 @@ CONTRACT_SPEC: dict = {
 REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     name: tuple(spec["required"]) for name, spec in CONTRACT_SPEC["messages"].items()
 }
-DIRECTIONS: dict[str, str] = {
-    name: spec["direction"] for name, spec in CONTRACT_SPEC["messages"].items()
-}
 
 
 class IpcValidationError(ValueError):
@@ -420,6 +437,16 @@ def _value_matches(value: object, field_spec: dict) -> bool:
         J: _is_json_value(value),
     }.get(kind, False)
     return matches and ("enum" not in field_spec or value in field_spec["enum"])
+
+
+def _valid_conversation_history(value: object) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(turn, dict)
+        and set(turn) == {"role", "text"}
+        and turn["role"] in ("user", "assistant")
+        and isinstance(turn["text"], str)
+        for turn in value
+    )
 
 
 def _sample_value(field_spec: dict) -> object:
@@ -474,6 +501,8 @@ def parse_ipc_message(raw: object, expected_direction: Literal["inbound", "outbo
             raise IpcValidationError(f'ipc: "{msg_type}" field "{field}" has an invalid value')
     if msg_type == "error" and (("operation_kind" in raw) != ("operation_id" in raw)):
         raise IpcValidationError('ipc: "error" operation_kind and operation_id must appear together')
+    if msg_type == "conversation_history_state" and not _valid_conversation_history(raw["turns"]):
+        raise IpcValidationError('ipc: "conversation_history_state" turns have an invalid shape')
 
     return raw  # type: ignore[return-value]
 
@@ -523,6 +552,26 @@ def _self_check() -> None:
         else:
             raise AssertionError("expected non-scalar lane to be rejected")
 
+    history = {
+        "type": "conversation_history_state", "id": "history", "ts": "2026-07-30T00:00:00Z",
+        "conversation_id": "chat", "turns": [{"role": "user", "text": "hello"}],
+    }
+    parse_ipc_message(history)
+    for turns in (
+        {},
+        [{"role": "system", "text": "hidden"}],
+        [{"role": [], "text": "hidden"}],
+        [None],
+        [{"role": "user", "text": 42}],
+        [{"role": "user", "text": "hello", "tool_calls": []}],
+    ):
+        try:
+            parse_ipc_message({**history, "turns": turns})
+        except IpcValidationError:
+            pass
+        else:
+            raise AssertionError(f"expected malformed conversation history to be rejected: {turns}")
+
     # Regression: these malformed outbound values previously passed because
     # runtime validation covered only a small inbound-oriented field subset.
     for malformed in (
@@ -547,6 +596,8 @@ def _self_check() -> None:
         frame = {"type": msg_type, "id": "x", "ts": "x"}
         for field, field_spec in spec["fields"].items():
             frame[field] = _sample_value(field_spec)
+        if msg_type == "conversation_history_state":
+            frame["turns"] = history["turns"]
         parse_ipc_message(frame, spec["direction"])
         opposite = "outbound" if spec["direction"] == "inbound" else "inbound"
         try:

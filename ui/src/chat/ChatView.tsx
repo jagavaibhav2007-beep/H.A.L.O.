@@ -34,13 +34,22 @@ interface ChatViewProps {
   conversationId: string;
   connState: ConnState;
   sendUserMsg: (conversationId: string, text: string) => void;
+  sendConversationHistoryQuery?: (conversationId: string) => void;
   sendInterrupt: (conversationId: string) => string;
   sendMic: (op: "mute" | "unmute") => void;
   /** Kept on the real textarea so the workspace's Ctrl+K focus still lands. */
   inputId: string;
 }
 
-export function ChatView({ conversationId, connState, sendUserMsg, sendInterrupt, sendMic, inputId }: ChatViewProps) {
+export function ChatView({
+  conversationId,
+  connState,
+  sendUserMsg,
+  sendConversationHistoryQuery,
+  sendInterrupt,
+  sendMic,
+  inputId,
+}: ChatViewProps) {
   const conv = useHaloStore(selectConversation(conversationId));
   const activities = useHaloStore(selectActivities);
   const voice = useHaloStore(selectVoice);
@@ -64,6 +73,7 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendInterrupt
 
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const lastSentRef = useRef<Record<string, string>>({});
+  const historyRequestedRef = useRef(new Set<string>());
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true); // autoscroll only while the user sits at the bottom (rule 6)
 
@@ -82,7 +92,7 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendInterrupt
   const send = useCallback(
     (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || connState === "incompatible") return;
+      if (!trimmed || connState === "incompatible" || connState === "unavailable") return;
       lastSentRef.current[conversationId] = trimmed;
       if (activeAssistantId && trimmed.toLowerCase() === "stop") {
         appendLocalUserTurn(conversationId, trimmed, crypto.randomUUID());
@@ -147,7 +157,22 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendInterrupt
   // continues with full context) but the UI store starts empty and nothing
   // replays past turns on connect. Say so plainly rather than render a blank
   // panel that reads as data loss.
-  const restored = empty && chats.all.find((c) => c.id === conversationId)?.restored;
+  const restored = Boolean(empty && chats.all.find((c) => c.id === conversationId)?.restored);
+  const historyLoaded = conv?.historyLoaded === true;
+  useEffect(() => {
+    if (connState !== "connected") {
+      historyRequestedRef.current.clear();
+      return;
+    }
+    if (
+      !restored
+      || historyLoaded
+      || !sendConversationHistoryQuery
+      || historyRequestedRef.current.has(conversationId)
+    ) return;
+    historyRequestedRef.current.add(conversationId);
+    sendConversationHistoryQuery(conversationId);
+  }, [restored, historyLoaded, connState, conversationId, sendConversationHistoryQuery]);
   const latestAssistant = [...turns].reverse().find((turn): turn is AssistantTurn => turn.role === "assistant");
   // First person, one sentence, plain (ui_ux/00-design-language.md "Voice of
   // the interface") — these are screen-reader-only (the sr-only live region
@@ -156,6 +181,8 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendInterrupt
   const connectionStatus =
     connState === "incompatible"
       ? "I'm running a different protocol version — please restart the app to update."
+      : connState === "unavailable"
+        ? "Halo isn't running in this browser. Start it with the browser launcher to continue."
       : connState === "reconnecting"
         ? "I'm reconnecting. Your message will send once I'm back."
         : connState === "connecting"
@@ -179,9 +206,15 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendInterrupt
       <div className="halo-scroll chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {empty ? (
           <div className="chat-empty">
-            {restored ? (
+            {connState === "unavailable" ? (
+              <p className="chat-empty-line">Start Halo with ./dev.ps1 -Browser to chat here.</p>
+            ) : restored ? (
               <p className="chat-empty-line">
-                Earlier messages in this thread are on the Brain — send a message to pick it up where you left off.
+                {historyLoaded
+                    ? "This conversation has no earlier messages."
+                    : connState === "connected"
+                      ? "Loading earlier messages…"
+                      : "Earlier messages will load when Halo reconnects."}
               </p>
             ) : (
               <>
@@ -214,7 +247,8 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendInterrupt
                   key={t.id}
                   turn={t}
                   activities={activities}
-                  canInterrupt={t.role === "assistant" && t.id === activeAssistantId}
+                  canInterrupt={connState === "connected" && t.role === "assistant" && t.id === activeAssistantId}
+                  queued={connState !== "connected"}
                   onInterrupt={() => sendInterrupt(conversationId)}
                   onRetry={retryText ? () => send(retryText) : undefined}
                 />
@@ -255,12 +289,20 @@ export function ChatView({ conversationId, connState, sendUserMsg, sendInterrupt
             setDrafts((current) => ({ ...current, [conversationId]: value }));
           }}
           onKeyDown={onKeyDown}
-          disabled={connState === "incompatible"}
-          placeholder={connState === "incompatible" ? "Restart Halo to continue…" : "Message Halo…"}
+          disabled={connState === "incompatible" || connState === "unavailable"}
+          placeholder={
+            connState === "incompatible"
+              ? "Restart Halo to continue…"
+              : connState === "unavailable"
+                ? "Start Halo in browser mode to continue…"
+                : "Message Halo…"
+          }
           rows={1}
         />
         {connState === "incompatible" ? (
           <span className="chat-queued-badge">restart to update</span>
+        ) : connState === "unavailable" ? (
+          <span className="chat-queued-badge">browser connection unavailable</span>
         ) : connState !== "connected" ? (
           <span className="chat-queued-badge">will send when reconnected</span>
         ) : null}
@@ -273,12 +315,14 @@ function TurnRow({
   turn,
   activities,
   canInterrupt,
+  queued,
   onInterrupt,
   onRetry,
 }: {
   turn: Turn;
   activities: ActivityMsg[];
   canInterrupt: boolean;
+  queued: boolean;
   onInterrupt: () => string;
   onRetry?: () => void;
 }) {
@@ -297,6 +341,7 @@ function TurnRow({
       turn={turn}
       activities={activities}
       canInterrupt={canInterrupt}
+      queued={queued}
       onInterrupt={onInterrupt}
       onRetry={onRetry}
     />
@@ -307,12 +352,14 @@ function AssistantRow({
   turn,
   activities,
   canInterrupt,
+  queued,
   onInterrupt,
   onRetry,
 }: {
   turn: AssistantTurn;
   activities: ActivityMsg[];
   canInterrupt: boolean;
+  queued: boolean;
   onInterrupt: () => string;
   onRetry?: () => void;
 }) {
@@ -327,7 +374,9 @@ function AssistantRow({
   return (
     <div className="chat-turn chat-turn-halo">
       <div className="chat-bubble chat-bubble-halo">
-        {thinking ? (
+        {thinking && queued ? (
+          <span>Queued — waiting for Halo to reconnect.</span>
+        ) : thinking ? (
           <span className="chat-thinking" aria-hidden="true">
             <span />
             <span />

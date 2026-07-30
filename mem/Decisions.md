@@ -198,3 +198,18 @@ Compact record of phase-2-plan.md's "Architecture decisions" section; see that d
 **What:** `ui_ux/00-design-language.md` specifies "windows and cards = 16px"; four card-level surfaces (`halo-card`, `halo-panel`, `approval-card`, the skills trial drawer) had shipped at 12px, consistently with each other but not the doc. Added a `--radius-card: 16px` token and repointed all four.
 **Why:** the doc is the stated source of truth for visual tokens (per CLAUDE.md's `ui_ux/` guidance) and the discrepancy was undocumented drift, not a deliberate revision — there was no decision record explaining "12px, not 16px." Smaller radii used elsewhere (10px tabs, 14px chat bubbles) are out of the "cards" scope the doc names and were left alone.
 **Trade-off:** a small, uniform visual size bump across four surfaces; verified in the browser that bare `.halo-card`/`.approval-card` compute to 16px post-change.
+
+## Restored conversations use an on-demand transcript query - 2026-07-30
+**What:** supersedes the earlier honest-blank restart behavior. A restored chat now sends `conversation_history_query`; the Brain reads the LangGraph checkpoint and returns only user/assistant text through `conversation_history_state`. The UI hydrates only an empty conversation, marks even an empty response as loaded, and never lets a late history frame replace live turns.
+**Why:** the checkpoint already preserved the conversation context, but the old snapshot intentionally omitted turns, so the user saw that the thread was stored without being able to read or continue the actual transcript. On-demand hydration preserves bounded connect snapshots while making the stored session visible.
+**Trade-off:** tool calls, system messages, and tool output remain internal; only displayable user/assistant text is replayed. History is requested only for restored threads and is retried after reconnect.
+
+## Remove confirmed dead UI scaffold and unused exports - 2026-07-30
+**What:** removed the obsolete `ui/README.md` template, unused orb color tokens, and the unused `.halo-icon-hit` primitive. Component-only type aliases in `Button`, `Chip`, `GlassPanel`, and `Icon` are now private. Added `@types/node` solely for the Vite development middleware typecheck.
+**Why:** repository search showed no runtime consumers for the deleted scaffold and tokens, while the exported aliases widened the module surface without external callers. The browser session plugin legitimately needs Node types because it reads the local session file in Vite's dev process.
+**Trade-off:** future callers must define their own component prop types or use the components' inferred public props; if a removed visual token is needed again, reintroduce it with a real consumer rather than preserving speculative scaffolding.
+
+## Browser development uses a flag-gated session adapter - 2026-07-30
+**What:** `./dev.ps1 -Browser` starts a tracked real Brain and enables a loopback-only Vite middleware that fresh-reads `%LOCALAPPDATA%\Halo\session.json` for the browser UI. Native Tauri discovery remains unchanged. On exit, the launcher removes the session file only when its token still matches the Brain it started.
+**Why:** browsers cannot invoke Tauri's `read_session` command, but exposing a new Brain HTTP endpoint or weakening the WebSocket hello-token handshake would change the production trust boundary. The development adapter supplies the same fresh `{port, token}` discovery semantics without becoming a production path.
+**Trade-off:** functional browser mode must be launched through `./dev.ps1 -Browser`; plain `npm run dev` intentionally reports the Brain as unavailable. Browser mode also lacks Tauri sidecar supervision and Voice integration.

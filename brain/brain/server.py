@@ -1,8 +1,7 @@
-"""Brain WebSocket server: loopback bind, session handshake, stub echo turn.
+"""Authenticated loopback WebSocket server for Brain, UI, and Voice.
 
-Phase 0, Steps 3-4 of phase-0-plan.md. Reuses brain.ipc.contract for all
-message shapes and validation -- no second schema, no hand-rolled framing
-(websockets does that).
+All frames use ``brain.ipc.contract``; real mode dispatches the Phase 2
+backend while mock mode serves the scripted UI scenarios.
 """
 
 from __future__ import annotations
@@ -52,10 +51,6 @@ _REAL_TURN_CONCURRENCY = 4
 
 class BrainAlreadyRunning(RuntimeError):
     pass
-
-
-# Module handle so the daily belief-decay task isn't GC'd (Step 8).
-_decay_task: asyncio.Task | None = None
 
 
 def _flock(handle, lock: bool) -> None:
@@ -289,10 +284,10 @@ class _ServerRuntime:
         self.tasks: set[asyncio.Task] = set()
         self.closing = False
 
-    def spawn(self, awaitable, send_fn=None, context: dict | None = None) -> asyncio.Task | None:
+    def spawn(self, awaitable, send_fn=None, context: dict | None = None) -> None:
         if self.closing:
             awaitable.close()
-            return None
+            return
 
         async def supervised() -> None:
             try:
@@ -323,7 +318,6 @@ class _ServerRuntime:
         task = asyncio.create_task(supervised())
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
-        return task
 
     def cancel(self) -> None:
         self.closing = True
@@ -381,7 +375,8 @@ _REAL_UNSUPPORTED_OPS: tuple[str, ...] = ("task_op", "lane_pin", "mic", "skill_o
 # test_server enumerates the contract and fails if this set drifts. Keep it
 # beside the if/elif chain in _connection_handler that it mirrors.
 _REAL_DISPATCH_TYPES: frozenset[str] = frozenset({
-    "user_msg", "settings_update", "interrupt", "approval_response", "memory_edit", "memory_query", "undo",
+    "user_msg", "conversation_history_query", "settings_update", "interrupt", "approval_response",
+    "memory_edit", "memory_query", "undo",
     *_REAL_UNSUPPORTED_OPS,
 })
 
@@ -393,6 +388,7 @@ _MOCK_DISPATCH: dict[str, tuple[str, bool]] = {
     "lane_pin": ("handle_lane_pin", False),
     "memory_edit": ("handle_memory_edit", False),
     "memory_query": ("handle_memory_query", True),
+    "conversation_history_query": ("handle_conversation_history_query", True),
     "skill_op": ("handle_skill_op", False),
     "mic": ("handle_mic", False),
     "settings_update": ("handle_settings_update", True),
@@ -613,6 +609,10 @@ async def _connection_handler(
                 from brain import memory
 
                 runtime.spawn(memory.push_history(send_fn), send_fn, msg)
+            elif not mock and msg["type"] == "conversation_history_query":
+                from brain import graph
+
+                runtime.spawn(graph.push_conversation_history(msg, send_fn), send_fn, msg)
             elif not mock and msg["type"] == "undo":
                 # Step 6: undo is a global feed action, not tied to a
                 # conversation -- no conversation lock; token consumption is
@@ -656,13 +656,12 @@ async def start(
         # Step 8: belief decay -- once at start, then daily. Archive deltas
         # broadcast to whoever is connected at the time (reconnect hydration
         # replays current state anyway).
-        global _decay_task
         from brain import memory
 
         async def _broadcast_all(msg_type: str, payload: dict) -> None:
             await _broadcast(authenticated, msg_type, payload)
 
-        _decay_task = runtime.spawn(memory.decay_loop(_broadcast_all))
+        runtime.spawn(memory.decay_loop(_broadcast_all))
 
     return ManagedServer(server, runtime), token
 

@@ -1,8 +1,4 @@
-"""Entry point for `python -m brain`.
-
-Phase 0 Steps 3-4: starts the WS server (session.json handshake, auth gate,
-stub echo turn). See brain/server.py.
-"""
+"""Start the authenticated Brain WebSocket server with the real Phase 2 backend."""
 
 from brain.server import main
 

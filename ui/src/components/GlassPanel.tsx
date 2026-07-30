@@ -2,7 +2,7 @@ import type { HTMLAttributes, ReactNode } from "react";
 import "../styles/glass.css";
 import "./primitives.css";
 
-export type Elevation = "panel" | "card";
+type Elevation = "panel" | "card";
 
 interface GlassPanelProps extends HTMLAttributes<HTMLDivElement> {
   elevation?: Elevation;

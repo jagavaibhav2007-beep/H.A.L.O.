@@ -76,6 +76,14 @@ async def _history(cid: str) -> list[dict]:
     return snap.values.get("messages", [])
 
 
+async def _query_history(ws, cid: str) -> dict:
+    await ws.send(json.dumps(_frame("conversation_history_query", conversation_id=cid)))
+    while True:
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        if frame["type"] == "conversation_history_state" and frame["conversation_id"] == cid:
+            return frame
+
+
 async def check_stream_and_spend(port: int, token: str) -> None:
     ws = await _connect_auth(port, token)
     try:
@@ -136,16 +144,60 @@ async def check_restart_persistence(port: int, token: str) -> None:
     cid = "g-serial"  # already has 4 messages from check 2
     await graph.aclose()  # simulated Brain restart: checkpointer closed+reopened
     ws = await _connect_auth(port, token)
+    real_stream = llm.stream_chat
+    prompt: list[dict] = []
+
+    async def context_stream(messages, *_args, **_kwargs):
+        prompt.extend(messages)
+        yield "continued with context"
+
+    llm.stream_chat = context_stream
     try:
         await _send_msg(ws, cid, "third")
         reply = await _read_turn(ws, cid)
-        assert "third" in reply, reply
+        assert reply == "continued with context", reply
     finally:
+        llm.stream_chat = real_stream
         await ws.close()
+    user_text = [m["content"] for m in prompt if m.get("role") == "user"]
+    assert user_text[-3:] == ["first", "second", "third"], user_text
     msgs = await _history(cid)
     assert len(msgs) == 6, [m["content"] for m in msgs]
     assert msgs[0]["content"] == "first", msgs  # pre-restart history intact
     print("[check 3] history persists across checkpointer close/reopen (simulated restart): OK")
+
+
+async def check_conversation_history(port: int, token: str) -> None:
+    ws = await _connect_auth(port, token)
+    try:
+        frame = await _query_history(ws, "g-serial")
+        assert frame["conversation_id"] == "g-serial", frame
+        assert [turn["role"] for turn in frame["turns"]] == [
+            "user", "assistant", "user", "assistant", "user", "assistant",
+        ], frame
+        assert frame["turns"][0]["text"] == "first", frame
+        assert frame["turns"][4]["text"] == "third", frame
+
+        g = await graph._ensure_graph()
+        await g.aupdate_state(
+            {"configurable": {"thread_id": "g-filter"}},
+            {"messages": [
+                {"role": "user", "content": "visible question"},
+                {"role": "system", "content": "internal instruction"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call"}]},
+                {"role": "tool", "content": "private tool output", "tool_call_id": "call"},
+                {"role": "assistant", "content": "visible answer"},
+            ]},
+        )
+        filtered = await _query_history(ws, "g-filter")
+        assert filtered["turns"] == [
+            {"role": "user", "text": "visible question"},
+            {"role": "assistant", "text": "visible answer"},
+        ], filtered
+        assert (await _query_history(ws, "missing-conversation"))["turns"] == []
+    finally:
+        await ws.close()
+    print("[check 3b] history replay filters internals and handles unknown conversations: OK")
 
 
 async def check_interrupt(port: int, token: str) -> None:
@@ -307,6 +359,7 @@ async def main() -> None:
         await check_stream_and_spend(port, token)
         await check_interleave_and_serialize(port, token)
         await check_restart_persistence(port, token)
+        await check_conversation_history(port, token)
         await check_interrupt(port, token)
         await check_interrupt_stalled_stream(port, token)
         await check_midstream_error_honesty(port, token)

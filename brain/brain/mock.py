@@ -461,6 +461,11 @@ async def handle_memory_query(_msg: dict, send: SendFn) -> None:
 
 
 @_swallow_closed
+async def handle_conversation_history_query(msg: dict, send: SendFn) -> None:
+    await send("conversation_history_state", {"conversation_id": msg["conversation_id"], "turns": []})
+
+
+@_swallow_closed
 async def handle_skill_op(msg: dict, broadcast: BroadcastFn) -> None:
     """Skills panel round-trips (Step 13). trial -> stream a scripted dry run
     into the results drawer as narrated activity, no state change; disable ->

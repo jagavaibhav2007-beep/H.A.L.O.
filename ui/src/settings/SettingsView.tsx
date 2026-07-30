@@ -35,6 +35,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   const spend = useHaloStore(selectSpend);
   const capabilities = useHaloStore(selectCapabilities);
   const settings = useHaloStore((s) => s.settings);
+  const wsStatus = useHaloStore((s) => s.connection.wsStatus);
   const keyStatus = settings.openrouter_key;
   const [theme, setThemeState] = useState<Theme>(getTheme());
   const [hotkey, setHotkey] = useState<string | null>(null);
@@ -46,9 +47,10 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   // key — never optimistically.
   const { pending, begin } = usePendingConfirm(settings);
   const keyPending = pending.openrouter_key;
+  const keyUnavailable = wsStatus === "unavailable";
 
   function saveKey() {
-    if (!keyInput || !begin("openrouter_key", "checking…")) return;
+    if (keyUnavailable || !keyInput || !begin("openrouter_key", "checking…")) return;
     sendSettingsUpdate("openrouter_key", keyInput);
     setKeyInput(""); // never lingers in the DOM once sent
   }
@@ -72,7 +74,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   function onTheme(next: Theme) {
     setTheme(next); // instant in this window; watchThemeAcrossWindows() catches the other
     setThemeState(next);
-    sendSettingsUpdate("theme", next);
+    if (!keyUnavailable) sendSettingsUpdate("theme", next);
   }
 
   return (
@@ -134,7 +136,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
           <p className="settings-note">
             {capabilities.voiceInput === true
               ? "Voice controls are available in this session."
-              : capabilities.voiceInput === false
+              : capabilities.voiceInput === false || keyUnavailable
                 ? "Voice input is not available in this build; typed chat still works."
                 : "Checking whether voice input is available…"}
           </p>
@@ -170,21 +172,23 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
               placeholder="sk-or-..."
               autoComplete="off"
               value={keyInput}
-              disabled={!!keyPending}
+              disabled={keyUnavailable || !!keyPending}
               onChange={(e) => setKeyInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && saveKey()}
             />
-            <Button variant="ghost" onClick={saveKey} disabled={!!keyPending || !keyInput}>
+            <Button variant="ghost" onClick={saveKey} disabled={keyUnavailable || !!keyPending || !keyInput}>
               {keyPending ? "Checking…" : "Save"}
             </Button>
           </div>
           <div className="settings-row">
             <span className="settings-value" role="status" data-key-status={keyStatus ?? "unknown"}>
-              {(keyPending != null || !keyStatus) && <span className="halo-spinner" aria-hidden="true" />}
-              {keyPending ?? (keyStatus ? KEY_STATUS_COPY[keyStatus] : "checking stored status…")}
+              {!keyUnavailable && (keyPending != null || !keyStatus) && <span className="halo-spinner" aria-hidden="true" />}
+              {keyUnavailable
+                ? "unavailable until Halo is running"
+                : keyPending ?? (keyStatus ? KEY_STATUS_COPY[keyStatus] : "checking stored status…")}
             </span>
             {keyStatus === "set" && (
-              <Button variant="ghost" onClick={removeKey} disabled={!!keyPending}>
+              <Button variant="ghost" onClick={removeKey} disabled={keyUnavailable || !!keyPending}>
                 Remove key
               </Button>
             )}

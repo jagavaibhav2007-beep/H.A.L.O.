@@ -1,8 +1,6 @@
-// Phase 1 Step 5/6 — the workspace window's content: Step 5's show/hide
-// animation anchored to the orb (Esc-collapses) plus Step 6's shell —
-// sidebar, status strip, view routing, deep-jump and Ctrl+K plumbing. Real
-// panels land in Steps 8-14; every view mounts the same placeholder for now.
-// Spec: phase-1-plan.md Steps 5-6, ui_ux/02-workspace.md.
+// Workspace window shell: orb-anchored show/hide animation, sidebar, status
+// strip, view routing, deep-jump, Ctrl+K focus, and the implemented Phase 1
+// panels. Spec: phase-1-plan.md and ui_ux/02-workspace.md.
 
 import { useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -73,6 +71,7 @@ export function WorkspaceRoot() {
     connState,
     sendTaskOp,
     sendUserMsg,
+    sendConversationHistoryQuery,
     sendUndo,
     sendApprovalResponse,
     sendInterrupt,
@@ -252,6 +251,11 @@ export function WorkspaceRoot() {
                 Halo’s Brain is restarting. Your draft is safe; sending will resume after reconnection.
               </div>
             )}
+            {connState === "unavailable" && (
+              <div className="process-health" role="status">
+                Browser connection unavailable. Start Halo with ./dev.ps1 -Browser to continue.
+              </div>
+            )}
             {voiceStatus === "error" && (
               <div className="process-health process-health-voice" role="status">
                 Voice failed to start. You can keep using typed chat.
@@ -282,6 +286,7 @@ export function WorkspaceRoot() {
                       conversationId={conversationId}
                       connState={connState}
                       sendUserMsg={sendUserMsg}
+                      sendConversationHistoryQuery={sendConversationHistoryQuery}
                       sendInterrupt={sendInterrupt}
                       sendMic={sendMic}
                       inputId={CHAT_INPUT_ID}

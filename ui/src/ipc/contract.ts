@@ -23,7 +23,7 @@ export interface HelloMsg extends IpcEnvelope {
 // envelope/field change; a major mismatch across the WS is refused loudly on
 // both sides. Hand-mirrored with brain/brain/ipc/contract.py CONTRACT_VERSION
 // and shared/ipc-contract.json "version" — check_contract_sync.py compares them.
-export const CONTRACT_VERSION = "1.1";
+export const CONTRACT_VERSION = "1.2";
 export const contractMajor = (v: string | undefined): number | null => {
   if (typeof v !== "string") return null;
   const major = Number.parseInt(v.split(".")[0], 10);
@@ -35,6 +35,11 @@ export interface UserMsg extends IpcEnvelope {
   text: string;
   conversation_id: string;
   source: "ui" | "voice";
+}
+
+export interface ConversationHistoryQueryMsg extends IpcEnvelope {
+  type: "conversation_history_query";
+  conversation_id: string;
 }
 
 export interface InterruptMsg extends IpcEnvelope {
@@ -105,6 +110,12 @@ export interface TokenMsg extends IpcEnvelope {
   type: "token";
   text: string;
   conversation_id: string;
+}
+
+export interface ConversationHistoryStateMsg extends IpcEnvelope {
+  type: "conversation_history_state";
+  conversation_id: string;
+  turns: { role: "user" | "assistant"; text: string }[];
 }
 
 export interface ActivityMsg extends IpcEnvelope {
@@ -258,6 +269,7 @@ export interface SkillStateMsg extends IpcEnvelope {
 export type IpcMessage =
   | HelloMsg
   | UserMsg
+  | ConversationHistoryQueryMsg
   | InterruptMsg
   | ApprovalResponseMsg
   | MemoryEditMsg
@@ -270,6 +282,7 @@ export type IpcMessage =
   | UndoMsg
   | HelloAckMsg
   | TokenMsg
+  | ConversationHistoryStateMsg
   | ActivityMsg
   | ApprovalRequestMsg
   | DoneMsg
@@ -318,6 +331,7 @@ export const CONTRACT_SPEC = {
     user_msg: message(IN, ["text", "conversation_id", "source"], {
       text: field(S), conversation_id: field(S), source: field(S, ["ui", "voice"]),
     }),
+    conversation_history_query: message(IN, ["conversation_id"], { conversation_id: field(S) }),
     interrupt: message(IN, ["conversation_id"], { conversation_id: field(S) }),
     approval_response: message(IN, ["reply_to", "decision"], {
       reply_to: field(S), decision: field(S, ["approve", "deny", "edit"]), edited_args: field(O),
@@ -336,6 +350,9 @@ export const CONTRACT_SPEC = {
     undo: message(IN, ["undo_token"], { undo_token: field(S) }),
     hello_ack: message(OUT, [], { contract_version: field(S) }),
     token: message(OUT, ["text", "conversation_id"], { text: field(S), conversation_id: field(S) }),
+    conversation_history_state: message(OUT, ["conversation_id", "turns"], {
+      conversation_id: field(S), turns: field(J),
+    }),
     activity: message(OUT, ["text", "narrate", "task_id", "undoable"], {
       text: field(S), narrate: field(B), task_id: field(S), undoable: field(B), undo_token: field(S),
       tier: field(I, LANES), lane: field(I, LANES),
@@ -395,12 +412,6 @@ export const CONTRACT_SPEC = {
 
 const MESSAGES: Record<string, RuntimeMessageSpec> = CONTRACT_SPEC.messages;
 const KNOWN_TYPES = new Set(Object.keys(MESSAGES));
-export const REQUIRED_FIELDS: Record<MsgType, readonly string[]> = Object.fromEntries(
-  Object.entries(MESSAGES).map(([name, spec]) => [name, spec.required]),
-) as Record<MsgType, readonly string[]>;
-export const DIRECTIONS: Record<MsgType, IpcDirection> = Object.fromEntries(
-  Object.entries(MESSAGES).map(([name, spec]) => [name, spec.direction]),
-) as Record<MsgType, IpcDirection>;
 
 function isJsonValue(value: unknown): boolean {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
@@ -419,6 +430,19 @@ function valueMatches(value: unknown, spec: RuntimeFieldSpec): boolean {
     : spec.type === "json" ? isJsonValue(value)
     : false;
   return matches && (spec.enum === undefined || spec.enum.includes(value));
+}
+
+function validConversationHistory(value: unknown): boolean {
+  return Array.isArray(value) && value.every((turn) => {
+    if (typeof turn !== "object" || turn === null || Array.isArray(turn)) return false;
+    const fields = Object.keys(turn);
+    const item = turn as Record<string, unknown>;
+    return fields.length === 2
+      && fields.includes("role")
+      && fields.includes("text")
+      && (item.role === "user" || item.role === "assistant")
+      && typeof item.text === "string";
+  });
 }
 
 /** Validate an arbitrary decoded-JSON frame against the contract. Throws on
@@ -486,6 +510,9 @@ export function parseIpcMessage(
   }
   if (type === "error" && (("operation_kind" in obj) !== ("operation_id" in obj))) {
     throw new Error('ipc: "error" operation_kind and operation_id must appear together');
+  }
+  if (type === "conversation_history_state" && !validConversationHistory(obj.turns)) {
+    throw new Error('ipc: "conversation_history_state" turns have an invalid shape');
   }
   return obj as unknown as IpcMessage;
 }

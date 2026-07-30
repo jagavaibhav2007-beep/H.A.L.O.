@@ -5,20 +5,23 @@ Halo is three processes: `ui` (Tauri + React, the parent), `brain` (Python), and
 ## Layout
 
 ```
-ui/      Tauri + Vite + React + TypeScript app (scaffolded via `npm create tauri-app@latest`)
+ui/      Tauri + Vite + React + TypeScript desktop app
 brain/   Python package (brain/__main__.py) — LangGraph agent loop + WS server
-voice/   Python package (voice/__main__.py) — Pipecat audio sidecar
+voice/   Python package (voice/__main__.py) — authenticated idle sidecar; real voice is Phase 3
 shared/  IPC contract source of truth (JSON descriptor) + the TS/Python drift check
 ```
 
-Phase 0 is complete: Tauri supervises the two Python workers, clients authenticate over loopback WebSockets, and the minimal UI completes a stub chat round trip.
+Phases 0–2 are complete: Tauri supervises both Python workers, clients
+authenticate over loopback WebSockets, the React shell is implemented, and
+the default Brain provides the real Phase 2 backend. Voice remains an
+authenticated idle worker until Phase 3.
 
 Brain uses an OS-level lock to prevent multiple instances from competing for `session.json`. After sending `hello`, UI and Voice wait for `hello_ack` before sending application messages.
 
 ## Prerequisites
 
 - Node.js + npm (for `ui/`)
-- **Rust + cargo** (for `ui/src-tauri` — the native Tauri shell). Without this, `npm run tauri dev` cannot open a window; `npm run dev` (plain Vite, browser-only) still works for UI-only iteration.
+- **Rust + cargo** (for `ui/src-tauri` — the native Tauri shell). Without this, use `./dev.ps1 -Browser` for a functional browser workspace. Plain `npm run dev` remains UI-only.
 - Python 3.11+ (for `brain/` and `voice/`)
 
 ## Running each process
@@ -26,8 +29,8 @@ Brain uses an OS-level lock to prevent multiple instances from competing for `se
 ```powershell
 # UI (needs Rust/cargo installed for the native window; falls back to browser preview otherwise)
 cd ui; npm install; npm run tauri dev
-# or, without Rust, just the web layer in a browser tab:
-cd ui; npm run dev
+# or, without Rust, the real Brain plus browser workspace:
+./dev.ps1 -Browser
 
 # Brain (starts the authenticated WebSocket server)
 cd brain; python -m brain
@@ -40,8 +43,15 @@ cd voice; python -m voice
 
 ```powershell
 ./dev.ps1             # launches Tauri; Tauri starts and supervises Brain + Voice
+./dev.ps1 -Browser    # launches the real Brain + functional browser workspace
 ./dev.ps1 -Only brain # standalone worker debugging (brain | voice | ui)
 ```
+
+Browser mode is development-only. Vite fresh-reads
+`%LOCALAPPDATA%\Halo\session.json` through a loopback-only, no-store endpoint;
+the UI still performs the normal authenticated WebSocket `hello` handshake.
+The endpoint returns 404 unless `HALO_BROWSER_DEV=1`, which `dev.ps1 -Browser`
+sets only while Vite runs. Production Tauri behavior is unchanged.
 
 ## Shared IPC contract
 

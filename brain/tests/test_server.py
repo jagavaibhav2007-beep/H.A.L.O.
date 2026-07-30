@@ -549,10 +549,12 @@ async def check_tasks_are_supervised_and_cancelled_on_close() -> None:
         await _drain_snapshot(ws)
         await ws.send(json.dumps(_frame("settings_update", key="openrouter_key", value="secret")))
         await asyncio.wait_for(started.wait(), timeout=1)
+        retained_tasks = tuple(managed._runtime.tasks)
+        assert len(retained_tasks) >= 2  # request handler + daily decay loop
         managed.close()
         await managed.wait_closed()
         await asyncio.wait_for(cancelled.wait(), timeout=1)
-        assert server._decay_task is not None and server._decay_task.done()
+        assert all(task.done() for task in retained_tasks)
     finally:
         server._handle_settings_update = real_handler
         await ws.close()

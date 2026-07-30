@@ -1,3 +1,3 @@
-"""H.A.L.O. Voice — Python/Pipecat sidecar process (Phase 0: empty shell)."""
+"""H.A.L.O. Voice — authenticated idle sidecar awaiting the real voice stack."""
 
 __version__ = "0.1.0"
