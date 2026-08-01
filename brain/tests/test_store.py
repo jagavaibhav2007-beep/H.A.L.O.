@@ -473,7 +473,7 @@ def check_migration_v1_to_v3(tmp: Path) -> None:
     store.close()  # release any live module connection before opening the v1 file
     conn = store.connect(v1_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 5
         cols = {r[1] for r in conn.execute("PRAGMA table_info(belief)").fetchall()}
         assert "valid_at" in cols and "invalid_at" in cols, cols
 
@@ -495,9 +495,12 @@ def check_migration_v1_to_v3(tmp: Path) -> None:
         indexes = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
         assert "idx_action_ts" in indexes, indexes
+        assert "idx_task_state" in indexes, indexes
+        task_cols = {r[1] for r in conn.execute("PRAGMA table_info(task)").fetchall()}
+        assert {"conversation_id", "checkpoint_json", "intent_action_id", "started_at"} <= task_cols
     finally:
         store.close()
-    print("[check 16] v1->v4 migration ALTERs belief, backfills valid_at/invalid_at, creates v2+v3 tables + v4 index: OK")
+    print("[check 16] v1->v5 migration backfills beliefs and creates digest, activity-index, and durable-task state: OK")
 
 
 def check_migration_half_migrated_is_idempotent(tmp: Path) -> None:
@@ -548,7 +551,7 @@ def check_migration_half_migrated_is_idempotent(tmp: Path) -> None:
     store.close()
     conn = store.connect(v1_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 5
         assert store.get_belief("a") is not None
     finally:
         store.close()
@@ -581,7 +584,7 @@ def check_migration_v2_to_v3(tmp: Path) -> None:
 
     conn = store.connect(v2_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 5
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert "digest_cache" in tables, tables
         store.put_digest("C:/y/report.docx", "sha-2", 1, {"gist": "ok"})

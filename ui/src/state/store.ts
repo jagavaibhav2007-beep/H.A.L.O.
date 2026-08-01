@@ -141,6 +141,7 @@ export const selectConversation = (conversationId: string) => (s: HaloStore) =>
   s.conversations[conversationId];
 export const selectActivities = (s: HaloStore) => s.activities;
 export const selectTasks = (s: HaloStore) => s.tasks;
+export const selectTaskLogs = (taskId: string) => (s: HaloStore) => s.taskLogs[taskId] ?? [];
 export const selectStream = (taskId: string) => (s: HaloStore) => s.streams[taskId];
 export const selectApprovals = (s: HaloStore) => s.approvals;
 export const selectBeliefs = (s: HaloStore) => s.beliefs;
@@ -151,6 +152,7 @@ export const selectSkills = (s: HaloStore) => s.skills;
 export const selectVoice = (s: HaloStore) => s.voice;
 export const selectSpend = (s: HaloStore) => s.spend;
 export const selectCapabilities = (s: HaloStore) => s.capabilities;
+export const selectProjectRoots = (s: HaloStore) => s.projectRoots;
 export const selectActiveView = (s: HaloStore) => s.activeView;
 export const selectChats = (s: HaloStore) => s.chats;
 export const selectActiveConversationId = (s: HaloStore) => s.chats.activeId;

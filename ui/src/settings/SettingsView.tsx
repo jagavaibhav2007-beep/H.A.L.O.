@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getTheme, setTheme, type Theme } from "../styles/theme";
 import { Button } from "../components/Button";
-import { useHaloStore, selectSpend, selectCapabilities } from "../state/store";
+import { useHaloStore, selectSpend, selectCapabilities, selectProjectRoots } from "../state/store";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
 import "./SettingsView.css";
 
@@ -34,6 +34,7 @@ const KEY_STATUS_COPY: Record<string, string> = {
 export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   const spend = useHaloStore(selectSpend);
   const capabilities = useHaloStore(selectCapabilities);
+  const projectRoots = useHaloStore(selectProjectRoots);
   const settings = useHaloStore((s) => s.settings);
   const wsStatus = useHaloStore((s) => s.connection.wsStatus);
   const keyStatus = settings.openrouter_key;
@@ -42,12 +43,22 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
   const [wakeWord, setWakeWord] = useState(true);
   const [pushToTalk, setPushToTalk] = useState(false);
   const [keyInput, setKeyInput] = useState("");
+  const [rootsInput, setRootsInput] = useState("");
   // Rule 3 (lock on press, unlock only on confirm): the shared hook clears
   // pending only when a settings_state frame upserts a new status for the
   // key — never optimistically.
   const { pending, begin } = usePendingConfirm(settings);
   const keyPending = pending.openrouter_key;
   const keyUnavailable = wsStatus === "unavailable";
+
+  useEffect(() => {
+    setRootsInput(projectRoots.roots.join("\n"));
+  }, [projectRoots.roots]);
+
+  function saveProjectRoots() {
+    const roots = rootsInput.split(/\r?\n/).map((root) => root.trim()).filter(Boolean);
+    sendSettingsUpdate("project_roots", roots);
+  }
 
   function saveKey() {
     if (keyUnavailable || !keyInput || !begin("openrouter_key", "checking…")) return;
@@ -159,6 +170,34 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
               {spend.lastTurnTokens > 0 && ` (last turn ${spend.lastTurnTokens.toLocaleString()})`}
             </span>
           </div>
+        </section>
+
+        <section className="settings-group">
+          <h3 className="halo-group-title settings-group-title">Accessible folders</h3>
+          <label className="settings-label" htmlFor="halo-project-roots">
+            One folder per line
+          </label>
+          <textarea
+            id="halo-project-roots"
+            className="halo-input settings-roots"
+            value={rootsInput}
+            disabled={keyUnavailable}
+            onChange={(event) => setRootsInput(event.target.value)}
+            rows={5}
+          />
+          <div className="settings-row">
+            <span className="settings-note">
+              Desktop, Documents, and Downloads remain available as safety defaults.
+            </span>
+            <Button variant="ghost" onClick={saveProjectRoots} disabled={keyUnavailable || !rootsInput.trim()}>
+              Save folders
+            </Button>
+          </div>
+          {projectRoots.pruned.length > 0 && (
+            <p className="settings-note" role="status">
+              Removed unavailable folder{projectRoots.pruned.length === 1 ? "" : "s"}: {projectRoots.pruned.join(", ")}
+            </p>
+          )}
         </section>
 
         <section className="settings-group">

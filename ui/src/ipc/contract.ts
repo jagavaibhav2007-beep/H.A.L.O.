@@ -23,7 +23,7 @@ export interface HelloMsg extends IpcEnvelope {
 // envelope/field change; a major mismatch across the WS is refused loudly on
 // both sides. Hand-mirrored with brain/brain/ipc/contract.py CONTRACT_VERSION
 // and shared/ipc-contract.json "version" — check_contract_sync.py compares them.
-export const CONTRACT_VERSION = "1.2";
+export const CONTRACT_VERSION = "1.4";
 export const contractMajor = (v: string | undefined): number | null => {
   if (typeof v !== "string") return null;
   const major = Number.parseInt(v.split(".")[0], 10);
@@ -35,6 +35,7 @@ export interface UserMsg extends IpcEnvelope {
   text: string;
   conversation_id: string;
   source: "ui" | "voice";
+  turn_id?: string;
 }
 
 export interface ConversationHistoryQueryMsg extends IpcEnvelope {
@@ -110,12 +111,19 @@ export interface TokenMsg extends IpcEnvelope {
   type: "token";
   text: string;
   conversation_id: string;
+  turn_id?: string;
+}
+
+export interface ProjectRootsStateMsg extends IpcEnvelope {
+  type: "project_roots_state";
+  roots: string[];
+  pruned?: string[];
 }
 
 export interface ConversationHistoryStateMsg extends IpcEnvelope {
   type: "conversation_history_state";
   conversation_id: string;
-  turns: { role: "user" | "assistant"; text: string }[];
+  turns: { role: "user" | "assistant"; text: string; turn_id?: string }[];
 }
 
 export interface ActivityMsg extends IpcEnvelope {
@@ -147,6 +155,7 @@ export interface ApprovalRequestMsg extends IpcEnvelope {
   // user happens to be VIEWING, not the one that asked. Approve/deny don't
   // need it (the Brain resolves those by approval_id).
   conversation_id?: string;
+  turn_id?: string;
 }
 
 export interface DoneMsg extends IpcEnvelope {
@@ -154,6 +163,8 @@ export interface DoneMsg extends IpcEnvelope {
   conversation_id: string;
   task_id?: string;
   interrupted?: boolean;
+  turn_id?: string;
+  model?: string;
 }
 
 export type OperationKind = "undo" | "memory_edit" | "approval_response" | "interrupt" | "task_op" | "lane_pin" | "mic" | "skill_op";
@@ -164,6 +175,7 @@ interface ErrorMsgBase extends IpcEnvelope {
   message: string;
   recoverable: boolean;
   conversation_id?: string;
+  turn_id?: string;
 }
 export type ErrorMsg = ErrorMsgBase & (
   | { operation_kind: OperationKind; operation_id: string }
@@ -174,13 +186,20 @@ export const operationCorrelationKey = (kind: OperationKind, id: string) => `${k
 export interface TaskStateMsg extends IpcEnvelope {
   type: "task_state";
   task_id: string;
-  state: "running" | "paused" | "waiting_approval" | "done" | "failed";
+  state: "waiting" | "running" | "paused" | "waiting_approval" | "done" | "failed";
   lane: 1 | 2 | 3;
   title?: string;
   step?: number;
   steps_total?: number;
   step_label?: string;
   reason?: string;
+}
+
+export interface TaskLogMsg extends IpcEnvelope {
+  type: "task_log";
+  task_id: string;
+  seq: number;
+  text: string;
 }
 
 export interface StreamFrameMsg extends IpcEnvelope {
@@ -282,12 +301,14 @@ export type IpcMessage =
   | UndoMsg
   | HelloAckMsg
   | TokenMsg
+  | ProjectRootsStateMsg
   | ConversationHistoryStateMsg
   | ActivityMsg
   | ApprovalRequestMsg
   | DoneMsg
   | ErrorMsg
   | TaskStateMsg
+  | TaskLogMsg
   | StreamFrameMsg
   | VoiceStateMsg
   | TranscriptMsg
@@ -329,7 +350,7 @@ export const CONTRACT_SPEC = {
   messages: {
     hello: message(IN, ["token"], { token: field(S), role: field(S, ["ui", "voice"]), contract_version: field(S) }),
     user_msg: message(IN, ["text", "conversation_id", "source"], {
-      text: field(S), conversation_id: field(S), source: field(S, ["ui", "voice"]),
+      text: field(S), conversation_id: field(S), source: field(S, ["ui", "voice"]), turn_id: field(S),
     }),
     conversation_history_query: message(IN, ["conversation_id"], { conversation_id: field(S) }),
     interrupt: message(IN, ["conversation_id"], { conversation_id: field(S) }),
@@ -349,7 +370,7 @@ export const CONTRACT_SPEC = {
     settings_update: message(IN, ["key", "value"], { key: field(S), value: field(J) }),
     undo: message(IN, ["undo_token"], { undo_token: field(S) }),
     hello_ack: message(OUT, [], { contract_version: field(S) }),
-    token: message(OUT, ["text", "conversation_id"], { text: field(S), conversation_id: field(S) }),
+    token: message(OUT, ["text", "conversation_id"], { text: field(S), conversation_id: field(S), turn_id: field(S) }),
     conversation_history_state: message(OUT, ["conversation_id", "turns"], {
       conversation_id: field(S), turns: field(J),
     }),
@@ -359,20 +380,23 @@ export const CONTRACT_SPEC = {
     }),
     approval_request: message(OUT, ["approval_id", "tool", "args_redacted", "tier", "task_id"], {
       approval_id: field(S), tool: field(S), args_redacted: field(O), tier: field(I, LANES),
-      task_id: field(S), summary: field(S), destructive: field(B), conversation_id: field(S),
+      task_id: field(S), summary: field(S), destructive: field(B), conversation_id: field(S), turn_id: field(S),
     }),
     done: message(OUT, ["conversation_id"], {
-      conversation_id: field(S), task_id: field(S), interrupted: field(B),
+      conversation_id: field(S), task_id: field(S), interrupted: field(B), turn_id: field(S), model: field(S),
     }),
     error: message(OUT, ["code", "message", "recoverable"], {
-      code: field(S), message: field(S), recoverable: field(B), conversation_id: field(S),
+      code: field(S), message: field(S), recoverable: field(B), conversation_id: field(S), turn_id: field(S),
       operation_kind: field(S, ["undo", "memory_edit", "approval_response", "interrupt", "task_op", "lane_pin", "mic", "skill_op"]),
       operation_id: field(S),
     }),
     task_state: message(OUT, ["task_id", "state", "lane"], {
-      task_id: field(S), state: field(S, ["running", "paused", "waiting_approval", "done", "failed"]),
+      task_id: field(S), state: field(S, ["waiting", "running", "paused", "waiting_approval", "done", "failed"]),
       lane: field(I, LANES), title: field(S), step: field(I), steps_total: field(I),
       step_label: field(S), reason: field(S),
+    }),
+    task_log: message(OUT, ["task_id", "seq", "text"], {
+      task_id: field(S), seq: field(I), text: field(S),
     }),
     stream_frame: message(OUT, ["task_id", "jpeg_b64", "seq"], {
       task_id: field(S), jpeg_b64: field(S), seq: field(I),
@@ -390,6 +414,7 @@ export const CONTRACT_SPEC = {
     settings_state: message(OUT, ["key", "status"], {
       key: field(S), status: field(S, ["set", "missing", "invalid", "unverified"]),
     }),
+    project_roots_state: message(OUT, ["roots"], { roots: field(J), pruned: field(J) }),
     capabilities_state: message(OUT, ["voice_input", "task_controls", "skill_controls", "demo_scenarios"], {
       voice_input: field(B), task_controls: field(B), skill_controls: field(B), demo_scenarios: field(B),
     }),
@@ -437,12 +462,18 @@ function validConversationHistory(value: unknown): boolean {
     if (typeof turn !== "object" || turn === null || Array.isArray(turn)) return false;
     const fields = Object.keys(turn);
     const item = turn as Record<string, unknown>;
-    return fields.length === 2
+    return (fields.length === 2 || fields.length === 3)
       && fields.includes("role")
       && fields.includes("text")
+      && fields.every((fieldName) => ["role", "text", "turn_id"].includes(fieldName))
       && (item.role === "user" || item.role === "assistant")
-      && typeof item.text === "string";
+      && typeof item.text === "string"
+      && (item.turn_id === undefined || typeof item.turn_id === "string");
   });
+}
+
+function validStringList(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 /** Validate an arbitrary decoded-JSON frame against the contract. Throws on
@@ -513,6 +544,12 @@ export function parseIpcMessage(
   }
   if (type === "conversation_history_state" && !validConversationHistory(obj.turns)) {
     throw new Error('ipc: "conversation_history_state" turns have an invalid shape');
+  }
+  if (type === "project_roots_state" && (
+    !validStringList(obj.roots)
+    || (obj.pruned !== undefined && !validStringList(obj.pruned))
+  )) {
+    throw new Error('ipc: "project_roots_state" roots/pruned must be string arrays');
   }
   return obj as unknown as IpcMessage;
 }

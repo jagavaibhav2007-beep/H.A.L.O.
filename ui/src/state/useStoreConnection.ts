@@ -15,14 +15,15 @@ export function useStoreConnection() {
   const onMessage = useCallback((frame: IpcMessage) => {
     useHaloStore.getState().applyFrame(frame);
   }, []);
-  const conn = useHaloConnection(onMessage);
+  const onAuthenticated = useCallback(() => {
+    useHaloStore.getState().applyConnectionEvent({ type: "authenticated" });
+  }, []);
+  const conn = useHaloConnection(onMessage, onAuthenticated);
   const { connState, sidecars } = conn;
 
   useEffect(() => {
-    const event =
-      connState === "connected"
-        ? ({ type: "authenticated" } as const)
-        : connState === "unavailable"
+    if (connState === "connected") return;
+    const event = connState === "unavailable"
           ? ({ type: "ws_unavailable" } as const)
           : connState === "reconnecting" || connState === "incompatible"
           ? ({ type: "ws_closed" } as const) // incompatible: terminal, treated as not-connected for the store slice

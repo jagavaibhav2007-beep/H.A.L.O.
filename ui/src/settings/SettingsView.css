@@ -49,6 +49,14 @@
   margin-left: auto;
   width: 200px;
 }
+.settings-roots {
+  width: 100%;
+  min-height: 104px;
+  resize: vertical;
+  padding: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
 .settings-note {
   margin: 0;
   font-size: var(--text-xs);

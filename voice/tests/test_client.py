@@ -90,11 +90,15 @@ async def check_bad_token_dropped_cleanly(port: int) -> None:
 def check_invalid_session_rejected() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "session.json"
-        for data in ({"port": "1234", "token": "token"}, {"port": 1234, "token": ""}):
+        for data in (
+            {"port": "1234", "voice_token": "token"},
+            {"port": 1234, "voice_token": ""},
+            {"port": 1234, "token": "ui-only"},
+        ):
             path.write_text(json.dumps(data), encoding="utf-8")
             try:
                 _read_session(path)
-            except ValueError:
+            except (KeyError, ValueError):
                 pass
             else:
                 raise AssertionError(f"expected invalid session data to be rejected: {data}")
@@ -115,7 +119,7 @@ async def main() -> None:
     server, token = await start()
     port = server.sockets[0].getsockname()[1]
     try:
-        await check_good_token_connects(port, token)
+        await check_good_token_connects(port, server.voice_token)
         await check_bad_token_dropped_cleanly(port)
     finally:
         server.close()

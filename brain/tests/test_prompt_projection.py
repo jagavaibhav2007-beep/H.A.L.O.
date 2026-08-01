@@ -110,12 +110,13 @@ def check_summary_prepended_and_stub_within_live() -> None:
     out = graph._prompt_messages(
         {"messages": messages, "summary": "earlier: user asked things", "dropped_before": 2}
     )
-    assert out[0]["role"] == "system" and "earlier: user asked things" in out[0]["content"], out[0]
+    assert out[0]["role"] == "user" and "Untrusted Halo context" in out[0]["content"], out[0]
+    assert "earlier: user asked things" in out[0]["content"], out[0]
     # live span begins after the summary; index +1 relative to `messages[2:]`.
     stub = out[2]["content"]  # summary(0), assistant_call(1), tool(2)
     assert stub.startswith("[file_read result for ") and "big.md" in stub, stub
     assert out[-1]["content"] == BIG2, "tail within live span was stubbed"
-    print("[check 5] summary system message prepended; stubs applied within the live span: OK")
+    print("[check 5] summary is untrusted user context; stubs apply within the live span: OK")
 
 
 def main() -> None:

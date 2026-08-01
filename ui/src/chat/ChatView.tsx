@@ -33,7 +33,7 @@ const DEMO_EXAMPLE_CHIPS = ["demo everything", "demo task", "demo voice"];
 interface ChatViewProps {
   conversationId: string;
   connState: ConnState;
-  sendUserMsg: (conversationId: string, text: string) => void;
+  sendUserMsg: (conversationId: string, text: string, turnId: string) => void;
   sendConversationHistoryQuery?: (conversationId: string) => void;
   sendInterrupt: (conversationId: string) => string;
   sendMic: (op: "mute" | "unmute") => void;
@@ -100,9 +100,10 @@ export function ChatView({
         setDrafts((current) => ({ ...current, [conversationId]: "" }));
         return;
       }
-      appendUserTurn(conversationId, trimmed, crypto.randomUUID());
+      const turnId = crypto.randomUUID();
+      appendUserTurn(conversationId, trimmed, turnId);
       titleFromMessage(conversationId, trimmed); // no-ops unless still untitled
-      sendUserMsg(conversationId, trimmed);
+      sendUserMsg(conversationId, trimmed, turnId);
       setDrafts((current) => ({ ...current, [conversationId]: "" }));
     },
     [
@@ -397,6 +398,9 @@ function AssistantRow({
         )}
         {turn.status === "interrupted" && (
           <div className="chat-interrupted">{turn.note ?? "stopped · what should I do differently?"}</div>
+        )}
+        {turn.status === "done" && turn.model && (
+          <div className="chat-model">Model: {turn.model}</div>
         )}
         {canInterrupt && (
           <button

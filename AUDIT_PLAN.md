@@ -1,7 +1,7 @@
 # Repository Audit Evidence Ledger
 
-Date: 2026-07-22
-Status: automated audit gate complete; app-scoped native lifecycle checks complete; human visual/a11y and real-key walkthroughs remain explicitly deferred.
+Date: 2026-07-22; exit-hardening follow-up updated 2026-07-31
+Status: the 2026-07-22 audit gate and app-scoped lifecycle checks are historical green evidence. The 2026-07-31 exit-hardening implementation is present; formal closure awaits a final current-tree integrated gate plus the unchecked human/native items in `VERIFY.md`.
 
 ## Scope and method
 
@@ -15,7 +15,7 @@ Six independent read-only reviews covered native lifecycle, Brain/model flow, ga
 | --- | --- |
 | Native parent | `ui/src-tauri`: owns orb/workspace windows, global shortcut/tray, Brain/Voice child supervision, restart policy, persistent sidecar state, and Windows Job Object cleanup. |
 | Frontend | `ui/src`: React views over a pure reducer/Zustand wrapper; `useHaloConnection` is transport-only; exact-confirmation UI locks consume typed IPC state/errors. |
-| IPC | `shared/ipc-contract.json`: canonical 25-message schema; complete runtime mirrors live in TypeScript and Python; `check_contract_sync.py` compares directions, required/optional fields, types, and enums. |
+| IPC | `shared/ipc-contract.json`: canonical 34-message schema at contract 1.4; complete runtime mirrors live in TypeScript and Python; `check_contract_sync.py` compares directions, required/optional fields, types, and enums. |
 | Brain | `brain/brain/server.py` authenticates/routes/snapshots and owns request lifetimes; `graph.py` owns model turns/checkpoints/interrupts; `gate.py` is the sole permission/undo choke point. |
 | Persistence/tools | `store.py` serializes SQLite operations and transactions; `memory.py` owns belief policy; `tools/files.py` confines local filesystem/allowlisted command access. |
 | Voice | `voice/voice`: authenticated reconnecting idle client today; real audio remains Phase 3. |
@@ -48,6 +48,31 @@ Final current-tree `./dev.ps1 -Verify` evidence from 2026-07-22:
 - Phase 0 smoke, Phase 1 mock E2E, and Phase 2 real-Brain offline E2E all passed in the same run.
 
 App-scoped native evidence: `./dev.ps1 -Mock` launched the real Tauri process, Brain and Voice both authenticated, and the orb rendered at its native 360x52 surface. A forced kill of exact UI PID 28628 reaped exact Voice PID 10088 and Brain PID 35148 within three seconds. Whole-desktop capture was deliberately not used. WebView accessibility, 720x480 visual inspection, NVDA, and real-key OpenRouter behavior remain manual checks, not claimed passes.
+
+### 2026-07-31 exit-hardening follow-up
+
+The follow-up implemented the previously missing Phase 2 exit controls:
+
+- a separate cap-2 durable `TaskRuntime` with waiting/running/paused/terminal
+  state, cooperative stop, progress checkpoints, bounded task logs, and
+  no-replay restart reconciliation;
+- `dir_organize`/`doc_digest` task execution, one durable receipt per completed
+  move, and one preflighted/rollback-safe batch undo;
+- current-user intent checks for approval-free mutations, untrusted prompt
+  context projection, repository-control Tier-3 classification, disabled Git
+  helpers/config, role-bound IPC admission, frame/request caps, and idle-lock
+  eviction;
+- explicit turn correlation and snapshot completion, reconnect reconciliation,
+  visible model routing, repaired/additive project roots, duplicate-Path-safe
+  browser launching, repeated 30-second supervisor backoff, hashed Python locks,
+  dependency audits, and Windows CI.
+
+Focused Python/Voice scripts, TypeScript, the production UI build, focused
+Vitest suites, Rust tests, and dependency audits passed during implementation.
+The latest integrated rerun reached the UI suite and exposed deterministic
+expectations that were corrected; a clean final rerun could not be started
+after local execution approval became unavailable. This ledger therefore does
+not claim the modified tree has yet reached the final green gate.
 
 ## Verified P1 findings
 
@@ -93,7 +118,7 @@ App-scoped native evidence: `./dev.ps1 -Mock` launched the real Tauri process, B
 
 No validated P0 or P1 finding remains unresolved.
 
-- **P2 organize cancellation/progress â€” deferred to the real task runtime.** `dir_organize` is bounded to 200 moves and runs off-loop, but it cannot cooperatively cancel or emit per-step live progress because Phase 2 tool functions do not receive a task-control/broadcast context. Adding that context would be a new task-runtime capability, overlapping Phase 3 rather than a minimal bug fix. The current UI receives an honest correlated unsupported error for task controls instead of hanging.
+- **P2 organize cancellation/progress — implemented in the exit-hardening follow-up.** `dir_organize` now runs in the separate durable `TaskRuntime`, checks pause/stop at step boundaries, emits named progress plus durable per-move activity receipts, and records one atomic batch undo.
 - **P2 quantitative performance baselines â€” follow-up.** This audit verified hard bounds (four simultaneous real turns, 256 deferred frames / 1 MiB, capped file reads/listings, 10,000 activity rows) and recorded build size/time. It did not manufacture before/after latency claims for HTTP pooling or streaming; production OpenRouter/network benchmarks need a real key and controlled network conditions.
 - **P2 native visual/accessibility matrix â€” manual.** Focus/dialog/live-region behavior has automated coverage and light-theme contrast measured 6.63:1 (Tier 3) and 5.68:1 (success). The environment did not expose WebView descendants through Windows UI Automation, so NVDA, keyboard-only flows, 200% scaling, reduced motion/transparency, and 720x480 clipping remain unchecked in `VERIFY.md`.
 - **P2 real-provider behavior â€” external input required.** A real OpenRouter key was neither available nor requested or exposed. Router escalation, billing, and live provider streaming remain the documented real-key walkthrough.
@@ -137,14 +162,14 @@ The automated gate and app-scoped force-kill/no-orphan check pass. Complete the 
 
 1. Run the remaining human visual/NVDA matrix in `VERIFY.md` on the current commit.
 2. Run the real-key provider/router/spend walkthrough without recording the key.
-3. Before Phase 3a, design a real task runtime context (progress, cooperative cancellation, truthful capabilities); migrate `dir_organize` onto it rather than adding one-off callbacks.
+3. Re-run the current-tree integrated gate and exercise the real task runtime's organize/stop/restart paths in the native app.
 4. Add controlled production-network latency/cost benchmarks only when a stable key, provider, model, and network baseline are available.
 5. Repeat security boundary and native lifecycle audits after any Phase 3 browser/GUI/subprocess capability lands.
 
 ## Exit criteria
 
 1. Fix or explicitly defer every validated finding with evidence and rationale. **Met.**
-2. `./dev.ps1 -Verify` prints `FULL AUTOMATED VERIFICATION PASSED`. **Met 2026-07-22.**
+2. `./dev.ps1 -Verify` prints `FULL AUTOMATED VERIFICATION PASSED`. **Met for the historical 2026-07-22/27 baseline; pending for the modified 2026-07-31 tree.**
 3. Every fixed P0/P1 failure has a negative-path regression. **Met.**
 4. App-scoped native startup/authentication and forced-parent-death cleanup pass; human-only and real-key checks remain accurately unchecked. **Met for automatable scope.**
-5. `git diff --check`, secret review, and final docs/memory reconciliation pass. **Met 2026-07-22; only Git's existing LF-to-CRLF notices were emitted.**
+5. `git diff --check`, secret review, and final docs/memory reconciliation pass. **Met 2026-07-22; pending for the 2026-07-31 tree.**

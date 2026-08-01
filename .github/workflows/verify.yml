@@ -1,0 +1,49 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  phase-2-gate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            brain/requirements.lock
+            voice/requirements.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install locked Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --require-hashes -r brain/requirements.lock
+          python -m pip install --require-hashes -r voice/requirements.lock
+      - name: Install locked UI dependencies
+        working-directory: ui
+        run: npm ci
+      - name: Run the full Phase 0-2 gate
+        shell: pwsh
+        run: ./dev.ps1 -Verify
+
+      - name: Audit npm dependencies
+        working-directory: ui
+        run: npm audit --audit-level=high
+      - name: Audit locked Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install pip-audit
+          pip-audit --vulnerability-service osv -r brain/requirements.lock --disable-pip --no-deps
+          pip-audit --vulnerability-service osv -r voice/requirements.lock --disable-pip --no-deps

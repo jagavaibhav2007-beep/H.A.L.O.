@@ -29,6 +29,7 @@ param(
 
 $root = $PSScriptRoot
 . "$PSScriptRoot\_python.ps1"
+. "$PSScriptRoot\_process_env.ps1"
 
 if ($Smoke -and $Verify) {
     Write-Error "Choose either -Smoke (protocol checks) or -Verify (full automated gate), not both."
@@ -98,20 +99,22 @@ function Start-Browser {
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     $brainArguments = @($python.Arguments | Where-Object { $_ }) + @("-m", "brain")
     $brainStartedAfter = [DateTime]::UtcNow
-    $brainProcess = Start-Process `
-        -FilePath $python.Command `
-        -ArgumentList $brainArguments `
-        -WorkingDirectory "$root\brain" `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput (Join-Path $logDir "brain-browser.out.log") `
-        -RedirectStandardError (Join-Path $logDir "brain-browser.err.log") `
-        -PassThru `
-        -ErrorAction Stop
+    $brainProcess = $null
     $ownedToken = $null
     $hadBrowserEnv = Test-Path Env:HALO_BROWSER_DEV
     $previousBrowserEnv = $env:HALO_BROWSER_DEV
     $locationPushed = $false
     try {
+        Repair-DuplicateProcessPath | Out-Null
+        $brainProcess = Start-Process `
+            -FilePath $python.Command `
+            -ArgumentList $brainArguments `
+            -WorkingDirectory "$root\brain" `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $logDir "brain-browser.out.log") `
+            -RedirectStandardError (Join-Path $logDir "brain-browser.err.log") `
+            -PassThru `
+            -ErrorAction Stop
         for ($attempt = 0; $attempt -lt 100 -and -not $ownedToken; $attempt++) {
             if ($brainProcess.HasExited) {
                 throw "Brain exited before browser mode was ready. See $logDir\brain-browser.err.log."
@@ -145,7 +148,7 @@ function Start-Browser {
         } else {
             Remove-Item Env:HALO_BROWSER_DEV -ErrorAction SilentlyContinue
         }
-        if (-not $brainProcess.HasExited) {
+        if ($null -ne $brainProcess -and -not $brainProcess.HasExited) {
             Stop-Process -Id $brainProcess.Id
             $brainProcess.WaitForExit()
         }

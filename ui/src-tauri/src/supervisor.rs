@@ -138,13 +138,13 @@ fn emit_state(
     let _ = app.emit("sidecar-state", event);
 }
 
-/// 1s / 5s / 30s ladder; `None` means exhausted -> caller surfaces `error`.
+/// 1s / 5s / 30s ladder, then keep retrying every 30s. A resident companion
+/// must recover after a late dependency/network repair without an app restart.
 fn backoff_delay(attempt: u32) -> Option<Duration> {
     match attempt {
         0 => Some(Duration::from_secs(1)),
         1 => Some(Duration::from_secs(5)),
-        2 => Some(Duration::from_secs(30)),
-        _ => None,
+        _ => Some(Duration::from_secs(30)),
     }
 }
 
@@ -301,7 +301,7 @@ fn backoff_or_error(
 ) -> bool {
     match backoff_delay(*attempt) {
         Some(d) => {
-            *attempt += 1;
+            *attempt = attempt.saturating_add(1);
             emit_state(app, statuses, name, "restarting");
             thread::sleep(d);
             true
@@ -508,12 +508,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backoff_ladder_is_1s_5s_30s_then_exhausted() {
+    fn backoff_ladder_is_1s_5s_then_repeats_30s() {
         assert_eq!(backoff_delay(0), Some(Duration::from_secs(1)));
         assert_eq!(backoff_delay(1), Some(Duration::from_secs(5)));
         assert_eq!(backoff_delay(2), Some(Duration::from_secs(30)));
-        assert_eq!(backoff_delay(3), None);
-        assert_eq!(backoff_delay(100), None);
+        assert_eq!(backoff_delay(3), Some(Duration::from_secs(30)));
+        assert_eq!(backoff_delay(100), Some(Duration::from_secs(30)));
     }
 
     #[test]
@@ -534,9 +534,9 @@ mod tests {
             Some(Duration::from_secs(30))
         );
         // Exactly HEALTHY_UPTIME does not count as healthy (strictly greater),
-        // and a crash loop still reaches exhaustion.
+        // and a crash loop remains on the bounded 30-second retry cadence.
         assert_eq!(attempt_after_exit(3, HEALTHY_UPTIME), 3);
-        assert_eq!(backoff_delay(attempt_after_exit(3, crashy)), None);
+        assert_eq!(backoff_delay(attempt_after_exit(3, crashy)), Some(Duration::from_secs(30)));
     }
 
     #[test]

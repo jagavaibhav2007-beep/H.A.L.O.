@@ -96,8 +96,56 @@ def check_classify() -> None:
     assert gate.classify("dir_organize", collide) == 3  # a dst exists
 
     assert gate.classify("run_readonly_cmd", {"cmd": "git status"}) == 1
+
+    # Repository control files can turn a later read-only Git invocation into
+    # code execution (textconv/fsmonitor/external-diff helpers). They are never
+    # ordinary approval-free writes, even when they sit below a project root.
+    controls = (
+        ROOT / ".gitattributes",
+        ROOT / ".gitmodules",
+        ROOT / ".git" / "config",
+        ROOT / "nested" / ".git" / "config",
+    )
+    for control in controls:
+        assert gate.classify(
+            "file_create", {"path": str(control), "content": "x"}
+        ) == 3, control
+        assert gate.classify(
+            "file_edit", {"path": str(control), "old": "a", "new": "b"}
+        ) == 3, control
+    assert gate.classify(
+        "file_move", {"src": inside, "dst": str(ROOT / ".gitattributes")}
+    ) == 3
+
+    ordinary = {"path": str(ROOT / "notes.txt"), "old": "before", "new": "after"}
+    assert gate.classify_for_request(
+        "file_edit", ordinary, "Please edit notes.txt and replace before with after."
+    ) == 2
+    assert gate.classify_for_request(
+        "file_edit", ordinary, "Review this repository and summarize what it does."
+    ) == 3
+    assert gate.classify_for_request(
+        "file_create",
+        {"path": str(ROOT / "generated.ps1"), "content": "..."},
+        "Read the project README.",
+    ) == 3
     existing.unlink()
-    print("[check 1] classify matrix: in-roots vs outside vs overwrite/exists tiers + destructive flags: OK")
+    print("[check 1] classify matrix: roots/overwrite/control-file tiers + destructive flags: OK")
+
+
+def check_stale_roots_are_pruned_without_replacing_defaults() -> None:
+    configured = store.get_setting("project_roots")
+    stale = ROOT / "already-removed"
+    assert not stale.exists()
+    store.set_setting("project_roots", [str(stale), str(ROOT)])
+    roots = files._roots()
+    defaults = [(Path.home() / name).resolve() for name in ("Desktop", "Documents", "Downloads")]
+    assert all(default in roots for default in defaults), roots
+    assert ROOT in roots, roots
+    assert stale.resolve() not in roots, roots
+    assert store.get_setting("project_roots") == [str(ROOT)], store.get_setting("project_roots")
+    store.set_setting("project_roots", configured)
+    print("[check 1b] stale custom roots are pruned while safe defaults remain accessible: OK")
 
 
 async def check_create_undo() -> None:
@@ -188,12 +236,14 @@ async def check_organize() -> None:
         f.write_text(f"file {i}", encoding="utf-8")
         srcs.append(f)
     moves = [{"src": str(f), "dst": str(ROOT / "sorted" / f.name)} for f in srcs]
-    status = await _run("dir_organize", {"path": str(pile), "moves": moves})
+    FRAMES.clear()
+    result = await gate._execute_tail(
+        "dir_organize", {"path": str(pile), "moves": moves}, 2, "files-test", broadcast
+    )
+    status = result["pending_tool_result"]["status"]
     assert status == "ok", status
     for f in srcs:
         assert not f.exists() and (ROOT / "sorted" / f.name).is_file()
-    tasks = store.list_tasks()
-    assert any(t["state"] == "done" and t["steps_total"] == 3 for t in tasks), tasks
     act = _activity()
     assert act["undoable"] is True, act
 
@@ -202,9 +252,86 @@ async def check_organize() -> None:
         assert f.is_file() and not (ROOT / "sorted" / f.name).exists(), f
 
     over = [{"src": str(pile / f"z{i}"), "dst": str(ROOT / "zz" / f"z{i}")} for i in range(201)]
-    status = await _run("dir_organize", {"path": str(pile), "moves": over})
+    result = await gate._execute_tail(
+        "dir_organize", {"path": str(pile), "moves": over}, 2, "files-test", broadcast
+    )
+    status = result["pending_tool_result"]["status"]
     assert status.startswith("error") and "200" in status, status
     print("[check 5] dir_organize: 3 files moved + task row, one undo restores all, 201-move batch refused: OK")
+
+
+async def check_organize_undo_is_atomic() -> None:
+    async def organized(case: str) -> tuple[list[Path], list[Path], str]:
+        source_dir = ROOT / f"atomic-{case}-source"
+        sorted_dir = ROOT / f"atomic-{case}-sorted"
+        source_dir.mkdir()
+        srcs = [source_dir / "a.txt", source_dir / "b.txt"]
+        for index, src in enumerate(srcs):
+            src.write_text(f"payload-{index}", encoding="utf-8")
+        dsts = [sorted_dir / src.name for src in srcs]
+        FRAMES.clear()
+        result = await gate._execute_tail(
+            "dir_organize",
+            {"path": str(source_dir), "moves": [
+                {"src": str(src), "dst": str(dst)} for src, dst in zip(srcs, dsts)
+            ]},
+            2,
+            f"files-atomic-{case}",
+            broadcast,
+        )
+        assert result["pending_tool_result"]["status"] == "ok", result
+        return srcs, dsts, _activity()["undo_token"]
+
+    async def refused_without_partial_restore(
+        case: str,
+        tamper,
+    ) -> None:
+        srcs, dsts, token = await organized(case)
+        tamper(srcs, dsts)
+        before = {
+            path: path.read_bytes() if path.is_file() else None
+            for path in [*srcs, *dsts]
+        }
+        await _undo(token)
+        errors = [payload for msg_type, payload in FRAMES if msg_type == "error"]
+        assert errors and errors[-1]["code"] == "undo_precondition_failed", FRAMES
+        assert store.get_action_by_undo_token(token)["consumed"] == 0
+        after = {
+            path: path.read_bytes() if path.is_file() else None
+            for path in [*srcs, *dsts]
+        }
+        assert after == before, "refused batch undo changed part of the filesystem"
+
+    await refused_without_partial_restore(
+        "changed", lambda _srcs, dsts: dsts[0].write_text("changed", encoding="utf-8")
+    )
+    await refused_without_partial_restore("missing", lambda _srcs, dsts: dsts[0].unlink())
+    await refused_without_partial_restore(
+        "collision", lambda srcs, _dsts: srcs[0].write_text("occupied", encoding="utf-8")
+    )
+
+    srcs, dsts, token = await organized("rollback")
+    real_move = files.shutil.move
+    calls = 0
+
+    def fail_second_commit(src, dst, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated second commit failure")
+        return real_move(src, dst, *args, **kwargs)
+
+    files.shutil.move = fail_second_commit
+    try:
+        await _undo(token)
+    finally:
+        files.shutil.move = real_move
+    errors = [payload for msg_type, payload in FRAMES if msg_type == "error"]
+    assert errors and errors[-1]["code"] == "undo_failed", FRAMES
+    assert store.get_action_by_undo_token(token)["consumed"] == 0
+    assert all(not src.exists() for src in srcs), "failed commit left a partial restore"
+    assert all(dst.exists() for dst in dsts), "rollback did not restore the organized state"
+    print("[check 5b] batch undo preflights every item and rolls back a mid-commit failure atomically: OK")
 
 
 async def check_readonly_cmd() -> None:
@@ -222,6 +349,38 @@ async def check_readonly_cmd() -> None:
         status = await _run("run_readonly_cmd", {"cmd": sneaky})
         assert status.startswith("error") and "not allowed" in status, (sneaky, status)
     print("[check 6] run_readonly_cmd: allowed git works; outside roots and dangerous options refused: OK")
+
+
+def check_git_helpers_are_disabled_by_construction() -> None:
+    captured: dict = {}
+    real_run = files.subprocess.run
+
+    class Result:
+        returncode = 0
+        stdout = "clean"
+        stderr = ""
+
+    def fake_run(parts, **kwargs):
+        captured["parts"] = parts
+        captured["env"] = kwargs.get("env")
+        return Result()
+
+    files.subprocess.run = fake_run
+    try:
+        result = files._run_cmd({"cmd": "git diff -- README.md"})
+    finally:
+        files.subprocess.run = real_run
+
+    command = captured["parts"]
+    joined = " ".join(command)
+    assert result["stdout"] == "clean"
+    assert "core.fsmonitor=false" in joined, command
+    assert "core.hooksPath=" in joined, command
+    assert "diff.external=" in joined, command
+    assert "--no-ext-diff" in command and "--no-textconv" in command, command
+    assert captured["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert captured["env"]["GIT_PAGER"] == "cat"
+    print("[check 6b] Git helpers/pagers/prompts are disabled in the executed argv/environment: OK")
 
 
 async def check_cmd_head_tail_truncation() -> None:
@@ -383,11 +542,14 @@ def check_dir_list_skips_unreadable() -> None:
 
 async def main() -> None:
     check_classify()
+    check_stale_roots_are_pruned_without_replacing_defaults()
     await check_create_undo()
     await check_edit()
     await check_move()
     await check_organize()
+    await check_organize_undo_is_atomic()
     await check_readonly_cmd()
+    check_git_helpers_are_disabled_by_construction()
     await check_cmd_head_tail_truncation()
     check_resolve()
     await check_search()

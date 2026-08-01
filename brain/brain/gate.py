@@ -17,6 +17,7 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import uuid
 from pathlib import Path
 
@@ -48,7 +49,9 @@ _by_conversation: dict[str, str] = {}
 
 
 def register(
-    name: str, fn, *, tier=3, destructive=False, redact=None, summary=None, inverse=None, schema=None
+    name: str, fn, *, tier=3, destructive=False, redact=None, summary=None,
+    inverse=None, schema=None, mutating: bool = False, user_intent=None,
+    task: bool = False, supports_pause: bool = False, title=None, steps_total=None,
 ) -> None:
     """schema: the OpenAI function body sans name -- {"description": str,
     "parameters": <JSON Schema>}. Only tools WITH one are advertised to the
@@ -56,6 +59,9 @@ def register(
     TOOLS[name] = {
         "fn": fn, "tier": tier, "destructive": destructive, "redact": redact,
         "summary": summary, "inverse": inverse, "schema": schema,
+        "mutating": mutating, "user_intent": user_intent,
+        "task": task, "supports_pause": supports_pause,
+        "title": title, "steps_total": steps_total,
     }
 
 
@@ -86,6 +92,34 @@ def classify(tool: str, args: dict) -> int:
         return 3
 
 
+def is_mutating(tool: str) -> bool:
+    entry = TOOLS.get(tool)
+    return bool(entry and entry.get("mutating"))
+
+
+def classify_for_request(tool: str, args: dict, user_text: str) -> int:
+    """Bind approval-free mutations to the current human request.
+
+    Model output, retrieved memory, summaries, and file/tool content can suggest
+    a tool call, but none of them are authority. A mutating Tier-1/2 call stays
+    approval-free only when its registry predicate finds explicit operation and
+    target evidence in the current user message. Missing/broken evidence fails
+    closed to Tier 3; already-Tier-3 calls remain Tier 3.
+    """
+    tier = classify(tool, args)
+    entry = TOOLS.get(tool)
+    if tier == 3 or not entry or not entry.get("mutating"):
+        return tier
+    if os.environ.get("HALO_LLM_STUB") and user_text.startswith(f"CALL_TOOL {tool} "):
+        # Deterministic test seam: the human fixture names the exact tool/args.
+        # Real-provider turns can never enter graph._route_node's sentinel path.
+        return tier
+    predicate = entry.get("user_intent")
+    try:
+        return tier if predicate and predicate(args, user_text) else 3
+    except Exception:  # noqa: BLE001 - authority checks always fail closed
+        logger.exception("user-intent check failed for tool=%s; requiring approval", tool)
+        return 3
 def is_destructive(tool: str, args: dict) -> bool:
     entry = TOOLS.get(tool)
     if entry is None:
@@ -203,7 +237,15 @@ def _record(
     return undo_token
 
 
-async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id: str | None, broadcast) -> dict:
+async def gated_execute(
+    tool: str,
+    args: dict,
+    *,
+    conversation_id: str,
+    task_id: str | None,
+    broadcast,
+    user_text: str | None = None,
+) -> dict:
     """The ONE path every tool call takes. Returns the graph-state update.
 
     Tier 3 calls interrupt(): LangGraph suspends here (GraphInterrupt bubbles
@@ -211,9 +253,15 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
     node from the top -- classify/redact re-run (pure), interrupt() then
     returns the approval_response decision instead of raising.
     """
-    frame_task = task_id or f"tool-{conversation_id}"  # contract: task_id is required in these frames
+    entry = TOOLS.get(tool)
+    if entry and entry.get("task") and task_id is None:
+        from brain.task_runtime import new_task_id
+
+        frame_task = new_task_id(tool.replace("_", "-"))
+    else:
+        frame_task = task_id or f"tool-{conversation_id}"  # contract: task_id is required in these frames
     while True:
-        tier = classify(tool, args)
+        tier = classify_for_request(tool, args, user_text) if user_text is not None else classify(tool, args)
         if tier != 3:
             break
         payload = {
@@ -255,10 +303,57 @@ async def gated_execute(tool: str, args: dict, *, conversation_id: str, task_id:
             continue
         break  # approve
 
+    if entry and entry.get("task"):
+        return await _start_task_tail(
+            tool, args, tier, frame_task, conversation_id, broadcast,
+        )
     return await _execute_tail(tool, args, tier, frame_task, broadcast)
 
 
 _RESULT_CAP = 8 * 1024  # serialized tool-result bytes fed back to the model
+
+
+async def _start_task_tail(
+    tool: str,
+    args: dict,
+    tier: int,
+    task_id: str,
+    conversation_id: str,
+    broadcast,
+) -> dict:
+    from brain import task_runtime
+
+    runtime = task_runtime.current()
+    entry = TOOLS[tool]
+    if runtime is None:
+        return {
+            "pending_tool_result": {"tool": tool, "status": "error: task runtime unavailable"},
+            "messages": [{"role": "assistant", "content": f"I couldn't start {tool} because the task runtime is unavailable."}],
+        }
+
+    def value(meta, default=None):
+        return meta(args) if callable(meta) else (meta if meta is not None else default)
+
+    title = value(entry.get("title"), summarize(tool, args))
+    total = value(entry.get("steps_total"))
+    await runtime.submit(
+        task_id=task_id,
+        conversation_id=conversation_id,
+        tool=tool,
+        args=args,
+        args_redacted=redact(tool, args),
+        tier=tier,
+        lane=1,
+        title=title,
+        steps_total=total,
+        supports_pause=bool(entry.get("supports_pause")),
+        fn=entry["fn"],
+        inverse_builder=entry.get("inverse"),
+    )
+    return {
+        "pending_tool_result": {"tool": tool, "status": "started", "task_id": task_id},
+        "messages": [{"role": "assistant", "content": f"Started task {task_id} for {tool}."}],
+    }
 
 
 def _cap_result(out) -> tuple[str, int]:
@@ -405,6 +500,11 @@ def _precondition_ok(pre: dict | None) -> bool:
     anything that changed since."""
     if not pre:
         return True
+    if "batch" in pre:
+        entries = pre["batch"]
+        return isinstance(entries, list) and bool(entries) and all(
+            isinstance(entry, dict) and _precondition_ok(entry) for entry in entries
+        )
     p = Path(pre["path"])
     if pre.get("must_be_absent"):
         return not p.exists()

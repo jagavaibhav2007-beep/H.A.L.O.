@@ -53,6 +53,12 @@ Invoke-VerificationStep `
     -PrefixArguments $python.Arguments `
     -Arguments @("shared/check_contract_sync.py")
 
+Invoke-VerificationStep `
+    -Label "Browser launcher environment" `
+    -WorkingDirectory $root `
+    -Command "powershell" `
+    -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$root\shared\launcher_check.ps1")
+
 foreach ($suite in @("brain", "voice")) {
     $pythonTests = Get-ChildItem -LiteralPath "$root\$suite\tests" -Filter "test_*.py" |
         Sort-Object Name

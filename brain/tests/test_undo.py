@@ -230,7 +230,7 @@ async def check_connect_backlog(ws, port: int, token: str) -> None:
             if frame["type"] == "activity":
                 backlog.append(frame)
                 continue
-            assert frame["type"] == "capabilities_state", frame
+            assert frame["type"] in {"capabilities_state", "project_roots_state"}, frame
         assert backlog, "no backlog replayed"
         # Newest lands last (feed appends): the file_create is the most recent action.
         assert backlog[-1].get("undo_token") == live_token and backlog[-1]["undoable"] is True, backlog[-1]

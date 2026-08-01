@@ -125,7 +125,9 @@ async def check_snapshot_content() -> None:
 
     types = [f["type"] for f in snap.frames]
     assert types[0] == "settings_state", types
-    assert types[-1] == "spend_update", types  # always-last sentinel
+    # graph.snapshot's producer order ends with spend; server.py appends the
+    # authoritative snapshot_complete marker on the wire.
+    assert types[-1] == "spend_update", types
     tasks = snap.of("task_state")
     assert [t["task_id"] for t in tasks] == ["t-live"], tasks  # finished tasks skipped
     assert tasks[0]["step"] == 2 and tasks[0]["title"] == "Organizing Downloads", tasks[0]

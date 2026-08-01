@@ -2,8 +2,14 @@
 
 Status: **Phase 1 COMPLETE** — automated gate passed, native checklist
 user-confirmed complete on 2026-07-13.
-Status: **Phase 2 and the 2026-07-22 automated audit hardening are integration-verified.**
-`./dev.ps1 -Verify` reached `FULL AUTOMATED VERIFICATION PASSED`. App-scoped
+Status: **The Phase 2 feature set and 2026-07-31 exit-hardening implementation are present, but formal closure is pending.**
+The 2026-07-27 baseline `./dev.ps1 -Verify` reached `FULL AUTOMATED
+VERIFICATION PASSED`. After the exit-hardening changes, focused Brain/Voice
+checks, TypeScript, the UI production build, focused Vitest suites, Rust, and
+dependency audits passed. The final current-tree one-shot `-Verify` rerun is
+still required; its latest attempt found deterministic test expectations that
+were then corrected, and local execution approval became unavailable before a
+clean rerun. App-scoped
 native mock startup confirmed Brain/Voice authentication, and forced death of
 the exact Tauri PID reaped its exact Brain/Voice child PIDs. Human visual,
 keyboard/NVDA, minimum-size, and real-OpenRouter-key checks remain unchecked.
@@ -28,6 +34,9 @@ not respond to mock demo triggers.
 - [x] During focused protocol work, `./dev.ps1 -Smoke` may be used as the
       faster Phase 0/1/2 protocol-only check. A green `-Smoke` is not a
       substitute for `-Verify` before declaring the repository gate green.
+- [ ] Re-run `./dev.ps1 -Verify` on the final 2026-07-31 exit-hardening tree and
+      record `FULL AUTOMATED VERIFICATION PASSED`. Historical green runs do not
+      close this item for the modified tree.
 
 ## Render matrix
 
@@ -91,14 +100,16 @@ intended, or that the UI's rendering of a real multi-step task/undo/memory round
 holds up outside a script. Run the plain (non-`-Mock`) app with a real OpenRouter key
 set in Settings for all of the below.
 
-All validated P0/P1 audit findings are resolved and one complete `-Verify` run
-is green. Real task controls now fail honestly with exact correlated errors
-instead of hanging; global operation failures unlock the correct control;
-memory correction is transactional; admission is bounded; and the Skills/chat
-accessibility regressions pass. The checks below still require a human and, for
-provider behavior, a real key that must never be pasted into source or logs.
+All validated P0/P1 audit findings are resolved. Real task controls now execute
+through the durable, bounded `TaskRuntime`; unsupported pause remains an exact
+correlated error. Tasks have cooperative progress/stop, restart reconciliation,
+bounded logs, per-move organize receipts, and one atomic batch undo. Authority
+separation, admission bounds, reconnect/turn correlation, dependency locking,
+and project-root repair are implemented. The checks below still require a
+human and, for provider behavior, a real key that must never be pasted into
+source or logs.
 
-- [x] Run `./dev.ps1 -Verify` and confirm the complete repository gate, including
+- [ ] Run `./dev.ps1 -Verify` and confirm the complete repository gate, including
       Phase 0, Phase 1, and Phase 2, reports green in one run.
 - [x] Add a real OpenRouter key in Settings; send a normal chat message and watch
       a real streamed reply render token-by-token into one assistant bubble

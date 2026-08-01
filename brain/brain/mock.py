@@ -19,6 +19,7 @@ import functools
 import random
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from websockets.exceptions import ConnectionClosed
@@ -273,6 +274,10 @@ async def push_snapshot(send: SendFn) -> None:
     _settings["openrouter_key"] = await asyncio.to_thread(secrets_store.key_status)
     for key, status in _settings.items():
         await send("settings_state", {"key": key, "status": status})
+    await send("project_roots_state", {
+        "roots": [str(Path.home() / name) for name in ("Desktop", "Documents", "Downloads")],
+        "pruned": [],
+    })
     await send(
         "capabilities_state",
         {
@@ -529,6 +534,10 @@ async def handle_settings_update(msg: dict, send: SendFn) -> None:
     """
     key = msg["key"]
     value = msg.get("value")
+    if key == "project_roots":
+        roots = [item for item in (value or []) if isinstance(item, str) and item.strip()]
+        await send("project_roots_state", {"roots": roots, "pruned": []})
+        return
     if key == "openrouter_key":
         from brain import secrets_store
 
@@ -801,5 +810,12 @@ async def handle_user_msg(msg: dict, send: SendFn, broadcast: BroadcastFn) -> No
     del send
     conversation_id = msg["conversation_id"]
     task_id = str(uuid.uuid4())
+    turn_id = msg.get("turn_id") or msg.get("id")
+
+    async def correlated_broadcast(msg_type: str, payload: dict) -> None:
+        if turn_id and msg_type in {"token", "done", "error", "approval_request"}:
+            payload = {**payload, "turn_id": turn_id}
+        await broadcast(msg_type, payload)
+
     scenario = _TRIGGERS.get(msg["text"].strip().lower(), _scenario_generic)
-    await scenario(conversation_id, task_id, broadcast)
+    await scenario(conversation_id, task_id, correlated_broadcast)

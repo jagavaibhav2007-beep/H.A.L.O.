@@ -28,7 +28,7 @@ class IpcEnvelope(TypedDict):
 # envelope/field change; a major mismatch across the WS is refused loudly on
 # both sides. Hand-mirrored with ui/src/ipc/contract.ts CONTRACT_VERSION and
 # shared/ipc-contract.json "version" -- check_contract_sync.py compares them.
-CONTRACT_VERSION = "1.2"
+CONTRACT_VERSION = "1.4"
 
 
 def contract_major(version: object) -> int | None:
@@ -50,6 +50,7 @@ class UserMsg(IpcEnvelope):
     text: str
     conversation_id: str
     source: Literal["ui", "voice"]
+    turn_id: NotRequired[str]
 
 
 class ConversationHistoryQueryMsg(IpcEnvelope):
@@ -114,11 +115,18 @@ class HelloAckMsg(IpcEnvelope):
 class TokenMsg(IpcEnvelope):
     text: str
     conversation_id: str
+    turn_id: NotRequired[str]
+
+
+class ProjectRootsStateMsg(IpcEnvelope):
+    roots: list[str]
+    pruned: NotRequired[list[str]]
 
 
 class ConversationHistoryTurn(TypedDict):
     role: Literal["user", "assistant"]
     text: str
+    turn_id: NotRequired[str]
 
 
 class ConversationHistoryStateMsg(IpcEnvelope):
@@ -147,12 +155,15 @@ class ApprovalRequestMsg(IpcEnvelope):
     summary: NotRequired[str]
     destructive: NotRequired[bool]
     conversation_id: NotRequired[str]
+    turn_id: NotRequired[str]
 
 
 class DoneMsg(IpcEnvelope):
     conversation_id: str
     task_id: NotRequired[str]
     interrupted: NotRequired[bool]
+    turn_id: NotRequired[str]
+    model: NotRequired[str]
 
 
 class ErrorMsg(IpcEnvelope):
@@ -160,6 +171,7 @@ class ErrorMsg(IpcEnvelope):
     message: str
     recoverable: bool
     conversation_id: NotRequired[str]
+    turn_id: NotRequired[str]
     operation_kind: NotRequired[
         Literal["undo", "memory_edit", "approval_response", "interrupt", "task_op", "lane_pin", "mic", "skill_op"]
     ]
@@ -168,13 +180,19 @@ class ErrorMsg(IpcEnvelope):
 
 class TaskStateMsg(IpcEnvelope):
     task_id: str
-    state: Literal["running", "paused", "waiting_approval", "done", "failed"]
+    state: Literal["waiting", "running", "paused", "waiting_approval", "done", "failed"]
     lane: Literal[1, 2, 3]
     title: NotRequired[str]
     step: NotRequired[int]
     steps_total: NotRequired[int]
     step_label: NotRequired[str]
     reason: NotRequired[str]
+
+
+class TaskLogMsg(IpcEnvelope):
+    task_id: str
+    seq: int
+    text: str
 
 
 class StreamFrameMsg(IpcEnvelope):
@@ -265,12 +283,14 @@ IpcMessage = Union[
     UndoMsg,
     HelloAckMsg,
     TokenMsg,
+    ProjectRootsStateMsg,
     ConversationHistoryStateMsg,
     ActivityMsg,
     ApprovalRequestMsg,
     DoneMsg,
     ErrorMsg,
     TaskStateMsg,
+    TaskLogMsg,
     StreamFrameMsg,
     VoiceStateMsg,
     TranscriptMsg,
@@ -312,6 +332,7 @@ CONTRACT_SPEC: dict = {
         }),
         "user_msg": _message(IN, ["text", "conversation_id", "source"], {
             "text": _field(S), "conversation_id": _field(S), "source": _field(S, ["ui", "voice"]),
+            "turn_id": _field(S),
         }),
         "conversation_history_query": _message(IN, ["conversation_id"], {"conversation_id": _field(S)}),
         "interrupt": _message(IN, ["conversation_id"], {"conversation_id": _field(S)}),
@@ -335,7 +356,7 @@ CONTRACT_SPEC: dict = {
         "undo": _message(IN, ["undo_token"], {"undo_token": _field(S)}),
         "hello_ack": _message(OUT, [], {"contract_version": _field(S)}),
         "token": _message(OUT, ["text", "conversation_id"], {
-            "text": _field(S), "conversation_id": _field(S),
+            "text": _field(S), "conversation_id": _field(S), "turn_id": _field(S),
         }),
         "conversation_history_state": _message(OUT, ["conversation_id", "turns"], {
             "conversation_id": _field(S), "turns": _field(J),
@@ -347,21 +368,26 @@ CONTRACT_SPEC: dict = {
         "approval_request": _message(OUT, ["approval_id", "tool", "args_redacted", "tier", "task_id"], {
             "approval_id": _field(S), "tool": _field(S), "args_redacted": _field(O),
             "tier": _field(I, LANES), "task_id": _field(S), "summary": _field(S),
-            "destructive": _field(B), "conversation_id": _field(S),
+            "destructive": _field(B), "conversation_id": _field(S), "turn_id": _field(S),
         }),
         "done": _message(OUT, ["conversation_id"], {
-            "conversation_id": _field(S), "task_id": _field(S), "interrupted": _field(B),
+            "conversation_id": _field(S), "task_id": _field(S), "interrupted": _field(B), "turn_id": _field(S),
+            "model": _field(S),
         }),
         "error": _message(OUT, ["code", "message", "recoverable"], {
             "code": _field(S), "message": _field(S), "recoverable": _field(B), "conversation_id": _field(S),
+            "turn_id": _field(S),
             "operation_kind": _field(S, ["undo", "memory_edit", "approval_response", "interrupt", "task_op", "lane_pin", "mic", "skill_op"]),
             "operation_id": _field(S),
         }),
         "task_state": _message(OUT, ["task_id", "state", "lane"], {
             "task_id": _field(S),
-            "state": _field(S, ["running", "paused", "waiting_approval", "done", "failed"]),
+            "state": _field(S, ["waiting", "running", "paused", "waiting_approval", "done", "failed"]),
             "lane": _field(I, LANES), "title": _field(S), "step": _field(I), "steps_total": _field(I),
             "step_label": _field(S), "reason": _field(S),
+        }),
+        "task_log": _message(OUT, ["task_id", "seq", "text"], {
+            "task_id": _field(S), "seq": _field(I), "text": _field(S),
         }),
         "stream_frame": _message(OUT, ["task_id", "jpeg_b64", "seq"], {
             "task_id": _field(S), "jpeg_b64": _field(S), "seq": _field(I),
@@ -378,6 +404,9 @@ CONTRACT_SPEC: dict = {
         }),
         "settings_state": _message(OUT, ["key", "status"], {
             "key": _field(S), "status": _field(S, ["set", "missing", "invalid", "unverified"]),
+        }),
+        "project_roots_state": _message(OUT, ["roots"], {
+            "roots": _field(J), "pruned": _field(J),
         }),
         "capabilities_state": _message(
             OUT,
@@ -442,11 +471,16 @@ def _value_matches(value: object, field_spec: dict) -> bool:
 def _valid_conversation_history(value: object) -> bool:
     return isinstance(value, list) and all(
         isinstance(turn, dict)
-        and set(turn) == {"role", "text"}
+        and set(turn) in ({"role", "text"}, {"role", "text", "turn_id"})
         and turn["role"] in ("user", "assistant")
         and isinstance(turn["text"], str)
+        and ("turn_id" not in turn or isinstance(turn["turn_id"], str))
         for turn in value
     )
+
+
+def _valid_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _sample_value(field_spec: dict) -> object:
@@ -503,6 +537,11 @@ def parse_ipc_message(raw: object, expected_direction: Literal["inbound", "outbo
         raise IpcValidationError('ipc: "error" operation_kind and operation_id must appear together')
     if msg_type == "conversation_history_state" and not _valid_conversation_history(raw["turns"]):
         raise IpcValidationError('ipc: "conversation_history_state" turns have an invalid shape')
+    if msg_type == "project_roots_state" and (
+        not _valid_string_list(raw["roots"])
+        or ("pruned" in raw and not _valid_string_list(raw["pruned"]))
+    ):
+        raise IpcValidationError('ipc: "project_roots_state" roots/pruned must be string arrays')
 
     return raw  # type: ignore[return-value]
 
@@ -598,6 +637,9 @@ def _self_check() -> None:
             frame[field] = _sample_value(field_spec)
         if msg_type == "conversation_history_state":
             frame["turns"] = history["turns"]
+        if msg_type == "project_roots_state":
+            frame["roots"] = ["C:/Users/example/Desktop"]
+            frame["pruned"] = ["C:/stale"]
         parse_ipc_message(frame, spec["direction"])
         opposite = "outbound" if spec["direction"] == "inbound" else "inbound"
         try:

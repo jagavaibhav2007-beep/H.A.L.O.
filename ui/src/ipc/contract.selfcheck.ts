@@ -28,7 +28,7 @@ function invalidValue(spec: RuntimeFieldSpec): unknown {
     integer: 1.5,
     number: "1.5",
     object: [],
-    json: undefined,
+    json: () => undefined,
   }[spec.type];
 }
 
@@ -171,6 +171,14 @@ function expectAccepted(raw: unknown, why: string) {
 }
 
 expectAccepted(historyFrame, "well-formed conversation history");
+expectRejected(
+  { type: "project_roots_state", id: "roots", ts: "x", roots: ["C:/ok", 42] },
+  "project roots must contain only strings",
+);
+expectRejected(
+  { type: "project_roots_state", id: "roots", ts: "x", roots: ["C:/ok"], pruned: {} },
+  "pruned project roots must be a string array",
+);
 
 // Regression: useHaloConnection.ts builds outbound messages via object-literal
 // spread of an optional param, e.g. `{ ..., belief_id, op, text }` where `text`
@@ -205,6 +213,10 @@ for (const [type, spec] of Object.entries(CONTRACT_SPEC.messages)) {
     frame[field] = sampleValue(fieldSpec);
   }
   if (type === "conversation_history_state") frame.turns = historyFrame.turns;
+  if (type === "project_roots_state") {
+    frame.roots = ["C:/Users/example/Desktop"];
+    frame.pruned = ["C:/stale"];
+  }
   expectAccepted(frame, `generated complete ${type}`);
   for (const [field, fieldSpec] of Object.entries(spec.fields)) {
     expectRejected({ ...frame, [field]: invalidValue(fieldSpec) }, `${type}.${field} invalid value`);

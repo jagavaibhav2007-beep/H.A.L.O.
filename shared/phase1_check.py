@@ -28,6 +28,7 @@ SNAPSHOT_TYPES = {
     "task_state",
     "approval_request",
     "settings_state",
+    "project_roots_state",
     "capabilities_state",
     "spend_update",
     "snapshot_complete",

@@ -203,7 +203,7 @@ test("sending immediately creates a pending Halo turn before the first token", (
   fireEvent.change(composer, { target: { value: "Explain this" } });
   fireEvent.keyDown(composer, { key: "Enter", shiftKey: false });
 
-  expect(sendUserMsg).toHaveBeenCalledWith("a", "Explain this");
+  expect(sendUserMsg).toHaveBeenCalledWith("a", "Explain this", expect.any(String));
   expect(useHaloStore.getState().conversations.a.turns).toMatchObject([
     { role: "user", text: "Explain this" },
     { role: "assistant", status: "streaming", text: "" },
@@ -351,7 +351,7 @@ test("a failed answer offers a one-click retry using the original user message",
 
   fireEvent.click(screen.getByRole("button", { name: "Retry response" }));
 
-  expect(sendUserMsg).toHaveBeenCalledWith("a", "Please try this");
+  expect(sendUserMsg).toHaveBeenCalledWith("a", "Please try this", expect.any(String));
   const turns = useHaloStore.getState().conversations.a.turns;
   expect(turns[turns.length - 1]).toMatchObject({
     role: "assistant",

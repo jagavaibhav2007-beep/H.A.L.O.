@@ -40,11 +40,51 @@ _UNDO_BLOB_CAP = 10 * 1024 * 1024
 
 
 def _roots() -> list[Path]:
-    raw = store.get_setting("project_roots")
-    if raw:
-        return [Path(p).expanduser().resolve() for p in raw]
     home = Path.home()
-    return [(home / name).resolve() for name in ("Desktop", "Documents", "Downloads")]
+    defaults = [(home / name).resolve() for name in ("Desktop", "Documents", "Downloads")]
+    raw = store.get_setting("project_roots")
+    if not isinstance(raw, list):
+        return defaults
+
+    configured: list[Path] = []
+    persisted: list[str] = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            root = Path(value).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not root.is_dir():
+            continue
+        if root not in configured:
+            configured.append(root)
+            persisted.append(str(root))
+    # Existing profiles treated project_roots as a full replacement, which let
+    # a stale test/temp path silently remove Desktop/Documents/Downloads. Until
+    # an explicit "replace defaults" setting exists, custom roots are additive.
+    if persisted != raw:
+        store.set_setting("project_roots", persisted)
+    return list(dict.fromkeys([*defaults, *configured]))
+
+
+def project_roots_state() -> dict:
+    """UI-safe accessible-root projection plus stale configured entries."""
+    raw = store.get_setting("project_roots")
+    configured = raw if isinstance(raw, list) else []
+    roots = _roots()  # validates and persists pruning first
+    accepted = set(store.get_setting("project_roots") or [])
+    pruned: list[str] = []
+    for value in configured:
+        if not isinstance(value, str):
+            continue
+        try:
+            normalized = str(Path(value).expanduser().resolve())
+        except (OSError, RuntimeError):
+            normalized = ""
+        if normalized not in accepted:
+            pruned.append(value)
+    return {"roots": [str(root) for root in roots], "pruned": pruned}
 
 
 def _resolve(p: str) -> Path:
@@ -270,7 +310,32 @@ def _run_cmd(args: dict) -> dict:
             candidate = candidate.resolve() if candidate.is_absolute() else (cwd / candidate).resolve()
             if not _in_roots(candidate):
                 raise ValueError(f"not allowed: git path is outside project roots ({candidate})")
-    r = subprocess.run(parts, cwd=cwd, capture_output=True, text=True, timeout=10, shell=False)
+    # Git reads repository, user, and system configuration even for ostensibly
+    # read-only commands. Disable every helper-bearing surface we expose:
+    # fsmonitor, hooks, external diff/textconv, pagers, prompts, and global/
+    # system config. Local config remains available for repository semantics,
+    # but the command-line overrides win for the executable helper keys.
+    git_env = os.environ.copy()
+    git_env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_PAGER": "cat",
+        "GIT_TERMINAL_PROMPT": "0",
+    })
+    safe_parts = [
+        "git",
+        "-c", "core.fsmonitor=false",
+        "-c", f"core.hooksPath={os.devnull}",
+        "-c", "diff.external=",
+        parts[1],
+    ]
+    if parts[1] in ("diff", "log"):
+        safe_parts.extend(("--no-ext-diff", "--no-textconv"))
+    safe_parts.extend(parts[2:])
+    r = subprocess.run(
+        safe_parts, cwd=cwd, capture_output=True, text=True, timeout=10,
+        shell=False, env=git_env,
+    )
     out = r.stdout
     cap = _CMD_HEAD_CAP + _CMD_TAIL_CAP
     if len(out) > cap:
@@ -321,7 +386,7 @@ def _file_create(args: dict) -> dict:
 
 def _create_risky(args: dict) -> bool:
     p = _resolve(args["path"])
-    return p.exists() or not _in_roots(p)
+    return p.exists() or _is_repository_control(p) or not _in_roots(p)
 
 
 def _create_inverse(args: dict, result: dict) -> dict:
@@ -372,7 +437,12 @@ def _file_move(args: dict) -> dict:
 def _move_risky(args: dict) -> bool:
     src = _resolve(args["src"])
     dst = _resolve(args["dst"])
-    return dst.exists() or not (_in_roots(src) and _in_roots(dst))
+    return (
+        dst.exists()
+        or _is_repository_control(src)
+        or _is_repository_control(dst)
+        or not (_in_roots(src) and _in_roots(dst))
+    )
 
 
 def _move_inverse(args: dict, result: dict) -> dict:
@@ -412,53 +482,87 @@ def _delete_inverse(args: dict, result) -> dict | None:
     }
 
 
-async def _dir_organize(args: dict) -> dict:
+async def _dir_organize(args: dict, ctx=None) -> dict:
     moves = args["moves"]
     if len(moves) > _BATCH_CAP:
         raise ValueError(f"too many moves ({len(moves)}; max {_BATCH_CAP} per batch)")
 
-    def run() -> dict:
-        task_id = f"organize-{uuid.uuid4().hex[:8]}"
-        store.connect()
-        store.upsert_task(
-            task_id, state="running", lane=1,
-            title=f"Organize {len(moves)} files in {args['path']}",
-            step=0, steps_total=len(moves),
-        )
-        done: list[dict] = []
-        skipped: list[str] = []
-        failed: list[dict] = []
-        # ponytail: no cooperative cancel between files yet -- arrives with
-        # real long tasks; and no stepped task_state progress frames -- tool
-        # fns get a broadcast context in Step 9.
-        for m in moves:
+    done: list[dict] = []
+    skipped: list[str] = []
+    failed: list[dict] = []
+    for index, m in enumerate(moves, start=1):
+        if ctx is not None:
+            await ctx.checkpoint()
+
+        def move_one() -> tuple[str, dict | str]:
             src = _resolve(m["src"])
             if not src.exists():
-                skipped.append(str(src))  # vanished mid-plan: skip, don't crash (D6)
-                continue
-            # A single failed move (locked file, full disk, MAX_PATH, cross-device)
-            # must not abandon the batch: that would strand every already-moved
-            # file with no undo record (inverse builds from `moves`). Record the
-            # failure and keep going so `done` still yields a reversal for the rest.
+                return "skipped", str(src)
+            if not src.is_file():
+                return "failed", {"src": str(src), "error": "batch organize accepts files only"}
             try:
                 dst = _uncollide(_resolve(m["dst"]))
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(src), str(dst))
             except OSError as exc:
-                failed.append({"src": str(src), "error": str(exc)})
-                continue
-            done.append({"src": str(src), "dst": str(dst)})
-        store.upsert_task(task_id, state="done", step=len(done), steps_total=len(moves))
-        return {"task_id": task_id, "moves": done, "skipped": skipped, "failed": failed}
+                return "failed", {"src": str(src), "error": str(exc)}
+            result = {"src": str(src), "dst": str(dst)}
+            if dst.is_file():
+                result["sha256"] = _sha(dst)
+            return "done", result
 
-    return await asyncio.to_thread(run)
+        kind, result = await asyncio.to_thread(move_one)
+        if kind == "done":
+            done.append(result)
+            if ctx is not None:
+                move_args = {"src": result["src"], "dst": result["dst"]}
+                # Keep one durable, non-undoable receipt per completed move for
+                # review/audit. The task's final batch action remains the sole
+                # undoable row, so users cannot partially consume a batch undo.
+                await asyncio.to_thread(
+                    store.record_action,
+                    "file_move",
+                    move_args,
+                    ctx.tier,
+                    ctx.lane,
+                    "task_step_ok",
+                    False,
+                    None,
+                    ctx.task_id,
+                )
+                await ctx.broadcast("activity", {
+                    "text": f"Moved {result['src']} to {result['dst']}.",
+                    "narrate": False,
+                    "task_id": ctx.task_id,
+                    "undoable": False,
+                    "tier": ctx.tier,
+                    "lane": ctx.lane,
+                })
+        elif kind == "skipped":
+            skipped.append(result)
+        else:
+            failed.append(result)
+        checkpoint = {"moves": done, "skipped": skipped, "failed": failed}
+        if ctx is not None:
+            await ctx.progress(
+                index,
+                len(moves),
+                f"{kind}: {Path(m['src']).name}",
+                checkpoint=checkpoint,
+            )
+    return {"moves": done, "skipped": skipped, "failed": failed}
 
 
 def _organize_risky(args: dict) -> bool:
     for m in args["moves"]:
         src = _resolve(m["src"])
         dst = _resolve(m["dst"])
-        if dst.exists() or not (_in_roots(src) and _in_roots(dst)):
+        if (
+            dst.exists()
+            or _is_repository_control(src)
+            or _is_repository_control(dst)
+            or not (_in_roots(src) and _in_roots(dst))
+        ):
             return True
     return False
 
@@ -467,14 +571,58 @@ def _organize_inverse(args: dict, result: dict) -> dict | None:
     done = result["moves"]
     if not done:
         return None
-    rev = [{"src": m["dst"], "dst": m["src"]} for m in reversed(done)]
+    if any(not m.get("sha256") for m in done):
+        return None
+    rev = [
+        {"src": m["dst"], "dst": m["src"], "expected_sha256": m["sha256"]}
+        for m in reversed(done)
+    ]
     return {
-        "tool": "dir_organize",
-        "args": {"path": args["path"], "moves": rev},
-        # ponytail: cheap check -- first reversed move's file still where we
-        # put it; per-file sha256 preconditions are the upgrade.
-        "precondition": {"path": rev[0]["src"]},
+        "tool": "dir_restore_batch",
+        "args": {"moves": rev},
+        "precondition": {"batch": [
+            {"path": move["src"], "sha256": move["expected_sha256"]}
+            for move in rev
+        ] + [
+            {"path": move["dst"], "must_be_absent": True}
+            for move in rev
+        ]},
     }
+
+
+def _dir_restore_batch(args: dict) -> dict:
+    """All-preflight batch reversal with rollback on a mid-commit OS error."""
+    moves = args.get("moves")
+    if not isinstance(moves, list) or not moves or len(moves) > _BATCH_CAP:
+        raise ValueError("invalid batch reversal")
+    planned: list[tuple[Path, Path, str]] = []
+    for move in moves:
+        src = _resolve(move["src"])
+        dst = _resolve(move["dst"])
+        expected = move["expected_sha256"]
+        if not src.is_file() or _sha(src) != expected:
+            raise ValueError(f"batch undo precondition failed: changed or missing {src}")
+        if dst.exists():
+            raise ValueError(f"batch undo precondition failed: restore target exists {dst}")
+        planned.append((src, dst, expected))
+
+    completed: list[tuple[Path, Path]] = []
+    try:
+        for src, dst, _expected in planned:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            completed.append((src, dst))
+    except OSError as exc:
+        rollback_errors: list[str] = []
+        for original_src, restored_dst in reversed(completed):
+            try:
+                original_src.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(restored_dst), str(original_src))
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{restored_dst}: {rollback_exc}")
+        detail = f"; rollback incomplete: {'; '.join(rollback_errors)}" if rollback_errors else "; rolled back"
+        raise OSError(f"batch undo failed at commit: {exc}{detail}") from exc
+    return {"restored": [str(dst) for _src, dst, _expected in planned]}
 
 
 # ---------------------------------------------------------- registration ---
@@ -482,9 +630,52 @@ def _organize_inverse(args: dict, result: dict) -> dict | None:
 
 def _path_tier(key: str, inside: int):
     def tier(args: dict) -> int:
-        return inside if _in_roots(_resolve(args[key])) else 3
+        path = _resolve(args[key])
+        if inside > 1 and _is_repository_control(path):
+            return 3
+        return inside if _in_roots(path) else 3
 
     return tier
+
+
+_CONTROL_NAMES = {".gitattributes", ".gitmodules", ".gitconfig"}
+_CONTROL_DIRS = {".git", ".hg", ".svn"}
+
+
+def _is_repository_control(path: Path) -> bool:
+    """Whether changing path can alter how source-control commands execute."""
+    lowered = {part.casefold() for part in path.parts}
+    return path.name.casefold() in _CONTROL_NAMES or bool(lowered & _CONTROL_DIRS)
+
+
+def _user_intent(verbs: tuple[str, ...], *path_keys: str):
+    """Conservative current-message authority check for approval-free writes."""
+    def allowed(args: dict, user_text: str) -> bool:
+        text = " ".join(user_text.casefold().replace("\\", "/").split())
+        words = set(text.replace("/", " ").replace(".", " ").split())
+        if not any(verb in words for verb in verbs):
+            return False
+        candidates: set[str] = set()
+        for key in path_keys:
+            raw = args.get(key)
+            if not isinstance(raw, str):
+                continue
+            normalized = raw.casefold().replace("\\", "/")
+            candidates.add(normalized)
+            candidates.add(Path(raw).name.casefold())
+        candidates.discard("")
+        return any(candidate in text for candidate in candidates)
+
+    return allowed
+
+
+def _organize_user_intent(args: dict, user_text: str) -> bool:
+    paths = {"path": args.get("path")}
+    for index, move in enumerate(args.get("moves") or []):
+        if isinstance(move, dict):
+            paths[f"src_{index}"] = move.get("src")
+            paths[f"dst_{index}"] = move.get("dst")
+    return _user_intent(("organize", "sort", "move"), *paths.keys())(paths, user_text)
 
 
 def _schema(description: str, props: dict, required: list[str]) -> dict:
@@ -574,6 +765,8 @@ gate.register(
 gate.register(
     "file_create", _file_create,
     tier=lambda a: 3 if _create_risky(a) else 2, destructive=_create_risky,
+    mutating=True,
+    user_intent=_user_intent(("create", "write", "make", "save"), "path"),
     redact=lambda a: {"path": a["path"], "content": f"<{len(a.get('content', ''))} chars>"},
     summary=lambda a: f"I want to create {a['path']}.",
     inverse=_create_inverse,
@@ -590,6 +783,8 @@ gate.register(
 )
 gate.register(
     "file_edit", _file_edit, tier=_path_tier("path", 2),
+    mutating=True,
+    user_intent=_user_intent(("edit", "change", "update", "replace", "fix"), "path"),
     redact=lambda a: {
         "path": a["path"],
         "old": f"<{len(a.get('old', ''))} chars>",
@@ -612,6 +807,8 @@ gate.register(
 gate.register(
     "file_move", _file_move,
     tier=lambda a: 3 if _move_risky(a) else 2, destructive=_move_risky,
+    mutating=True,
+    user_intent=_user_intent(("move", "rename", "organize", "sort"), "src", "dst"),
     summary=lambda a: f"I want to move {a['src']} to {a['dst']}.",
     inverse=_move_inverse,
     schema=_schema(
@@ -627,6 +824,7 @@ gate.register(
 )
 gate.register(
     "file_delete", _file_delete, tier=3, destructive=True,
+    mutating=True,
     redact=lambda a: {"path": a["path"]},  # drops expected_sha256/_prior noise
     summary=lambda a: f"I want to delete {a['path']}.",
     inverse=_delete_inverse,
@@ -639,8 +837,16 @@ gate.register(
     ),
 )
 gate.register(
+    "dir_restore_batch", _dir_restore_batch, tier=2,
+    summary=lambda a: f"I restored {len(a.get('moves') or [])} files from one batch.",
+)
+gate.register(
     "dir_organize", _dir_organize,
     tier=lambda a: 3 if _organize_risky(a) else 2, destructive=_organize_risky,
+    mutating=True, user_intent=_organize_user_intent,
+    task=True, supports_pause=True,
+    title=lambda a: f"Organize {len(a.get('moves') or [])} files in {a.get('path', '')}",
+    steps_total=lambda a: len(a.get("moves") or []),
     summary=lambda a: f"I want to organize {len(a['moves'])} files in {a['path']}.",
     inverse=_organize_inverse,
     schema=_schema(

@@ -136,8 +136,10 @@ async def check_idle_auth_times_out() -> None:
 def check_session_file_is_atomic_and_private() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "Halo" / "session.json"
-        write_session_file(1234, "secret", path)
-        assert json.loads(path.read_text(encoding="utf-8")) == {"port": 1234, "token": "secret"}
+        write_session_file(1234, "ui-secret", path, voice_token="voice-secret")
+        assert json.loads(path.read_text(encoding="utf-8")) == {
+            "port": 1234, "token": "ui-secret", "voice_token": "voice-secret",
+        }
         assert not path.with_suffix(".tmp").exists()
         if os.name != "nt":
             assert path.stat().st_mode & 0o777 == 0o600
@@ -225,9 +227,9 @@ async def check_conversation_order(port: int, token: str) -> None:
 async def check_snapshot_not_interleaved() -> None:
     """A broadcast aimed at a client whose snapshot is still streaming must be
     HELD and delivered after it, never spliced into the middle -- otherwise
-    `spend_update` (the snapshot's last-frame sentinel every drain reads to)
-    can arrive first, and the UI sees a live delta before the state it applies
-    to. This was a real intermittent failure.
+    the UI can see a live delta before the state it applies to. The shared
+    dispatcher appends the authoritative `snapshot_complete` marker after this
+    producer finishes. This was a real intermittent failure.
 
     Driven directly rather than by racing two sockets: the bug needs a
     broadcast to land inside the snapshot's own await window, which timing
@@ -359,6 +361,68 @@ async def check_non_ascii_token_is_rejected_not_raised() -> None:
     accepted = await server._auth(OneFrameWS(_frame("hello", token="real-token")), "real-token", 1)
     assert accepted == "ui", accepted
     print("[check 22] a non-ASCII hello token is rejected, not raised: OK")
+
+
+async def check_component_credentials_bind_server_role() -> None:
+    class OneFrameWS:
+        def __init__(self, frame: dict) -> None:
+            self.raw = json.dumps(frame)
+
+        async def recv(self) -> str:
+            return self.raw
+
+    tokens = {"ui": "ui-secret", "voice": "voice-secret"}
+    voice = await server._auth(
+        OneFrameWS(_frame("hello", token="voice-secret", role="voice")), tokens, 1
+    )
+    assert voice == "voice", voice
+    ui = await server._auth(
+        OneFrameWS(_frame("hello", token="ui-secret", role="ui")), tokens, 1
+    )
+    assert ui == "ui", ui
+    assert await server._auth(
+        OneFrameWS(_frame("hello", token="voice-secret", role="ui")), tokens, 1
+    ) is None
+    assert await server._auth(
+        OneFrameWS(_frame("hello", token="ui-secret", role="voice")), tokens, 1
+    ) is None
+    print("[check 22b] role is bound to a distinct server-issued component credential, never the client claim: OK")
+
+
+async def check_voice_inbound_authorization(port: int, voice_token: str) -> None:
+    ws = await _connect(port)
+    try:
+        await ws.send(json.dumps(_frame("hello", token=voice_token, role="voice")))
+        ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+        assert ack["type"] == "hello_ack", ack
+        await ws.send(json.dumps(_frame("settings_update", key="theme", value="dark")))
+        denied = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+        assert denied["type"] == "error" and denied["code"] == "operation_forbidden", denied
+        await ws.send(json.dumps(_frame(
+            "user_msg", text="spoofed", conversation_id="voice-authz", source="ui"
+        )))
+        mismatch = json.loads(await asyncio.wait_for(ws.recv(), timeout=1))
+        assert mismatch["type"] == "error" and mismatch["code"] == "source_mismatch", mismatch
+    finally:
+        await ws.close()
+    print("[check 22d] authenticated Voice cannot invoke UI mutations or spoof a UI message source: OK")
+
+
+async def check_request_admission_is_bounded_per_principal() -> None:
+    runtime = server._ServerRuntime(max_tasks=2, max_tasks_per_owner=1)
+    release = asyncio.Event()
+
+    async def block() -> None:
+        await release.wait()
+
+    assert runtime.spawn(block(), owner="ui") is True
+    assert runtime.spawn(block(), owner="ui") is False
+    assert runtime.spawn(block(), owner="voice") is True
+    assert runtime.spawn(block(), owner="other") is False
+    assert len(runtime.tasks) == 2
+    release.set()
+    await asyncio.wait_for(runtime.wait_closed(), timeout=1)
+    print("[check 22c] detached request admission has global and per-principal hard caps: OK")
 
 
 async def check_sends_and_deferred_queue_are_bounded() -> None:
@@ -561,11 +625,10 @@ async def check_tasks_are_supervised_and_cancelled_on_close() -> None:
     print("[check 14] detached handlers are observed; close cancels handlers and decay work: OK")
 
 
-async def check_real_task_controls_fail_honestly() -> None:
+async def check_remaining_unsupported_controls_fail_honestly() -> None:
     frames = []
     async def send(kind, payload):
         frames.append((kind, payload))
-    await server._send_unsupported_operation(_frame("task_op", task_id="task-1", op="pause"), send)
     await server._send_unsupported_operation(_frame("lane_pin", task_id="task-2", lane=3), send)
     # mic carries no domain id -> correlates by the envelope id (fallback);
     # skill_op correlates by skill_name, which is what SkillsView locks on.
@@ -573,14 +636,13 @@ async def check_real_task_controls_fail_honestly() -> None:
     skill = _frame("skill_op", skill_name="demo", op="disable")
     await server._send_unsupported_operation(mic, send)
     await server._send_unsupported_operation(skill, send)
-    assert frames[0][1]["operation_kind"] == "task_op" and frames[0][1]["operation_id"] == "task-1", frames
-    assert frames[1][1]["operation_kind"] == "lane_pin" and frames[1][1]["operation_id"] == "task-2", frames
-    assert frames[2][1]["operation_kind"] == "mic" and frames[2][1]["operation_id"] == mic["id"], frames
-    assert frames[3][1]["operation_kind"] == "skill_op" and frames[3][1]["operation_id"] == "demo", frames
+    assert frames[0][1]["operation_kind"] == "lane_pin" and frames[0][1]["operation_id"] == "task-2", frames
+    assert frames[1][1]["operation_kind"] == "mic" and frames[1][1]["operation_id"] == mic["id"], frames
+    assert frames[2][1]["operation_kind"] == "skill_op" and frames[2][1]["operation_id"] == "demo", frames
     assert all(payload["code"] == "operation_unsupported" for _, payload in frames), frames
-    assert "Voice input" in frames[2][1]["message"], frames
-    assert "Skill controls" in frames[3][1]["message"], frames
-    print("[check 15] real task/mic/skill controls return correlated unsupported errors: OK")
+    assert "Voice input" in frames[1][1]["message"], frames
+    assert "Skill controls" in frames[2][1]["message"], frames
+    print("[check 15] remaining lane/mic/skill controls return correlated unsupported errors: OK")
 
 
 def check_real_dispatch_covers_all_ui_inbound_types() -> None:
@@ -685,7 +747,7 @@ async def check_contract_version_negotiation(port: int, token: str) -> None:
 async def check_turn_admission_and_ordering() -> None:
     """Distinct real conversations are capped; same-conversation order holds."""
     real_run_turn = graph.run_turn
-    locks: dict[str, asyncio.Lock] = {}
+    locks = server._ConversationLocks()
     slots = asyncio.Semaphore(2)
     active = 0
     peak = 0
@@ -713,6 +775,7 @@ async def check_turn_admission_and_ordering() -> None:
         ]
         await asyncio.gather(*distinct)
         assert peak == 2, peak
+        assert len(locks) == 0, "completed one-shot conversation locks must be evicted"
 
         order.clear()
         same = [
@@ -724,6 +787,7 @@ async def check_turn_admission_and_ordering() -> None:
         ]
         await asyncio.gather(*same)
         assert order == ["0", "1", "2", "3", "4"], order
+        assert len(locks) == 0, "serialized conversation lock leaked after its final waiter"
     finally:
         graph.run_turn = real_run_turn
     print("[check 16] real turns cap at 2 in the test; same-conversation order holds: OK")
@@ -764,6 +828,7 @@ async def main() -> None:
         await check_sends_and_deferred_queue_are_bounded()
         await check_real_dispatch_routes_unsupported_over_wire(port, token)
         await check_contract_version_negotiation(port, token)
+        await check_voice_inbound_authorization(port, server.voice_token)
     finally:
         server.close()
         await server.wait_closed()
@@ -775,10 +840,12 @@ async def main() -> None:
     check_second_brain_lock_is_rejected()
     check_frame_visible_to_routing()
     await check_tasks_are_supervised_and_cancelled_on_close()
-    await check_real_task_controls_fail_honestly()
+    await check_remaining_unsupported_controls_fail_honestly()
     check_real_dispatch_covers_all_ui_inbound_types()
     check_mock_dispatch_covers_all_ui_inbound_types()
     await check_non_ascii_token_is_rejected_not_raised()
+    await check_component_credentials_bind_server_role()
+    await check_request_admission_is_bounded_per_principal()
     await check_turn_admission_and_ordering()
     print("[brain.server] self-check OK")
 

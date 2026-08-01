@@ -63,7 +63,7 @@ interface SidecarEvent {
 
 const UNKNOWN_SIDECARS: SidecarSnapshot = { revision: 0, brain: "unknown", voice: "unknown" };
 
-export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
+export function useHaloConnection(onMessage: (msg: IpcMessage) => void, onAuthenticated?: () => void) {
   const [connState, setConnState] = useState<ConnState>("connecting");
   const [sidecars, setSidecars] = useState<SidecarSnapshot>(UNKNOWN_SIDECARS);
   const wsRef = useRef<WebSocket | null>(null);
@@ -76,6 +76,8 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const queuedForPortRef = useRef<number | null>(null);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
+  const onAuthenticatedRef = useRef(onAuthenticated);
+  onAuthenticatedRef.current = onAuthenticated;
 
   // No conversation identity lives here: which thread a message belongs to is
   // a UI decision (store.ts's conversation registry), and this hook is
@@ -186,6 +188,11 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
               // must not escape onmessage: that would leave the socket open (so
               // onclose never arms the reconnect ladder) with auth still false —
               // a permanently deaf connection. Close it and let onclose recover.
+              // Enter snapshot reconciliation synchronously in the same WS
+              // callback as hello_ack. A React effect runs too late: the next
+              // queued snapshot frame can otherwise be reduced as live data.
+              authenticatedRef.current = true;
+              onAuthenticatedRef.current?.();
               try {
                 flushQueuedMessages(ws, queueRef.current);
               } catch (error) {
@@ -193,7 +200,6 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
                 ws.close();
                 return;
               }
-              authenticatedRef.current = true;
               retryAttempt = 0;
               discoveryFailureReported = false;
               setConnState("connected");
@@ -310,8 +316,8 @@ export function useHaloConnection(onMessage: (msg: IpcMessage) => void) {
   const env = () => ({ id: crypto.randomUUID(), ts: new Date().toISOString() });
 
   const sendUserMsg = useCallback(
-    (conversation_id: string, text: string) =>
-      dispatch({ type: "user_msg", ...env(), text, conversation_id, source: "ui" }),
+    (conversation_id: string, text: string, turn_id: string) =>
+      dispatch({ type: "user_msg", ...env(), text, conversation_id, source: "ui", turn_id }),
     [dispatch],
   );
   const sendConversationHistoryQuery = useCallback(

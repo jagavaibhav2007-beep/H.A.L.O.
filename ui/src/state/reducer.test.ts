@@ -6,6 +6,7 @@ import {
   applyFrame,
   beginUserRequest,
   CONVERSATION_CAP,
+  TASK_LOG_CAP,
   initialState,
   type HaloState,
 } from "./reducer";
@@ -72,9 +73,42 @@ test("stored history hydrates only an empty conversation", () => {
 
   state = appendUserTurn(state, "live-chat", "A newer message", "live-user");
   state = applyFrame(state, { ...history, conversation_id: "live-chat" });
-  expect(state.conversations["live-chat"].turns).toHaveLength(1);
-  expect(state.conversations["live-chat"].turns[0]).toMatchObject({ role: "user", text: "A newer message" });
+  expect(state.conversations["live-chat"].turns).toHaveLength(3);
+  expect(state.conversations["live-chat"].turns[2]).toMatchObject({ role: "user", text: "A newer message" });
   expect(state.conversations["live-chat"].historyLoaded).toBe(true);
+});
+
+test("history reconciles a locally pending request instead of discarding the server reply", () => {
+  let state = beginUserRequest(initialState, "chat", "ship it", "turn-1");
+  state = applyFrame(state, {
+    type: "conversation_history_state",
+    ...envelope(),
+    conversation_id: "chat",
+    turns: [
+      { role: "user", text: "ship it", turn_id: "turn-1" },
+      { role: "assistant", text: "Shipped.", turn_id: "turn-1" },
+    ],
+  });
+  expect(state.conversations.chat.turns).toHaveLength(2);
+  expect(state.conversations.chat.turns[1]).toMatchObject({
+    role: "assistant", text: "Shipped.", status: "done", turnId: "turn-1",
+  });
+});
+
+test("turn_id routes out-of-order frames to the correct queued placeholder", () => {
+  let state = beginUserRequest(initialState, "chat", "first", "turn-1");
+  state = beginUserRequest(state, "chat", "second", "turn-2");
+  state = applyFrame(state, {
+    type: "token", ...envelope(), text: "second answer", conversation_id: "chat", turn_id: "turn-2",
+  });
+  state = applyFrame(state, {
+    type: "done", ...envelope(), conversation_id: "chat", turn_id: "turn-2",
+  });
+  state = applyFrame(state, {
+    type: "token", ...envelope(), text: "first answer", conversation_id: "chat", turn_id: "turn-1",
+  });
+  expect(state.conversations.chat.turns[1]).toMatchObject({ text: "first answer", status: "streaming" });
+  expect(state.conversations.chat.turns[3]).toMatchObject({ text: "second answer", status: "done" });
 });
 
 test("terminal discovery failure has a distinct unavailable connection state", () => {
@@ -94,16 +128,20 @@ test("a queued follow-up placeholder does not steal the turn already streaming",
   expect(turns[3]).toMatchObject({ role: "assistant", text: "", status: "streaming" });
 });
 
-test("an abandoned placeholder cannot absorb the next turn's frames", () => {
+test("an older unanswered placeholder cannot absorb a correlated later turn", () => {
   // req-1 never gets a single frame back (dropped/failed turn). Oldest-first
   // matching would otherwise route req-2's whole reply into its bubble.
   let state = beginUserRequest(initialState, "chat", "first", "req-1");
   state = beginUserRequest(state, "chat", "second", "req-2");
-  state = applyFrame(state, { type: "token", ...envelope(), text: "answer", conversation_id: "chat" });
-  state = applyFrame(state, { type: "done", ...envelope(), conversation_id: "chat" });
+  state = applyFrame(state, {
+    type: "token", ...envelope(), text: "answer", conversation_id: "chat", turn_id: "req-2",
+  });
+  state = applyFrame(state, {
+    type: "done", ...envelope(), conversation_id: "chat", turn_id: "req-2",
+  });
 
   const turns = state.conversations.chat.turns;
-  expect(turns[1]).toMatchObject({ role: "assistant", text: "", status: "interrupted" });
+  expect(turns[1]).toMatchObject({ role: "assistant", text: "", status: "streaming" });
   expect(turns[3]).toMatchObject({ role: "assistant", text: "answer", status: "done" });
 });
 
@@ -140,7 +178,7 @@ function activity(task_id: string, id?: string): ActivityMsg {
 }
 
 function finishSnapshot(state: HaloState): HaloState {
-  return applyFrame(state, { type: "spend_update", ...envelope(), session_usd: 0, month_usd: 0 });
+  return applyFrame(state, { type: "snapshot_complete", ...envelope() });
 }
 
 test("a reconnect snapshot removes tasks and approvals that the Brain no longer reports", () => {
@@ -198,7 +236,7 @@ test("conversations are LRU-capped so the always-on orb window can't leak them",
   expect(Object.keys(state.conversations)).toHaveLength(CONVERSATION_CAP);
 });
 
-test("snapshot_complete terminates snapshot mode and reconciles, like spend_update", () => {
+test("snapshot_complete terminates snapshot mode and reconciles", () => {
   let state = initialState;
   state = applyFrame(state, task("finished-while-away"));
   state = applyConnectionEvent(state, { type: "ws_closed" });
@@ -214,16 +252,30 @@ test("snapshot_complete terminates snapshot mode and reconciles, like spend_upda
   expect(state.activities.length).toBe(before + 1);
 });
 
-test("spend_update still terminates a snapshot when snapshot_complete never arrives (backstop)", () => {
-  // The mock and any Brain that omits the marker must still converge, never
-  // wedge in snapshot mode silently swallowing live frames.
+test("spend_update cannot terminate an in-progress snapshot", () => {
   let state = initialState;
   state = applyFrame(state, task("finished-while-away"));
   state = applyConnectionEvent(state, { type: "ws_closed" });
   state = applyFrame(state, task("reported-by-snapshot"));
-  state = finishSnapshot(state); // spend_update only, no snapshot_complete
+  state = applyFrame(state, { type: "spend_update", ...envelope(), session_usd: 1, month_usd: 2 });
 
-  expect(Object.keys(state.tasks)).toEqual(["reported-by-snapshot"]);
+  expect(state.snapshot.pending).toBe(true);
+  expect(Object.keys(state.tasks)).toEqual(["finished-while-away", "reported-by-snapshot"]);
+});
+
+test("task log tails are sequence-deduplicated and bounded", () => {
+  let state = initialState;
+  for (let seq = 1; seq <= TASK_LOG_CAP + 1; seq += 1) {
+    state = applyFrame(state, {
+      type: "task_log", ...envelope(), task_id: "task-logs", seq, text: `line-${seq}`,
+    });
+  }
+  state = applyFrame(state, {
+    type: "task_log", ...envelope(), task_id: "task-logs", seq: 2, text: "stale",
+  });
+  expect(state.taskLogs["task-logs"]).toHaveLength(TASK_LOG_CAP);
+  expect(state.taskLogs["task-logs"][0].seq).toBe(2);
+  expect(state.taskLogs["task-logs"][TASK_LOG_CAP - 1]?.seq).toBe(TASK_LOG_CAP + 1);
 });
 
 test("a correlated approval failure is recorded and also closes its conversation turn", () => {

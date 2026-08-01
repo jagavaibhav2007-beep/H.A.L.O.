@@ -1,14 +1,16 @@
 # System Design: Task Runtime
 
-Status: **design (Tranche B1 of [PHASE3_READINESS_AUDIT.md](../PHASE3_READINESS_AUDIT.md)) — not yet implemented.** Implementation is B2 and gates Phase 3a. Every Phase 3 sub-phase (3a–3e) inherits this shape.
+Status: **implemented in the Phase 2 exit-hardening tranche.** `dir_organize`
+and `doc_digest` are the first task-shaped tools; every Phase 3 sub-phase
+(3a–3e) inherits this runtime.
 
 ## Problem
 
-Phase 2 has exactly one unit of execution: the interactive chat turn. A "long-running task" today is just a long tool call inside a turn, which means it:
+Before exit hardening, Phase 2 had exactly one unit of execution: the interactive chat turn. A long-running tool therefore:
 
 - holds one of the 4 global turn slots (`_REAL_TURN_CONCURRENCY`, `server.py`) and the per-conversation lock for its full wall-clock time — four long tasks hang every new conversation in the app;
 - cannot be cancelled mid-tool (`stop` is only checked between LLM stream deltas), violating the ≤ ~2 s halt rule in [11-ipc-contract.md](11-ipc-contract.md);
-- answers `task_op`/`lane_pin` with `operation_unsupported`;
+- answered `task_op` with `operation_unsupported`;
 - has no channel for streamed output (coding-agent stdout has nowhere to go but `activity`).
 
 ## Design: two execution currencies
@@ -49,18 +51,28 @@ Phase 2 has exactly one unit of execution: the interactive chat turn. A "long-ru
 - **Drop-not-queue**: like `stream_frame`, `task_log` is exempt from the deferred-broadcast queue during snapshots (a reconnecting client missed logs anyway; the activity log holds the durable record). This keeps high-rate task output from tripping the 1 MiB overflow disconnect.
 - UI: bounded ring per task (e.g. last 500 chunks), rendered as a tail view in the tasks panel. Routed to UI role only — Voice never receives it; narration stays on `activity(narrate:true)`.
 
-Contract impact: one new outbound type + no changes to existing frames → `contract_version` minor bump (1.0 → 1.1), which the A6 versioning scheme admits without breaking older clients.
+Contract impact: `task_log` was introduced as a backwards-compatible outbound
+type. The current contract is 1.4 because the same hardening tranche also added
+turn correlation, project-root state, and explicit snapshot completion; all are
+minor-version additions admitted by the A6 versioning scheme.
 
 ## What this deliberately does not do
 
-- No task persistence beyond the intent/result activity rows — a queued-but-unstarted task does not survive a Brain restart (it never had side effects; the reconciler reports it honestly). Add durable queueing only if a real Phase 3 need appears.
+- No automatic task replay after restart. Task metadata, args, checkpoints,
+  intent, and results are durable; waiting/running/paused work is reconciled to
+  a truthful failed state, with partial undo when a checkpoint proves side
+  effects. Add resumable replay only for a future tool that can prove it safe.
 - No per-task priority/preemption. Two workers, FIFO. <!-- ponytail: FIFO cap-2; add priority when a real starvation case shows up -->
 - No changes to Voice routing, the approval gate, or the interrupt-vs-approval rules in 11 — tasks sit *under* the existing gate, not beside it.
 
-## Implementation order (B2)
+## Implemented evidence
 
-1. Contract: add `task_log`, bump minor version, mirror all three files, extend mock + `phase1_check` if a scripted scenario needs it.
-2. TaskRuntime + TaskContext in the Brain; convert `dir_organize` as the first task-shaped tool (closes the AUDIT_PLAN deferral: cooperative cancel + per-step progress).
-3. Real `task_op` dispatch; remove it from `_REAL_UNSUPPORTED_OPS`.
-4. UI: task log tail in the tasks panel; `task_log` handling in the reducer (bounded ring).
-5. Gate: `phase2_check` section — start a long task, chat concurrently in the same conversation, assert `stop` lands ≤ 2 s, kill the Brain mid-task and assert reconciliation reports honestly.
+1. `brain/brain/task_runtime.py` owns the cap-2 worker pool, durable state,
+   reconciliation, cooperative pause/stop, progress, and coalesced logs.
+2. `brain/tests/test_task_runtime.py` proves honest queueing, same-conversation
+   concurrent chat, stop under two seconds, and restart reconciliation without
+   replaying side effects.
+3. `task_log` is mirrored across the 1.4 contract and retained as a bounded
+   500-chunk UI tail.
+4. `shared/phase2_check.py` exercises `doc_digest` through the authenticated
+   WebSocket and verifies its durable terminal result and continuation.

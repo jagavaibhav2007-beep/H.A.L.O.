@@ -84,7 +84,7 @@ async def run(uri: str, token: str, *, authenticated: asyncio.Event | None = Non
 
 def _read_session(session_file: Path = SESSION_FILE) -> tuple[int, str]:
     data = json.loads(session_file.read_text(encoding="utf-8"))
-    port, token = data["port"], data["token"]
+    port, token = data["port"], data["voice_token"]
     if isinstance(port, bool) or not isinstance(port, int) or not 0 < port <= 65535:
         raise ValueError("session port must be an integer from 1 to 65535")
     if not isinstance(token, str) or not token:

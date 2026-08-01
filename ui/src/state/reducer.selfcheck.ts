@@ -358,6 +358,8 @@ function token(text: string, conversation_id: string): TokenMsg {
     task_id: "shared-task", undoable: true, undo_token: "undo-snapshot", tier: 2, lane: 1,
   });
   state = applyFrame(state, { type: "spend_update", ...envelope(), session_usd: 0, month_usd: 0 });
+  assert(state.tasks["stale-task"] !== undefined, "snapshot: spend update is not a terminator");
+  state = applyFrame(state, { type: "snapshot_complete", ...envelope() });
   assert(state.tasks["stale-task"] === undefined, "snapshot: absent stale task is removed");
   assert(state.activities.length === 1, "snapshot: replayed activity is deduplicated");
   assert(state.approvals["pending-after-reconnect"] !== undefined, "snapshot: backlog does not erase pending approval");

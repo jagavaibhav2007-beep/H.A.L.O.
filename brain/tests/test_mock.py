@@ -40,6 +40,7 @@ SNAPSHOT_TYPES = {
     "task_state",
     "approval_request",
     "settings_state",
+    "project_roots_state",
     "capabilities_state",
     "spend_update",
     "snapshot_complete",
@@ -214,7 +215,7 @@ async def check_linear_scenarios_all_validate(port: int, token: str) -> None:
     print("[check 6] every linear scenario (memory/skill/voice/flood/stream/generic) emits only contract-valid frames: OK")
 
 
-async def check_voice_routing_subset(port: int, token: str) -> None:
+async def check_voice_routing_subset(port: int, token: str, voice_token: str) -> None:
     """Regression guard for the contract's routing rule (11-ipc-contract.md): a
     role:"voice" client must NOT receive the snapshot, and must NOT receive
     broadcast frames outside its subset (e.g. `done`) -- only token / narrated
@@ -226,7 +227,7 @@ async def check_voice_routing_subset(port: int, token: str) -> None:
     try:
         # Voice authenticates like any client, then must sit in silence -- the
         # snapshot goes to UI clients only.
-        await voice.send(json.dumps(_frame("hello", token=token, role="voice")))
+        await voice.send(json.dumps(_frame("hello", token=voice_token, role="voice")))
         assert json.loads(await asyncio.wait_for(voice.recv(), timeout=1))["type"] == "hello_ack"
         try:
             leaked = json.loads(await asyncio.wait_for(voice.recv(), timeout=1))
@@ -451,7 +452,7 @@ async def main() -> None:
         await check_second_approval_response_gets_error(port, token)
         await check_interrupt_cancels_pending_approval(port, token)
         await check_linear_scenarios_all_validate(port, token)
-        await check_voice_routing_subset(port, token)
+        await check_voice_routing_subset(port, token, server.voice_token)
         await check_same_conversation_is_serialized(port, token)
         await check_skill_op_round_trip(port, token)
         await check_mic_round_trip(port, token)

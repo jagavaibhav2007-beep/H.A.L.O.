@@ -11,10 +11,9 @@ voice/   Python package (voice/__main__.py) — authenticated idle sidecar; real
 shared/  IPC contract source of truth (JSON descriptor) + the TS/Python drift check
 ```
 
-Phases 0–2 are complete: Tauri supervises both Python workers, clients
-authenticate over loopback WebSockets, the React shell is implemented, and
-the default Brain provides the real Phase 2 backend. Voice remains an
-authenticated idle worker until Phase 3.
+Phases 0–1 are complete. The Phase 2 implementation and exit-hardening tranche
+are present; the remaining formal exit work is the human/native checklist in
+`VERIFY.md`. Voice remains an authenticated idle worker until Phase 3.
 
 Brain uses an OS-level lock to prevent multiple instances from competing for `session.json`. After sending `hello`, UI and Voice wait for `hello_ack` before sending application messages.
 
@@ -23,6 +22,12 @@ Brain uses an OS-level lock to prevent multiple instances from competing for `se
 - Node.js + npm (for `ui/`)
 - **Rust + cargo** (for `ui/src-tauri` — the native Tauri shell). Without this, use `./dev.ps1 -Browser` for a functional browser workspace. Plain `npm run dev` remains UI-only.
 - Python 3.11+ (for `brain/` and `voice/`)
+
+Python dependency graphs are pinned with hashes in `brain/requirements.lock`
+and `voice/requirements.lock`. Install those with `python -m pip install
+--require-hashes -r requirements.lock` from each worker directory. Regenerate
+with `uv pip compile pyproject.toml --universal --python-version 3.11
+--generate-hashes`.
 
 ## Running each process
 
@@ -86,7 +91,7 @@ python shared/smoke_test.py
 Prints a `PASS`/`FAIL` line per criterion plus a summary, and exits non-zero if any criterion fails (so CI can gate on it later). Requires `brain` importable, and for the Voice criterion, `voice` with `pip install -e ../brain` done in voice's environment (same prerequisite as `voice/tests/test_client.py`).
 
 **Scope boundary:** this test drives the WS-protocol contract with real in-process Brain servers (ephemeral ports, no packaged binaries). It does **not** drive the Tauri GUI or the actual OS-process supervision (spawn/kill/respawn) — a native WebView2 window and Rust process supervision can't be headlessly driven here. Those are covered separately:
-- the backoff ladder (1s/5s/30s) is unit-tested in `ui/src-tauri/src/supervisor.rs` (`cargo test`, run from `ui/src-tauri`).
+- the backoff ladder (1s/5s/30s, then 30s repeatedly) is unit-tested in `ui/src-tauri/src/supervisor.rs` (`cargo test`, run from `ui/src-tauri`).
 - actual kill-Brain → OS-respawn → UI-window-reconnect was verified manually.
 
 The smoke test's criterion 2 (kill Brain → respawn on a new port → reconnect) proves the *protocol* contract that makes that manual recovery correct — a client that re-reads `session.json` fresh, never caching a port, exactly like `ui/src/ipc/useHaloConnection.ts`'s `connect()`.

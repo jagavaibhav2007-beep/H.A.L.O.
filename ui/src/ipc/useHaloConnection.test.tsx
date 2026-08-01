@@ -95,3 +95,27 @@ test("a discovered session sends hello before accepting hello_ack", async () => 
   });
   await waitFor(() => expect(hook.result.current.connState).toBe("connected"));
 });
+
+test("authentication enters snapshot mode before the next websocket frame is projected", async () => {
+  mocks.readSession.mockResolvedValue({ port: 43123, token: "session-secret" });
+  const order: string[] = [];
+  renderHook(() => useHaloConnection(
+    (message) => order.push(message.type),
+    () => order.push("authenticated"),
+  ));
+  await waitFor(() => expect(sockets).toHaveLength(1));
+  const socket = sockets[0];
+  socket.onopen?.();
+  socket.onmessage?.({
+    data: JSON.stringify({
+      type: "hello_ack", id: "ack", ts: "2026-07-30T00:00:00Z", contract_version: "1.4",
+    }),
+  });
+  socket.onmessage?.({
+    data: JSON.stringify({
+      type: "task_state", id: "task-frame", ts: "2026-07-30T00:00:01Z",
+      task_id: "task-1", state: "running", lane: 1,
+    }),
+  });
+  expect(order).toEqual(["authenticated", "task_state"]);
+});
