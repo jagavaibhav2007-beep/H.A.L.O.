@@ -19,7 +19,7 @@ import {
   selectVoice,
   selectCapabilities,
 } from "../state/store";
-import { LANE_ICON, LANE_LABEL } from "../lib/lanes";
+import { LANE_ICON, LANE_LABEL, formatTaskProgress } from "../lib/lanes";
 import { usePeekSource, PEEK_DISMISS_MS } from "./usePeekSource";
 import "../styles/glass.css";
 import "./OrbRoot.css";
@@ -78,9 +78,7 @@ export function OrbRoot() {
   const hasProgress = primaryTask?.step != null && primaryTask?.steps_total != null;
   const taskProgress = hasProgress ? primaryTask!.step! / primaryTask!.steps_total! : 0.15;
   const taskTitle = primaryTask
-    ? [primaryTask.title ?? "Working", hasProgress ? `step ${primaryTask.step}/${primaryTask.steps_total}` : null, primaryTask.step_label]
-        .filter(Boolean)
-        .join(" — ")
+    ? [primaryTask.title ?? "Working", formatTaskProgress(primaryTask)].filter(Boolean).join(" · ")
     : undefined;
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {

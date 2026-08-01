@@ -18,22 +18,24 @@ import { Button } from "../components/Button";
 import {
   useHaloStore,
   selectTasks,
+  selectTaskLogs,
   selectStream,
   selectOperationErrors,
   selectCapabilities,
 } from "../state/store";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
-import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
+import { LANE_LABEL, LANE_ICON, formatTaskProgress } from "../lib/lanes";
 import type { TaskStateMsg } from "../ipc/contract";
 import "./TasksView.css";
 
 // Card ordering: running first, done last (collapsed). Arrival order breaks ties.
 const STATE_RANK: Record<TaskStateMsg["state"], number> = {
-  running: 0,
-  waiting_approval: 1,
-  paused: 2,
-  failed: 3,
-  done: 4,
+  waiting: 0,
+  running: 1,
+  waiting_approval: 2,
+  paused: 3,
+  failed: 4,
+  done: 5,
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -111,8 +113,9 @@ interface CardProps {
 }
 
 function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardProps) {
-  const { title, state, lane, step, steps_total, step_label, reason } = task;
+  const { title, state, lane, step, steps_total, reason } = task;
   const stream = useHaloStore(selectStream(task.task_id));
+  const logs = useHaloStore(selectTaskLogs(task.task_id));
   const busy = pending !== undefined;
   const hasProgress = step != null && steps_total != null;
   const collapsed = state === "done";
@@ -133,15 +136,15 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
               <div className="halo-meter task-progress-bar">
                 <span style={{ width: `${(step! / steps_total!) * 100}%` }} />
               </div>
-              <span className="task-progress-text">
-                step {step}/{steps_total}
-                {step_label ? ` — ${step_label}` : ""}
-              </span>
+              <span className="task-progress-text">{formatTaskProgress(task)}</span>
             </div>
           )}
 
           {state === "waiting_approval" && (
             <p className="task-waiting">Waiting for your approval — see the card below.</p>
+          )}
+          {state === "waiting" && (
+            <p className="task-reason">Queued — waiting for a task worker.</p>
           )}
           {state === "paused" && (
             <p className="task-reason">
@@ -159,6 +162,12 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
                 <span className="task-stream-idle">Waiting for the sandbox stream…</span>
               )}
             </div>
+          )}
+
+          {logs.length > 0 && (
+            <pre className="task-log" aria-label="Task output">
+              {logs.map((entry) => entry.text).join("")}
+            </pre>
           )}
 
           <div className="task-actions">
@@ -189,6 +198,7 @@ const TASK_STATE_CHIP: Record<
   TaskStateMsg["state"],
   { label: string; tone: "primary" | "tier3" | "muted" | "success" | "destructive"; icon: LucideIcon }
 > = {
+  waiting: { label: "Queued", tone: "muted", icon: CircleDot },
   running: { label: "Running", tone: "primary", icon: CircleDot },
   waiting_approval: { label: "Waiting for you", tone: "tier3", icon: ShieldAlert },
   paused: { label: "Paused", tone: "muted", icon: Pause },

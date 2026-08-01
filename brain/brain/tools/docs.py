@@ -38,12 +38,30 @@ _CHUNK_PROMPT = (
 )
 
 
-async def _llm_text(messages: list[dict], api_key: str) -> str:
+async def _llm_text(messages: list[dict], api_key: str, ctx=None) -> str:
     """One non-streaming-to-the-user LIGHT call; _LLM_SEM in llm.py already
     bounds process-wide concurrency."""
     parts: list[str] = []
-    async for delta in llm.stream_chat(messages, llm.LIGHT, api_key):
-        parts.append(delta)
+    stream = llm.stream_chat(messages, llm.LIGHT, api_key).__aiter__()
+    while True:
+        if ctx is not None:
+            await ctx.checkpoint()
+        next_delta = asyncio.create_task(anext(stream))
+        cancel_wait = asyncio.create_task(ctx.cancelled.wait()) if ctx is not None else None
+        waiters = {next_delta, *([cancel_wait] if cancel_wait is not None else [])}
+        done, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        if cancel_wait is not None and cancel_wait in done:
+            next_delta.cancel()
+            await asyncio.gather(next_delta, return_exceptions=True)
+            await ctx.checkpoint()  # raises TaskStopped
+        if cancel_wait is not None:
+            cancel_wait.cancel()
+        for pending_task in pending:
+            pending_task.cancel()
+        try:
+            parts.append(next_delta.result())
+        except StopAsyncIteration:
+            break
     return "".join(parts)
 
 
@@ -80,27 +98,25 @@ def _parse_digest(reply: str, path: str) -> dict:
     return digest
 
 
-async def _digest_one(p: Path, text: str, api_key: str) -> dict:
+async def _digest_one(p: Path, text: str, api_key: str, ctx=None) -> dict:
     if len(text) > _CHUNK_CHARS:
         chunks = [text[i:i + _CHUNK_CHARS] for i in range(0, len(text), _CHUNK_CHARS)]
         summaries = await asyncio.gather(*(
             _llm_text(
                 [{"role": "system", "content": _CHUNK_PROMPT},
                  {"role": "user", "content": f"{p.name} (part {i + 1}/{len(chunks)}):\n\n{c}"}],
-                api_key,
+                api_key, ctx,
             )
             for i, c in enumerate(chunks)
         ))
         text = "\n\n".join(summaries)
-    reply = await _llm_text(
-        [{"role": "system", "content": _MAP_PROMPT},
-         {"role": "user", "content": f"path: {p}\n\n{text}"}],
-        api_key,
-    )
+    messages = [{"role": "system", "content": _MAP_PROMPT},
+                {"role": "user", "content": f"path: {p}\n\n{text}"}]
+    reply = await _llm_text(messages, api_key, ctx)
     return _parse_digest(reply, str(p))
 
 
-async def _doc_digest(args: dict) -> dict:
+async def _doc_digest(args: dict, ctx=None) -> dict:
     paths = args.get("paths")
     if not isinstance(paths, list) or not paths:
         raise ValueError("paths must be a non-empty list of file paths")
@@ -115,6 +131,8 @@ async def _doc_digest(args: dict) -> dict:
         raise ValueError("no OpenRouter API key -- add one in Settings first")
 
     async def one(raw: str) -> dict:
+        if ctx is not None:
+            await ctx.checkpoint()
         p = _resolve(raw)
         try:
             # Hash BEFORE extracting, and look up before extracting too. The
@@ -129,25 +147,37 @@ async def _doc_digest(args: dict) -> dict:
             text = await asyncio.to_thread(extract.extract_text, p)
         except Exception as exc:  # noqa: BLE001 - one bad file must not kill the batch
             return _degraded(str(p), f"could not extract this file: {exc}", 0.0)
-        digest = await _digest_one(p, text[:_EXTRACT_CAP], api_key)
+        digest = await _digest_one(p, text[:_EXTRACT_CAP], api_key, ctx)
         # A parse failure is a transient fact about one reply, not about the
         # file's content -- caching it would pin the degraded answer forever.
         if not digest.get("degraded"):
             await asyncio.to_thread(store.put_digest, str(p), sha, DIGEST_VERSION, digest)
         return digest
 
-    digests = await asyncio.gather(*(one(raw) for raw in paths))
+    if ctx is None:
+        digests = await asyncio.gather(*(one(raw) for raw in paths))
+    else:
+        digests = []
+        for index, raw in enumerate(paths, start=1):
+            digest = await one(raw)
+            digests.append(digest)
+            await ctx.progress(
+                index,
+                len(paths) + 1,
+                f"Digested {Path(raw).name}",
+                checkpoint={"docs": digests},
+            )
     focus = args.get("focus")
     reduce_ask = (
         "Merge these per-document JSON digests into one concise markdown answer "
         "(under 500 words), citing which file each point came from."
         + (f" Focus on: {focus}." if focus else "")
     )
-    merged = await _llm_text(
-        [{"role": "system", "content": reduce_ask},
-         {"role": "user", "content": json.dumps(digests, ensure_ascii=False)}],
-        api_key,
-    )
+    reduce_messages = [
+        {"role": "system", "content": reduce_ask},
+        {"role": "user", "content": json.dumps(digests, ensure_ascii=False)},
+    ]
+    merged = await _llm_text(reduce_messages, api_key, ctx)
     # gate._RESULT_CAP (8KB) is the hard ceiling on what reaches chat history;
     # this return is the merged digest + the structured per-doc list.
     return {"digest": merged.strip(), "docs": digests}
@@ -162,6 +192,9 @@ def _digest_tier(args: dict) -> int:
 
 gate.register(
     "doc_digest", _doc_digest, tier=_digest_tier,
+    task=True, supports_pause=True,
+    title=lambda a: f"Digest {len(a.get('paths') or [])} documents",
+    steps_total=lambda a: len(a.get("paths") or []) + 1,
     summary=lambda a: f"I want to digest {len(a.get('paths') or [])} document(s).",
     schema=_schema(
         "Read and summarize up to 16 documents in one call: each file is "

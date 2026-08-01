@@ -4,6 +4,7 @@
 // standalone (see reducer.selfcheck.ts). All impurity (zustand, subscriptions)
 // lives in store.ts.
 
+import { operationCorrelationKey } from "../ipc/contract";
 import type {
   ActivityMsg,
   ApprovalRequestMsg,
@@ -12,13 +13,10 @@ import type {
   IpcMessage,
   SkillStateMsg,
   StreamFrameMsg,
+  TaskLogMsg,
   TaskStateMsg,
   VoiceStateMsg,
 } from "../ipc/contract";
-
-// Keep this pure reducer runtime-dependency-free so its standalone Node
-// self-check works without a bundler/TS module resolver.
-const operationCorrelationKey = (kind: string, id: string) => `${kind}:${id}`;
 
 // ---- Slice types ----
 
@@ -42,6 +40,7 @@ interface UserTurn {
   id: string;
   role: "user";
   text: string;
+  turnId?: string;
   viaVoice?: boolean; // spoken turn -> renders a small mic glyph
 }
 
@@ -50,7 +49,9 @@ export interface AssistantTurn {
   role: "assistant";
   status: "streaming" | "done" | "error" | "interrupted";
   text: string;
+  turnId?: string;
   taskId?: string;
+  model?: string;
   error?: { code: string; message: string; recoverable: boolean };
   note?: string; // e.g. "interrupted — connection lost"
 }
@@ -99,6 +100,7 @@ export interface HaloState {
   conversations: Record<string, ConversationState>;
   activities: ActivityMsg[]; // ring buffer capped at ACTIVITY_CAP, arrival order (D7)
   tasks: Record<string, TaskStateMsg>; // keyed by task_id (idempotent upsert, D6)
+  taskLogs: Record<string, TaskLogMsg[]>; // volatile bounded tail per task
   streams: Record<string, StreamFrameMsg>; // latest sandbox stream_frame per task_id (stale seq dropped)
   approvals: Record<string, ApprovalRequestMsg>; // keyed by approval_id; presence = pending
   beliefs: Record<string, BeliefStateMsg>; // keyed by belief_id
@@ -110,8 +112,8 @@ export interface HaloState {
   operationErrors: Record<string, ErrorMsg>;
   globalErrors: ErrorMsg[];
   memoryHistoryLoaded: boolean;
-  /** Connect snapshots end at snapshot_complete (authoritative), with spend_update
-   * as a backstop for paths that don't send it. While one is pending, entity IDs
+  projectRoots: { roots: string[]; pruned: string[] };
+  /** Connect snapshots end only at snapshot_complete. While one is pending, entity IDs
    * are collected so absence can reconcile stale reconnect state. */
   snapshot: SnapshotState;
 }
@@ -126,12 +128,14 @@ export const ACTIVITY_CAP = 10_000;
 // workspace can render, so the LRU here never evicts a thread that's still
 // visible; it only reaps threads both surfaces have already forgotten.
 export const CONVERSATION_CAP = 100;
+export const TASK_LOG_CAP = 500;
 
 export const initialState: HaloState = {
   connection: { wsStatus: "connecting", brainStatus: "unknown", voiceStatus: "unknown" },
   conversations: {},
   activities: [],
   tasks: {},
+  taskLogs: {},
   streams: {},
   approvals: {},
   beliefs: {},
@@ -148,6 +152,7 @@ export const initialState: HaloState = {
   operationErrors: {},
   globalErrors: [],
   memoryHistoryLoaded: false,
+  projectRoots: { roots: [], pruned: [] },
   snapshot: { pending: false, taskIds: {}, approvalIds: {}, activityCounts: {} },
 };
 
@@ -182,31 +187,50 @@ function openTurn(conv: ConversationState): AssistantTurn | undefined {
   return undefined;
 }
 
-/** Oldest-first matching means a placeholder that never receives a terminal
- * frame would otherwise absorb every later turn's tokens/done/error forever.
- * A placeholder that is still EMPTY when the user sends again is that case: a
- * live turn has either produced text already or is seconds old. Close it here
- * so the next turn opens a bubble of its own.
- * ponytail: arrival order is the only correlator the contract offers; a turn
- * id on token/done/error would let each frame address its own turn and retire
- * this heuristic. */
-function closeAbandonedPlaceholders(state: HaloState, conv: ConversationState): ConversationState {
-  // A Tier-3 approval pauses its turn for as long as the user takes to decide
-  // — that placeholder is legitimately open, empty and silent.
-  const awaitingApproval = Object.values(state.approvals).some(
-    (approval) => approval.conversation_id === conv.conversationId,
-  );
-  const abandoned = (turn: Turn) =>
-    turn.role === "assistant" && turn.status === "streaming" && turn.text === "";
-  if (awaitingApproval || !conv.turns.some(abandoned)) return conv;
-  return {
-    ...conv,
-    turns: conv.turns.map((turn) =>
-      turn.role === "assistant" && abandoned(turn)
-        ? { ...turn, status: "interrupted" as const, note: "interrupted — no reply arrived" }
-        : turn,
-    ),
+function correlatedOpenTurn(conv: ConversationState, turnId?: string): AssistantTurn | undefined {
+  if (turnId) {
+    return conv.turns.find(
+      (turn): turn is AssistantTurn =>
+        turn.role === "assistant" && turn.status === "streaming" && turn.turnId === turnId,
+    );
+  }
+  return openTurn(conv); // compatibility with pre-1.4 Brain frames
+}
+
+function reconcileHistory(conv: ConversationState, authoritative: Turn[]): Turn[] {
+  const groups = (turns: Turn[]): Turn[][] => {
+    const result: Turn[][] = [];
+    for (const turn of turns) {
+      if (turn.role === "user" || result.length === 0) result.push([turn]);
+      else result[result.length - 1].push(turn);
+    }
+    return result;
   };
+  const localGroups = groups(conv.turns);
+  const used = new Set<number>();
+  const merged = groups(authoritative).flatMap((serverGroup) => {
+    const serverUser = serverGroup.find((turn) => turn.role === "user");
+    if (!serverUser || serverUser.role !== "user") return serverGroup;
+    const match = localGroups.findIndex((localGroup, index) => {
+      if (used.has(index)) return false;
+      const localUser = localGroup.find((turn) => turn.role === "user");
+      if (!localUser || localUser.role !== "user") return false;
+      if (serverUser.turnId && localUser.turnId) return serverUser.turnId === localUser.turnId;
+      return serverUser.text === localUser.text;
+    });
+    if (match < 0) return serverGroup;
+    used.add(match);
+    const hasServerAssistant = serverGroup.some((turn) => turn.role === "assistant");
+    return hasServerAssistant
+      ? serverGroup
+      : [...serverGroup, ...localGroups[match].filter((turn) => turn.role === "assistant")];
+  });
+  for (let index = 0; index < localGroups.length; index += 1) {
+    if (!used.has(index) && localGroups[index].some((turn) => turn.role === "user")) {
+      merged.push(...localGroups[index]);
+    }
+  }
+  return merged;
 }
 
 /** Record the user's own outgoing message as a turn (see UserTurn comment).
@@ -220,7 +244,7 @@ export function appendUserTurn(
   id: string,
 ): HaloState {
   const conv = getConversation(state, conversationId);
-  const turn: UserTurn = { id, role: "user", text };
+  const turn: UserTurn = { id, role: "user", text, turnId: id };
   return replaceConversation(state, {
     ...conv,
     turns: [...conv.turns, turn],
@@ -237,12 +261,13 @@ export function beginUserRequest(
   id: string,
 ): HaloState {
   const withUser = appendUserTurn(state, conversationId, text, id);
-  const conv = closeAbandonedPlaceholders(withUser, getConversation(withUser, conversationId));
+  const conv = getConversation(withUser, conversationId);
   const pending: AssistantTurn = {
     id: `pending-${id}`,
     role: "assistant",
     status: "streaming",
     text: "",
+    turnId: id,
   };
   return replaceConversation(withUser, { ...conv, turns: [...conv.turns, pending] });
 }
@@ -327,11 +352,15 @@ function finishSnapshot(state: HaloState): HaloState {
   const streams = Object.fromEntries(
     Object.entries(state.streams).filter(([taskId]) => state.snapshot.taskIds[taskId]),
   );
+  const taskLogs = Object.fromEntries(
+    Object.entries(state.taskLogs).filter(([taskId]) => state.snapshot.taskIds[taskId]),
+  );
   return {
     ...state,
     tasks,
     approvals,
     streams,
+    taskLogs,
     snapshot: { pending: false, taskIds: {}, approvalIds: {}, activityCounts: {} },
   };
 }
@@ -372,34 +401,49 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
   switch (frame.type) {
     case "conversation_history_state": {
       const conv = getConversation(state, frame.conversation_id);
-      if (conv.turns.length > 0) {
-        return conv.historyLoaded ? state : replaceConversation(state, { ...conv, historyLoaded: true });
-      }
+      if (conv.historyLoaded) return state;
       const turns: Turn[] = frame.turns.map((turn, index) =>
         turn.role === "user"
-          ? { id: `${frame.id}:${index}`, role: "user", text: turn.text }
-          : { id: `${frame.id}:${index}`, role: "assistant", status: "done", text: turn.text },
+          ? {
+              id: turn.turn_id ?? `${frame.id}:${index}`,
+              role: "user",
+              text: turn.text,
+              turnId: turn.turn_id,
+            }
+          : {
+              id: `${frame.id}:${index}`,
+              role: "assistant",
+              status: "done",
+              text: turn.text,
+              turnId: turn.turn_id,
+            },
       );
-      return replaceConversation(state, { ...conv, turns, historyLoaded: true });
+      return replaceConversation(state, {
+        ...conv,
+        turns: reconcileHistory(conv, turns),
+        historyLoaded: true,
+      });
     }
 
     case "token": {
       // Unknown conversation_id -> open a turn anyway; arrival order is
       // truth (the user_msg echo may be local-only).
       const conv = getConversation(state, frame.conversation_id);
-      const open = openTurn(conv);
+      const open = correlatedOpenTurn(conv, frame.turn_id);
       // ponytail: rebuilding the whole string per token frame is O(n^2) over a
       // long reply. Leave it until a profiler complains — a chunk list joined
       // at render time is the upgrade path, and it costs the views a change.
       const turns: Turn[] = open
         ? conv.turns.map((t) => (t === open ? { ...t, text: t.text + frame.text } : t))
-        : [...conv.turns, { id: frame.id, role: "assistant", status: "streaming", text: frame.text }];
+        : [...conv.turns, {
+            id: frame.id, role: "assistant", status: "streaming", text: frame.text, turnId: frame.turn_id,
+          }];
       return replaceConversation(state, { ...conv, turns });
     }
 
     case "done": {
       const conv = getConversation(state, frame.conversation_id);
-      const open = openTurn(conv);
+      const open = correlatedOpenTurn(conv, frame.turn_id);
       const next = open
         ? replaceConversation(state, {
             ...conv,
@@ -412,7 +456,7 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
                     taskId: frame.task_id,
                     note: "stopped · what should I do differently?",
                   }
-                : { status: "done", taskId: frame.task_id },
+                : { status: "done", taskId: frame.task_id, model: frame.model },
             ),
           })
         : state;
@@ -433,11 +477,13 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
         return { ...next, globalErrors: [...next.globalErrors, frame].slice(-5) };
       }
       const conv = getConversation(next, frame.conversation_id);
-      const open = openTurn(conv);
+      const open = correlatedOpenTurn(conv, frame.turn_id);
       const error = { code: frame.code, message: frame.message, recoverable: frame.recoverable };
       const turns: Turn[] = open
         ? patchOpenTurn(conv.turns, open, { status: "error", error })
-        : [...conv.turns, { id: frame.id, role: "assistant", status: "error", text: "", error }];
+        : [...conv.turns, {
+            id: frame.id, role: "assistant", status: "error", text: "", error, turnId: frame.turn_id,
+          }];
       // rule 8: a turn is never lost — flag the input for restore regardless
       // of whether a turn had started streaming yet.
       return resolveApprovalsForConversation(
@@ -479,6 +525,19 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       return frame.state === "waiting_approval" ? next : resolveApprovalsForTask(next, frame.task_id);
     }
 
+    case "task_log": {
+      const prior = state.taskLogs[frame.task_id] ?? [];
+      const last = prior[prior.length - 1];
+      if (last && frame.seq <= last.seq) return state;
+      return {
+        ...state,
+        taskLogs: {
+          ...state.taskLogs,
+          [frame.task_id]: [...prior, frame].slice(-TASK_LOG_CAP),
+        },
+      };
+    }
+
     case "stream_frame": {
       // Sandbox lane tile: keep only the latest frame per task, dropping any
       // that arrive out of order (never queue jpegs — plan Step 11 edge case).
@@ -511,14 +570,12 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       return { ...state, skills: upsert(state.skills, frame.skill_name, frame) };
 
     case "snapshot_complete":
-      // Authoritative snapshot terminator (real Brain sends it last). spend_update
-      // below is kept as a backstop: the mock never sends snapshot_complete, and a
-      // Brain that omits it must still converge rather than wedge in snapshot mode
-      // silently swallowing live activity that matches an earlier frame.
+      // The only authoritative snapshot terminator. The server guarantees this
+      // marker after every snapshot; ordinary spend updates may occur mid-snapshot.
       return finishSnapshot(state);
 
     case "spend_update":
-      return finishSnapshot({
+      return {
         ...state,
         spend: {
           sessionUsd: frame.session_usd,
@@ -528,10 +585,19 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
           sessionTokens: frame.session_tokens ?? state.spend.sessionTokens,
           lastTurnTokens: frame.last_turn_tokens ?? state.spend.lastTurnTokens,
         },
-      });
+      };
 
     case "settings_state":
       return { ...state, settings: upsert(state.settings, frame.key, frame.status) };
+
+    case "project_roots_state":
+      return {
+        ...state,
+        projectRoots: {
+          roots: frame.roots,
+          pruned: frame.pruned ?? [],
+        },
+      };
 
     case "capabilities_state":
       return {

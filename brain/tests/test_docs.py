@@ -47,7 +47,7 @@ _real_llm_text = docs._llm_text
 MAP_REPLIES_JSON = True
 
 
-async def _counting_llm_text(messages, api_key):
+async def _counting_llm_text(messages, api_key, ctx=None):
     system = messages[0]["content"]
     LLM_CALLS.append(system[:20])
     if system is docs._MAP_PROMPT or system == docs._MAP_PROMPT:
@@ -57,7 +57,7 @@ async def _counting_llm_text(messages, api_key):
                 "gist": "a well-formed digest", "key_points": ["kp"],
                 "entities": ["e"], "numbers": ["1"], "caveats": [], "confidence": 0.9,
             })
-    return await _real_llm_text(messages, api_key)
+    return await _real_llm_text(messages, api_key, ctx)
 
 
 docs._llm_text = _counting_llm_text
@@ -144,8 +144,8 @@ async def check_degraded_digest_is_not_cached() -> None:
 
 async def check_cap_and_bad_file() -> None:
     too_many = [str(A)] * 17
-    res = await gate.gated_execute(
-        "doc_digest", {"paths": too_many}, conversation_id="docs-test", task_id=None, broadcast=broadcast
+    res = await gate._execute_tail(
+        "doc_digest", {"paths": too_many}, 1, "docs-test", broadcast
     )
     assert res["pending_tool_result"]["status"].startswith("error"), res
     assert "16" in res["messages"][0]["content"], res
@@ -162,8 +162,8 @@ async def check_cap_and_bad_file() -> None:
 
 
 async def check_gated_run() -> None:
-    res = await gate.gated_execute(
-        "doc_digest", {"paths": [str(A)]}, conversation_id="docs-test", task_id=None, broadcast=broadcast
+    res = await gate._execute_tail(
+        "doc_digest", {"paths": [str(A)]}, 1, "docs-test", broadcast
     )
     assert res["pending_tool_result"]["status"] == "ok", res
     content = res["messages"][0]["content"]

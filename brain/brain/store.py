@@ -24,7 +24,7 @@ import sqlite_vec  # hard dep -- hoisted so it isn't re-imported inside three ho
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 EMBED_DIM = 384
 
 _conn: sqlite3.Connection | None = None
@@ -143,6 +143,29 @@ _V3_NEW_TABLES = """
 """
 
 
+_TASK_TABLE = """
+    CREATE TABLE IF NOT EXISTS task (
+        task_id TEXT PRIMARY KEY,
+        state TEXT,
+        lane INTEGER,
+        title TEXT,
+        step INTEGER,
+        steps_total INTEGER,
+        step_label TEXT,
+        reason TEXT,
+        conversation_id TEXT,
+        tool TEXT,
+        args_json TEXT,
+        supports_pause INTEGER NOT NULL DEFAULT 0,
+        checkpoint_json TEXT,
+        result_json TEXT,
+        intent_action_id TEXT,
+        started_at TEXT,
+        updated_at TEXT
+    );
+"""
+
+
 def _run_migrations(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
@@ -186,19 +209,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                     task_id TEXT,
                     ts TEXT NOT NULL
                 );
-
-                CREATE TABLE IF NOT EXISTS task (
-                    task_id TEXT PRIMARY KEY,
-                    state TEXT,
-                    lane INTEGER,
-                    title TEXT,
-                    step INTEGER,
-                    steps_total INTEGER,
-                    step_label TEXT,
-                    reason TEXT,
-                    updated_at TEXT
-                );
-
+                """
+                + _TASK_TABLE
+                + """
                 CREATE TABLE IF NOT EXISTS spend (
                     day TEXT PRIMARY KEY,
                     usd REAL NOT NULL DEFAULT 0
@@ -234,6 +247,27 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             # by ts DESC on every connect (x2 webviews) and prune_actions needs
             # the same order -- both full-scanned the table without this.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_action_ts ON action(ts DESC)")
+        if version < 5:
+            # Durable TaskRuntime metadata. Additive and idempotent across a
+            # restart between an ALTER and the user_version commit. Some early
+            # v1 databases predate the task table entirely, so create the full
+            # current shape before inspecting/altering columns.
+            conn.executescript(_TASK_TABLE)
+            task_cols = {r[1] for r in conn.execute("PRAGMA table_info(task)").fetchall()}
+            additions = {
+                "conversation_id": "TEXT",
+                "tool": "TEXT",
+                "args_json": "TEXT",
+                "supports_pause": "INTEGER NOT NULL DEFAULT 0",
+                "checkpoint_json": "TEXT",
+                "result_json": "TEXT",
+                "intent_action_id": "TEXT",
+                "started_at": "TEXT",
+            }
+            for name, ddl in additions.items():
+                if name not in task_cols:
+                    conn.execute(f"ALTER TABLE task ADD COLUMN {name} {ddl}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_task_state ON task(state, updated_at DESC)")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 def _now() -> str:
@@ -878,6 +912,12 @@ def list_tasks(states: list[str] | None = None) -> list[dict]:
             f"SELECT * FROM task WHERE state IN ({placeholders}) ORDER BY updated_at DESC", tuple(states)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+@_serialized
+def get_task(task_id: str) -> dict | None:
+    row = connect().execute("SELECT * FROM task WHERE task_id=?", (task_id,)).fetchone()
+    return dict(row) if row else None
 
 
 # ------------------------------------------------------------------- spend --

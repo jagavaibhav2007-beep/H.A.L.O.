@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Fails (non-zero exit) if the TS and Python IPC contracts have drifted
-from each other or from shared/ipc-contract.json.
+"""Fails (non-zero exit) if the TS and Python IPC contracts have drifted.
 
-Compares the complete runtime schema across all three:
-  - shared/ipc-contract.json      (schema, authoritative)
-  - ui/src/ipc/contract.ts        (via `node`, which runs .ts natively)
-  - brain/brain/ipc/contract.py   (via direct import)
+Both the Brain and the UI validate frames at runtime against their own
+hand-mirrored copy of the contract. This diffs those two copies directly:
+  - brain/brain/ipc/contract.py  (CONTRACT_SPEC, via direct import)
+  - ui/src/ipc/contract.ts       (CONTRACT_SPEC, via `node`, which runs .ts natively)
 
-...plus contract.py's TypedDicts, which are a FOURTH mirror the structural
+Both expose the same {envelope, messages} dict shape, so the diff is
+runtime-to-runtime -- the two copies that actually run must agree.
+
+...plus contract.py's TypedDicts, which are a THIRD mirror the structural
 diff never sees (see check_python_typeddicts).
 
 Usage: python shared/check_contract_sync.py
@@ -24,13 +26,7 @@ import typing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_PATH = ROOT / "shared" / "ipc-contract.json"
 TS_CONTRACT_PATH = ROOT / "ui" / "src" / "ipc" / "contract.ts"
-
-
-def load_schema() -> dict:
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    return {"envelope": schema["envelope"], "messages": schema["messages"]}
 
 
 def load_python_contract() -> dict:
@@ -91,31 +87,31 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
-def check_python_typeddicts(schema: dict) -> list[str]:
+def check_python_typeddicts(contract: dict) -> list[str]:
     """contract.py declares each message TWICE -- once as a TypedDict and once
     in CONTRACT_SPEC -- and only the second copy is compared above. That is how
     SpendUpdateMsg lost session_tokens/last_turn_tokens while every gate stayed
     green. Compare each IpcMessage union member's payload fields, and whether
-    each is required, against the authoritative schema.
+    each is required, against the CONTRACT_SPEC dict.
 
     # ponytail: field NAMES and required-ness only. Mapping a Python annotation
-    # to the schema's "string"/"integer"/enum vocabulary is the real machinery,
+    # to the spec's "string"/"integer"/enum vocabulary is the real machinery,
     # and the drift that actually happens is a missing field, not a retyped
     # one. Compare types too only if a retype ever ships unnoticed.
     """
     sys.path.insert(0, str(ROOT / "brain"))
     from brain.ipc import contract as py  # noqa: PLC0415
 
-    envelope = set(schema["envelope"]["fields"])
+    envelope = set(contract["envelope"]["fields"])
     problems: list[str] = []
     matched: set[str] = set()
     for cls in typing.get_args(py.IpcMessage):
         # UserMsg -> "user"/"user_msg"; every other class drops a bare "Msg".
         base = _snake(cls.__name__.removesuffix("Msg"))
-        name = base if base in schema["messages"] else f"{base}_msg"
-        spec = schema["messages"].get(name)
+        name = base if base in contract["messages"] else f"{base}_msg"
+        spec = contract["messages"].get(name)
         if spec is None:
-            problems.append(f"TypedDict {cls.__name__} matches no message type in the schema")
+            problems.append(f"TypedDict {cls.__name__} matches no message type in the contract")
             continue
         matched.add(name)
         hints = typing.get_type_hints(cls, include_extras=True)
@@ -128,11 +124,11 @@ def check_python_typeddicts(schema: dict) -> list[str]:
         if actual != expected:
             problems.append(
                 f'"{name}": TypedDict {cls.__name__} declares '
-                f"{sorted(actual.items())} but the schema declares "
+                f"{sorted(actual.items())} but the contract declares "
                 f"{sorted(expected.items())} (name, required?)"
             )
-    for name in sorted(set(schema["messages"]) - matched):
-        problems.append(f'"{name}": schema message has no TypedDict in contract.py')
+    for name in sorted(set(contract["messages"]) - matched):
+        problems.append(f'"{name}": contract message has no TypedDict in contract.py')
     return problems
 
 
@@ -153,23 +149,19 @@ def diff(label_a: str, a: dict, label_b: str, b: dict) -> list[str]:
 
 
 def main() -> int:
-    schema = load_schema()
     python_contract = load_python_contract()
     ts_contract = load_ts_contract()
 
     problems = [
-        *diff("schema", schema, "python", python_contract),
-        *diff("schema", schema, "typescript", ts_contract),
-        *check_python_typeddicts(schema),
+        *diff("python", python_contract, "typescript", ts_contract),
+        *check_python_typeddicts(python_contract),
     ]
 
     # The contract_version FIELD is compared by the structural diff above; this
     # cross-checks the version VALUE, a single hand-mirrored constant in each
     # copy that the structural comparison never sees. A drift there = spurious
     # incompatibility at runtime (one side refuses the other), so pin it here.
-    schema_version = json.loads(SCHEMA_PATH.read_text(encoding="utf-8")).get("version")
     versions = {
-        "schema": schema_version,
         "python": load_python_version(),
         "typescript": load_ts_version(),
     }
@@ -183,8 +175,8 @@ def main() -> int:
         return 1
 
     print(
-        f"[check_contract_sync] OK - {len(schema['messages'])} complete message schemas "
-        "in sync across schema/ts/python, including python's TypedDicts."
+        f"[check_contract_sync] OK - {len(python_contract['messages'])} complete message "
+        "schemas in sync across python/ts, including python's TypedDicts."
     )
     return 0
 

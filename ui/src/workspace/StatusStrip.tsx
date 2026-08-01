@@ -18,7 +18,7 @@ import {
   selectTasks,
   selectOperationErrors,
 } from "../state/store";
-import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
+import { LANE_LABEL, LANE_ICON, formatTaskProgress } from "../lib/lanes";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
 
 const MIC_LABEL: Record<string, string> = {
@@ -83,10 +83,7 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
         <div className="status-task-chip">
           <span className="status-task-title">
             {runningTask.title ?? "Working"}
-            {runningTask.step != null && runningTask.steps_total != null
-              ? ` · step ${runningTask.step}/${runningTask.steps_total}`
-              : ""}
-            {runningTask.step_label ? ` — ${runningTask.step_label}` : ""}
+            {formatTaskProgress(runningTask) && ` · ${formatTaskProgress(runningTask)}`}
           </span>
           <Button
             variant="destructive"

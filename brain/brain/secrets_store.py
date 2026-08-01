@@ -22,17 +22,46 @@ STATUS_NAME = "openrouter_status"
 _VALID_STATUSES = {"set", "invalid", "unverified"}
 
 
-def _read_key() -> str | None:
-    """Read the credential, allowing backend failures to reach status callers."""
+# ponytail: the HALO_KEYRING_DIR test seam vs keyring fork lives here once.
+# Backend failures propagate (get_key/keystore_available depend on that).
+def _backend_get(name: str) -> str | None:
     keyring_dir = os.environ.get("HALO_KEYRING_DIR")
     if keyring_dir:
-        key_file = os.path.join(keyring_dir, f"{SERVICE}_{KEY_NAME}.key")
         try:
-            with open(key_file, "r") as f:
+            with open(os.path.join(keyring_dir, f"{SERVICE}_{name}.key"), "r") as f:
                 return f.read()
         except FileNotFoundError:
             return None
-    return keyring.get_password(SERVICE, KEY_NAME)
+    return keyring.get_password(SERVICE, name)
+
+
+def _backend_set(name: str, value: str) -> None:
+    keyring_dir = os.environ.get("HALO_KEYRING_DIR")
+    if keyring_dir:
+        os.makedirs(keyring_dir, exist_ok=True)
+        with open(os.path.join(keyring_dir, f"{SERVICE}_{name}.key"), "w") as f:
+            f.write(value)
+        return
+    keyring.set_password(SERVICE, name, value)
+
+
+def _backend_del(name: str) -> None:
+    keyring_dir = os.environ.get("HALO_KEYRING_DIR")
+    if keyring_dir:
+        try:
+            os.remove(os.path.join(keyring_dir, f"{SERVICE}_{name}.key"))
+        except FileNotFoundError:
+            pass  # Already deleted
+        return
+    try:
+        keyring.delete_password(SERVICE, name)
+    except keyring.errors.PasswordDeleteError:
+        pass  # Already deleted or never existed
+
+
+def _read_key() -> str | None:
+    """Read the credential, allowing backend failures to reach status callers."""
+    return _backend_get(KEY_NAME)
 
 
 def get_key() -> str | None:
@@ -85,17 +114,7 @@ def set_key(value: str) -> None:
     if not value:
         raise ValueError("Key cannot be empty")
 
-    # ponytail: test seam — bypass keyring for testing
-    keyring_dir = os.environ.get("HALO_KEYRING_DIR")
-    if keyring_dir:
-        os.makedirs(keyring_dir, exist_ok=True)
-        key_file = os.path.join(keyring_dir, f"{SERVICE}_{KEY_NAME}.key")
-        with open(key_file, "w") as f:
-            f.write(value)
-        return
-
-    # Production path: Windows Credential Manager via keyring
-    keyring.set_password(SERVICE, KEY_NAME, value)
+    _backend_set(KEY_NAME, value)
 
 
 def set_validation_status(status: str) -> None:
@@ -106,26 +125,13 @@ def set_validation_status(status: str) -> None:
     """
     if status not in _VALID_STATUSES:
         raise ValueError(f"invalid key status: {status}")
-    keyring_dir = os.environ.get("HALO_KEYRING_DIR")
-    if keyring_dir:
-        os.makedirs(keyring_dir, exist_ok=True)
-        with open(os.path.join(keyring_dir, f"{SERVICE}_{STATUS_NAME}.key"), "w") as f:
-            f.write(status)
-        return
-    keyring.set_password(SERVICE, STATUS_NAME, status)
+    _backend_set(STATUS_NAME, status)
 
 
 def _validation_status() -> str | None:
-    keyring_dir = os.environ.get("HALO_KEYRING_DIR")
-    if keyring_dir:
-        path = os.path.join(keyring_dir, f"{SERVICE}_{STATUS_NAME}.key")
-        try:
-            with open(path, "r") as f:
-                value = f.read().strip()
-        except FileNotFoundError:
-            return None
-        return value if value in _VALID_STATUSES else None
-    value = keyring.get_password(SERVICE, STATUS_NAME)
+    value = _backend_get(STATUS_NAME)
+    if value is not None:
+        value = value.strip()
     return value if value in _VALID_STATUSES else None
 
 
@@ -134,30 +140,8 @@ def delete_key() -> None:
 
     Swallows keyring.errors.PasswordDeleteError if the key doesn't exist.
     """
-    # ponytail: test seam — bypass keyring for testing
-    keyring_dir = os.environ.get("HALO_KEYRING_DIR")
-    if keyring_dir:
-        key_file = os.path.join(keyring_dir, f"{SERVICE}_{KEY_NAME}.key")
-        try:
-            os.remove(key_file)
-        except FileNotFoundError:
-            pass  # Already deleted
-        try:
-            os.remove(os.path.join(keyring_dir, f"{SERVICE}_{STATUS_NAME}.key"))
-        except FileNotFoundError:
-            pass
-        return
-
-    # Production path: Windows Credential Manager via keyring
-    try:
-        keyring.delete_password(SERVICE, KEY_NAME)
-    except keyring.errors.PasswordDeleteError:
-        # Already deleted or never existed
-        pass
-    try:
-        keyring.delete_password(SERVICE, STATUS_NAME)
-    except keyring.errors.PasswordDeleteError:
-        pass
+    _backend_del(KEY_NAME)
+    _backend_del(STATUS_NAME)
 
 
 def key_status() -> str:
