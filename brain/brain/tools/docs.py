@@ -40,28 +40,21 @@ _CHUNK_PROMPT = (
 
 async def _llm_text(messages: list[dict], api_key: str, ctx=None) -> str:
     """One non-streaming-to-the-user LIGHT call; _LLM_SEM in llm.py already
-    bounds process-wide concurrency."""
+    bounds process-wide concurrency. llm.stream_until races each read against the
+    stop; the checkpoints keep this path's own semantics -- pause suspends
+    mid-stream and a stop raises TaskStopped (ctx is None only for the non-task
+    cache-warm path, which never stops)."""
     parts: list[str] = []
-    stream = llm.stream_chat(messages, llm.LIGHT, api_key).__aiter__()
-    while True:
+    stream = llm.stream_chat(messages, llm.LIGHT, api_key)
+    stop = ctx.cancelled if ctx is not None else asyncio.Event()  # unset = never stops
+    if ctx is not None:
+        await ctx.checkpoint()  # honor a pause/stop already pending before the first read
+    async for delta in llm.stream_until(stream, stop):
+        parts.append(delta)
         if ctx is not None:
-            await ctx.checkpoint()
-        next_delta = asyncio.create_task(anext(stream))
-        cancel_wait = asyncio.create_task(ctx.cancelled.wait()) if ctx is not None else None
-        waiters = {next_delta, *([cancel_wait] if cancel_wait is not None else [])}
-        done, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-        if cancel_wait is not None and cancel_wait in done:
-            next_delta.cancel()
-            await asyncio.gather(next_delta, return_exceptions=True)
-            await ctx.checkpoint()  # raises TaskStopped
-        if cancel_wait is not None:
-            cancel_wait.cancel()
-        for pending_task in pending:
-            pending_task.cancel()
-        try:
-            parts.append(next_delta.result())
-        except StopAsyncIteration:
-            break
+            await ctx.checkpoint()  # pause suspends here; a stop raises TaskStopped
+    if ctx is not None and ctx.cancelled.is_set():
+        await ctx.checkpoint()  # a stop that raced the read: stream_until returned, now raise
     return "".join(parts)
 
 

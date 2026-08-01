@@ -171,12 +171,53 @@ async def check_gated_run() -> None:
     print("[check 6] doc_digest runs Tier-1 through the real gate; result reaches the tool message: OK")
 
 
+class _FakeCtx:
+    """Minimal stand-in for task_runtime.TaskContext: the only surface _llm_text
+    touches is `.cancelled` and `.checkpoint()` (raises TaskStopped once stopped)."""
+
+    def __init__(self) -> None:
+        self.cancelled = asyncio.Event()
+
+    async def checkpoint(self) -> None:
+        from brain.task_runtime import TaskStopped
+
+        if self.cancelled.is_set():
+            raise TaskStopped()
+
+
+async def check_stop_raises_taskstopped() -> None:
+    """A stop mid-stream must cancel the LIGHT stream and propagate TaskStopped --
+    the docs task's stop semantics, distinct from graph's clean-return one."""
+    from brain.task_runtime import TaskStopped
+
+    ctx = _FakeCtx()
+
+    async def cancel_soon() -> None:
+        await asyncio.sleep(0.005)  # after the first stub word, before the stream ends
+        ctx.cancelled.set()
+
+    messages = [
+        {"role": "system", "content": "summarize"},
+        {"role": "user", "content": "one two three four five six seven"},
+    ]
+    canceller = asyncio.create_task(cancel_soon())
+    raised = False
+    try:
+        await _real_llm_text(messages, "stub-key", ctx)
+    except TaskStopped:
+        raised = True
+    await canceller
+    assert raised, "a stop during _llm_text did not raise TaskStopped"
+    print("[check 8] a stop mid-stream cancels the stream and raises TaskStopped: OK")
+
+
 async def main() -> None:
     check_tier()
     await check_digest_and_cache()
     await check_cap_and_bad_file()
     await check_gated_run()
     await check_degraded_digest_is_not_cached()
+    await check_stop_raises_taskstopped()
     print("[brain.docs] self-check OK")
 
 

@@ -1,9 +1,9 @@
 """IPC contract for the Halo WebSocket protocol.
 
-Source of truth: shared/ipc-contract.json (message names + required fields).
-Mirrored by hand in ui/src/ipc/contract.ts — keep both in sync; run
-`python shared/check_contract_sync.py` after editing either.
-Full contract prose: systemdesign/11-ipc-contract.md
+CONTRACT_SPEC below is the Python source of truth (message names + required
+fields). Hand-mirrored by ui/src/ipc/contract.ts — keep both in sync; run
+`python shared/check_contract_sync.py` after editing either (it diffs the two
+CONTRACT_SPECs directly). Full contract prose: systemdesign/11-ipc-contract.md
 
 Importable by both `brain` and `voice` (voice installs brain in dev via
 `pip install -e ../brain`; see DEVELOPMENT.md).
@@ -12,17 +12,7 @@ Importable by both `brain` and `voice` (voice installs brain in dev via
 from __future__ import annotations
 
 import math
-from typing import Literal, NotRequired, TypedDict, Union
-
-
-class IpcEnvelope(TypedDict):
-    type: str
-    id: str
-    ts: str
-
-
-# ---- Inbound to Brain (from UI or Voice) ----
-
+from typing import Literal
 
 # The protocol version this build speaks. Bump the major on any breaking
 # envelope/field change; a major mismatch across the WS is refused loudly on
@@ -39,270 +29,6 @@ def contract_major(version: object) -> int | None:
     except ValueError:
         return None
 
-
-class HelloMsg(IpcEnvelope):
-    token: str
-    role: NotRequired[Literal["ui", "voice"]]  # absent -> "ui" (full stream); Voice opts into its subset
-    contract_version: NotRequired[str]  # major.minor; absent -> pre-versioning client, treated as compatible
-
-
-class UserMsg(IpcEnvelope):
-    text: str
-    conversation_id: str
-    source: Literal["ui", "voice"]
-    turn_id: NotRequired[str]
-
-
-class ConversationHistoryQueryMsg(IpcEnvelope):
-    conversation_id: str
-
-
-class InterruptMsg(IpcEnvelope):
-    conversation_id: str
-
-
-class ApprovalResponseMsg(IpcEnvelope):
-    reply_to: str
-    decision: Literal["approve", "deny", "edit"]
-    edited_args: NotRequired[object]
-
-
-class MemoryEditMsg(IpcEnvelope):
-    belief_id: str
-    op: Literal["edit", "delete", "restore", "purge"]
-    text: NotRequired[str]
-
-
-class MemoryQueryMsg(IpcEnvelope):
-    pass
-
-
-class SkillOpMsg(IpcEnvelope):
-    skill_name: str
-    op: Literal["trial", "disable", "restore", "delete"]
-
-
-class LanePinMsg(IpcEnvelope):
-    task_id: str
-    lane: Literal[1, 2, 3]
-
-
-class TaskOpMsg(IpcEnvelope):
-    task_id: NotRequired[str]
-    op: Literal["pause", "resume", "stop"]
-
-
-class MicMsg(IpcEnvelope):
-    op: Literal["mute", "unmute"]
-
-
-class SettingsUpdateMsg(IpcEnvelope):
-    key: str
-    value: object
-
-
-class UndoMsg(IpcEnvelope):
-    undo_token: str
-
-
-# ---- Outbound from Brain (to UI; Voice receives the subset it speaks) ----
-
-
-class HelloAckMsg(IpcEnvelope):
-    contract_version: NotRequired[str]  # the Brain's protocol version; absent -> old Brain, treated as compatible
-
-
-class TokenMsg(IpcEnvelope):
-    text: str
-    conversation_id: str
-    turn_id: NotRequired[str]
-
-
-class ProjectRootsStateMsg(IpcEnvelope):
-    roots: list[str]
-    pruned: NotRequired[list[str]]
-
-
-class ConversationHistoryTurn(TypedDict):
-    role: Literal["user", "assistant"]
-    text: str
-    turn_id: NotRequired[str]
-
-
-class ConversationHistoryStateMsg(IpcEnvelope):
-    conversation_id: str
-    turns: list[ConversationHistoryTurn]
-
-
-class ActivityMsg(IpcEnvelope):
-    text: str
-    narrate: bool
-    task_id: str
-    undoable: bool
-    undo_token: NotRequired[str]
-    tier: NotRequired[Literal[1, 2, 3]]
-    lane: NotRequired[Literal[1, 2, 3]]
-
-
-class ApprovalRequestMsg(IpcEnvelope):
-    # The approval's own domain id (distinct from the envelope message `id`).
-    # approval_response.reply_to references this value.
-    approval_id: str
-    tool: str
-    args_redacted: object
-    tier: Literal[1, 2, 3]
-    task_id: str
-    summary: NotRequired[str]
-    destructive: NotRequired[bool]
-    conversation_id: NotRequired[str]
-    turn_id: NotRequired[str]
-
-
-class DoneMsg(IpcEnvelope):
-    conversation_id: str
-    task_id: NotRequired[str]
-    interrupted: NotRequired[bool]
-    turn_id: NotRequired[str]
-    model: NotRequired[str]
-
-
-class ErrorMsg(IpcEnvelope):
-    code: str
-    message: str
-    recoverable: bool
-    conversation_id: NotRequired[str]
-    turn_id: NotRequired[str]
-    operation_kind: NotRequired[
-        Literal["undo", "memory_edit", "approval_response", "interrupt", "task_op", "lane_pin", "mic", "skill_op"]
-    ]
-    operation_id: NotRequired[str]
-
-
-class TaskStateMsg(IpcEnvelope):
-    task_id: str
-    state: Literal["waiting", "running", "paused", "waiting_approval", "done", "failed"]
-    lane: Literal[1, 2, 3]
-    title: NotRequired[str]
-    step: NotRequired[int]
-    steps_total: NotRequired[int]
-    step_label: NotRequired[str]
-    reason: NotRequired[str]
-
-
-class TaskLogMsg(IpcEnvelope):
-    task_id: str
-    seq: int
-    text: str
-
-
-class StreamFrameMsg(IpcEnvelope):
-    task_id: str
-    jpeg_b64: str
-    seq: int
-
-
-class VoiceStateMsg(IpcEnvelope):
-    state: Literal["idle", "wake", "listening", "thinking", "speaking", "muted"]
-
-
-class TranscriptMsg(IpcEnvelope):
-    text: str
-    final: bool
-    conversation_id: str
-
-
-class SpendUpdateMsg(IpcEnvelope):
-    session_usd: float
-    month_usd: float
-    session_tokens: NotRequired[int]
-    last_turn_tokens: NotRequired[int]
-
-
-class SettingsStateMsg(IpcEnvelope):
-    key: str
-    status: Literal["set", "missing", "invalid", "unverified"]
-
-
-class CapabilitiesStateMsg(IpcEnvelope):
-    voice_input: bool
-    task_controls: bool
-    skill_controls: bool
-    demo_scenarios: bool
-
-
-class BeliefStateMsg(IpcEnvelope):
-    belief_id: str
-    text: str
-    kind: Literal["preference", "project", "workflow", "decision", "lesson"]
-    provenance: Literal["user", "inferred"]
-    salience: float
-    status: Literal["active", "archived", "superseded"]
-    superseded_by: NotRequired[str]
-    used_at: NotRequired[str]
-
-
-class BeliefDeletedMsg(IpcEnvelope):
-    belief_id: str
-
-
-class MemoryHistoryStateMsg(IpcEnvelope):
-    complete: bool
-
-
-class SnapshotCompleteMsg(IpcEnvelope):
-    """Last frame of the connect snapshot. Payload-free: a boundary marker
-    needs no state. Exists so the UI never has to infer the boundary from
-    `spend_update`, which the contract treats as a global that may arrive at
-    any time."""
-
-
-class SkillStateMsg(IpcEnvelope):
-    skill_name: str
-    origin: Literal["auto", "user"]
-    kind: Literal["skill", "playbook"]
-    uses: int
-    success_rate: float
-    status: Literal["active", "paused", "retired"]
-    born_at: str
-    reason: NotRequired[str]
-
-
-IpcMessage = Union[
-    HelloMsg,
-    UserMsg,
-    ConversationHistoryQueryMsg,
-    InterruptMsg,
-    ApprovalResponseMsg,
-    MemoryEditMsg,
-    MemoryQueryMsg,
-    SkillOpMsg,
-    LanePinMsg,
-    TaskOpMsg,
-    MicMsg,
-    SettingsUpdateMsg,
-    UndoMsg,
-    HelloAckMsg,
-    TokenMsg,
-    ProjectRootsStateMsg,
-    ConversationHistoryStateMsg,
-    ActivityMsg,
-    ApprovalRequestMsg,
-    DoneMsg,
-    ErrorMsg,
-    TaskStateMsg,
-    TaskLogMsg,
-    StreamFrameMsg,
-    VoiceStateMsg,
-    TranscriptMsg,
-    SpendUpdateMsg,
-    SettingsStateMsg,
-    CapabilitiesStateMsg,
-    BeliefStateMsg,
-    BeliefDeletedMsg,
-    MemoryHistoryStateMsg,
-    SnapshotCompleteMsg,
-    SkillStateMsg,
-]
 
 def _field(kind: str, enum: list[object] | None = None) -> dict:
     spec: dict = {"type": kind}
@@ -328,7 +54,9 @@ CONTRACT_SPEC: dict = {
     }},
     "messages": {
         "hello": _message(IN, ["token"], {
-            "token": _field(S), "role": _field(S, ["ui", "voice"]), "contract_version": _field(S),
+            "token": _field(S),
+            "role": _field(S, ["ui", "voice"]),  # absent -> "ui" (full stream); Voice opts into its subset
+            "contract_version": _field(S),  # major.minor; absent -> pre-versioning client, treated as compatible
         }),
         "user_msg": _message(IN, ["text", "conversation_id", "source"], {
             "text": _field(S), "conversation_id": _field(S), "source": _field(S, ["ui", "voice"]),
@@ -354,6 +82,7 @@ CONTRACT_SPEC: dict = {
         "mic": _message(IN, ["op"], {"op": _field(S, ["mute", "unmute"])}),
         "settings_update": _message(IN, ["key", "value"], {"key": _field(S), "value": _field(J)}),
         "undo": _message(IN, ["undo_token"], {"undo_token": _field(S)}),
+        # contract_version: Brain's protocol version; absent -> old Brain, treated as compatible.
         "hello_ack": _message(OUT, [], {"contract_version": _field(S)}),
         "token": _message(OUT, ["text", "conversation_id"], {
             "text": _field(S), "conversation_id": _field(S), "turn_id": _field(S),
@@ -366,6 +95,8 @@ CONTRACT_SPEC: dict = {
             "undo_token": _field(S), "tier": _field(I, LANES), "lane": _field(I, LANES),
         }),
         "approval_request": _message(OUT, ["approval_id", "tool", "args_redacted", "tier", "task_id"], {
+            # approval_id: the approval's own domain id, distinct from the envelope message `id`;
+            # approval_response.reply_to references this value.
             "approval_id": _field(S), "tool": _field(S), "args_redacted": _field(O),
             "tier": _field(I, LANES), "task_id": _field(S), "summary": _field(S),
             "destructive": _field(B), "conversation_id": _field(S), "turn_id": _field(S),
@@ -425,6 +156,8 @@ CONTRACT_SPEC: dict = {
         }),
         "belief_deleted": _message(OUT, ["belief_id"], {"belief_id": _field(S)}),
         "memory_history_state": _message(OUT, ["complete"], {"complete": _field(B)}),
+        # Payload-free boundary marker: last frame of the connect snapshot, so the
+        # UI never has to infer the boundary from a global like spend_update.
         "snapshot_complete": _message(OUT, [], {}),
         "skill_state": _message(OUT, ["skill_name", "origin", "kind", "uses", "success_rate", "status", "born_at"], {
             "skill_name": _field(S), "origin": _field(S, ["auto", "user"]),
@@ -495,7 +228,7 @@ def _invalid_value(field_spec: dict) -> object:
     return {S: [], B: "false", I: 1.5, N: "1.5", O: [], J: object()}[field_spec["type"]]
 
 
-def parse_ipc_message(raw: object, expected_direction: Literal["inbound", "outbound"] | None = None) -> IpcMessage:
+def parse_ipc_message(raw: object, expected_direction: Literal["inbound", "outbound"] | None = None) -> dict:
     """Validate an arbitrary decoded-JSON frame against the contract.
 
     Raises IpcValidationError on an unknown `type` or a missing required
@@ -543,13 +276,13 @@ def parse_ipc_message(raw: object, expected_direction: Literal["inbound", "outbo
     ):
         raise IpcValidationError('ipc: "project_roots_state" roots/pruned must be string arrays')
 
-    return raw  # type: ignore[return-value]
+    return raw
 
 
 def _self_check() -> None:
     """Round-trip a user_msg and confirm bad frames are rejected. Run via
     `python -m brain.ipc.contract`."""
-    sample: UserMsg = {
+    sample: dict = {
         "type": "user_msg",
         "id": "11111111-1111-1111-1111-111111111111",
         "ts": "2026-07-10T00:00:00Z",

@@ -370,6 +370,36 @@ async def stream_chat(
         tool_calls_out.extend(finish_tool_calls(acc))
 
 
+async def stream_until(stream, stop: asyncio.Event):
+    """Yield from an async stream while racing every blocked read against `stop`.
+
+    Cancelling the pending anext() unwinds _stream_once's response context,
+    closing the HTTP stream instead of waiting for its 120-second read timeout.
+    Callers own what "stopped" means: graph's turn watches ctx["stop"] and stops
+    yielding; docs' task passes ctx.cancelled and re-raises TaskStopped after.
+    """
+    iterator = stream.__aiter__()
+    stop_task = asyncio.create_task(stop.wait())
+    try:
+        while True:
+            next_task = asyncio.create_task(anext(iterator))
+            done, _ = await asyncio.wait({next_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            if stop_task in done:
+                next_task.cancel()
+                await asyncio.gather(next_task, return_exceptions=True)
+                return
+            try:
+                yield next_task.result()
+            except StopAsyncIteration:
+                return
+    finally:
+        stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
+
+
 async def validate_key(api_key: str) -> bool:
     if os.environ.get("HALO_LLM_STUB"):
         return True

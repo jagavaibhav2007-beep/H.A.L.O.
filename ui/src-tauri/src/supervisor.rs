@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
@@ -231,36 +231,21 @@ fn repo_root() -> Option<PathBuf> {
     None
 }
 
-/// ponytail: prefers a bundled sidecar binary when one is present. The other
-/// half of packaging — a PyInstaller build step that actually produces
-/// `resources/sidecars/halo-<module>.exe`, plus the `bundle.resources` entry to
-/// ship it — is NOT written, so today this always misses and falls through to
-/// the source run below. Nothing about behaviour changes until that step exists.
-fn bundled_sidecar(app: &AppHandle, module: &str) -> Option<PathBuf> {
-    let exe = app
-        .path()
-        .resource_dir()
-        .ok()?
-        .join("sidecars")
-        .join(format!("halo-{module}{}", std::env::consts::EXE_SUFFIX));
-    exe.is_file().then_some(exe)
-}
-
-fn sidecar_cmd(app: &AppHandle, module: &'static str) -> Result<Command, String> {
-    let mut cmd = match bundled_sidecar(app, module) {
-        Some(exe) => Command::new(exe),
-        None => {
-            let (launcher, prefix) = python_launcher().ok_or_else(|| {
-                format!("Python 3.11+ not found (tried `python` and `py -3`); cannot start {module}")
-            })?;
-            let root = repo_root().ok_or_else(|| {
-                format!("could not locate the Halo source tree from {:?}", std::env::current_exe())
-            })?;
-            let mut cmd = Command::new(launcher);
-            cmd.args(prefix).args(["-m", module]).current_dir(root.join(module));
-            cmd
-        }
-    };
+/// ponytail: runs each sidecar from source (`python -m brain` / `python -m
+/// voice`). Packaging — a PyInstaller step producing a bundled
+/// `resources/sidecars/halo-<module>.exe` plus the branch that would prefer it —
+/// is a Phase-3 concern and isn't written yet; add it back here when that step
+/// exists. `_app` stays in the signature so `supervise`'s `mk_cmd` pointer type
+/// is untouched.
+fn sidecar_cmd(_app: &AppHandle, module: &'static str) -> Result<Command, String> {
+    let (launcher, prefix) = python_launcher().ok_or_else(|| {
+        format!("Python 3.11+ not found (tried `python` and `py -3`); cannot start {module}")
+    })?;
+    let root = repo_root().ok_or_else(|| {
+        format!("could not locate the Halo source tree from {:?}", std::env::current_exe())
+    })?;
+    let mut cmd = Command::new(launcher);
+    cmd.args(prefix).args(["-m", module]).current_dir(root.join(module));
     // Child stdout/stderr go to a file, not the parent's console: in a release
     // build there is no console to inherit, so this is the only place a sidecar
     // traceback can be read from.
@@ -383,7 +368,6 @@ fn supervise(
             }
             emit_state(&app, &statuses, name, "running");
             let start = Instant::now();
-            let mut wait_errors = 0;
 
             // Poll (not a blocking wait()) so we can also notice the shutdown
             // flag without racing the app-exit kill path over the same Child.
@@ -392,44 +376,24 @@ fn supervise(
                     return; // app exit handler owns killing it now
                 }
                 let mut guard = shared.lock().unwrap();
-                let mut killed = false;
                 let done = match guard.as_mut() {
                     Some(c) => match c.try_wait() {
                         Ok(Some(_)) => true,
-                        Ok(None) => {
-                            wait_errors = 0;
-                            false
-                        }
+                        Ok(None) => false,
+                        // ponytail: try_wait erroring on a live child handle is
+                        // near-impossible; if it ever does, we can't poll the
+                        // child so treat it as exited and fall through to the
+                        // normal restart/backoff path a clean exit takes.
                         Err(error) => {
-                            wait_errors += 1;
-                            log(&format!("halo: failed to poll {name} (attempt {wait_errors}/3): {error}"));
-                            if wait_errors < 3 {
-                                false
-                            } else {
-                                match c.kill() {
-                                    Ok(()) => {
-                                        killed = true;
-                                        true
-                                    }
-                                    Err(kill_error) => {
-                                        log(&format!("halo: failed to terminate {name}: {kill_error}"));
-                                        wait_errors = 0;
-                                        false
-                                    }
-                                }
-                            }
+                            log(&format!("halo: failed to poll {name}, treating as exited: {error}"));
+                            true
                         }
                     },
                     None => return, // taken by the shutdown kill path
                 };
                 drop(guard);
                 if done {
-                    let child = shared.lock().unwrap().take();
-                    if killed {
-                        if let Some(mut child) = child {
-                            let _ = child.wait();
-                        }
-                    }
+                    shared.lock().unwrap().take();
                     break;
                 }
                 thread::sleep(Duration::from_millis(200));

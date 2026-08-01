@@ -307,34 +307,6 @@ def _tokens(messages: list[dict]) -> int:
     return len(serialized) // 4
 
 
-async def _stream_until_stopped(stream, stop: asyncio.Event):
-    """Yield from an async stream while racing every blocked read against stop.
-
-    Cancelling the pending anext() unwinds llm._stream_once's response context,
-    closing the HTTP stream instead of waiting for its 120-second read timeout.
-    """
-    iterator = stream.__aiter__()
-    stop_task = asyncio.create_task(stop.wait())
-    try:
-        while True:
-            next_task = asyncio.create_task(anext(iterator))
-            done, _ = await asyncio.wait({next_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
-            if stop_task in done:
-                next_task.cancel()
-                await asyncio.gather(next_task, return_exceptions=True)
-                return
-            try:
-                yield next_task.result()
-            except StopAsyncIteration:
-                return
-    finally:
-        stop_task.cancel()
-        await asyncio.gather(stop_task, return_exceptions=True)
-        close = getattr(iterator, "aclose", None)
-        if close is not None:
-            await close()
-
-
 async def _maybe_summarize(state: State, ctx: dict) -> dict:
     """Past the token budget, distill the oldest not-yet-summarized span into
     the running summary and advance `dropped_before`. Returns a state update,
@@ -366,7 +338,7 @@ async def _maybe_summarize(state: State, ctx: dict) -> dict:
             ctx["api_key"],
             ctx["usage"],  # counts toward the turn -- was entirely unbilled
         )
-        async for delta in _stream_until_stopped(stream, ctx["stop"]):
+        async for delta in llm.stream_until(stream, ctx["stop"]):
             parts.append(delta)
         summary = "".join(parts).strip()
     except GraphInterrupt:
@@ -441,7 +413,7 @@ async def _respond_node(state: State, config) -> dict:
             tool_calls_out=calls,
             tool_choice=tool_choice,
         )
-        async for delta in _stream_until_stopped(stream, ctx["stop"]):
+        async for delta in llm.stream_until(stream, ctx["stop"]):
             parts.append(delta)
             payload = {"text": delta, "conversation_id": cid}
             if ctx.get("turn_id"):
