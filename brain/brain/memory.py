@@ -384,13 +384,29 @@ async def flush_all() -> None:
 
 
 def retrieve(user_text: str) -> list[dict]:
-    """Sync (call via to_thread). Top-15-or-~1k-tokens, relevance x salience
-    when vector scores exist (else store order). Bumps salience + last_used_at
-    on the injected rows (store.bump_salience does both)."""
+    """Sync (call via to_thread). Vector hits first (relevance x salience when
+    scores exist), then every remaining live belief as a floor, trimmed to
+    ~1k tokens. Bumps salience + last_used_at on the injected rows
+    (store.bump_salience does both)."""
     store.connect()
     rows = store.search_beliefs(user_text, k=15)
     if any(r.get("distance") is not None for r in rows):
         rows.sort(key=lambda r: (1.0 / (1.0 + (r.get("distance") or 0.0))) * r["salience"], reverse=True)
+    # The vector index is an optimization, not the membership list of active
+    # beliefs, so it must never be the only thing that decides what the model
+    # sees. Two independent mechanisms leave a live belief out of it: a belief
+    # written while the embedder was unavailable is never indexed (and nothing
+    # backfills it), and vec0 consumes its k-window BEFORE status='active' is
+    # post-filtered, so dead rows crowd out live ones. Either way search can
+    # return a *partial* set -- non-empty, so store.py's empty-result
+    # fallthrough never fires -- and the missing facts are invisible.
+    # Topping up from the same query the UI panel renders keeps the model's
+    # view and the user's view of memory in agreement. Appended AFTER the sort
+    # above on purpose: floor rows have no `distance`, and mixing them into
+    # that sort would score them 0.0 (a perfect match) and rank them above
+    # genuine vector hits.
+    seen = {r["belief_id"] for r in rows}
+    rows += [r for r in store.live_beliefs(50) if r["belief_id"] not in seen]
     out: list[dict] = []
     budget = _BUDGET_TOKENS
     for row in rows:

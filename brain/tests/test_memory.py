@@ -207,6 +207,72 @@ async def check_retrieval_and_episodic() -> None:
     print("[check 6] retrieval bumps salience + budget-caps; episodic prepend returns latest summary: OK")
 
 
+async def check_partial_index_does_not_hide_live_beliefs() -> None:
+    """Regression for 'the agent only recalled one fact while the Memory panel
+    showed twelve'. Distinct from check_dead_rows_do_not_starve_search in
+    test_store.py: that one covers a *fully* dead k-window, which search_beliefs
+    already answers with its empty-result fallthrough. This covers the PARTIAL
+    case -- a couple of indexed live rows plus unindexed live ones -- where the
+    vector result is non-empty, the fallthrough never fires, and the unindexed
+    beliefs were silently dropped from the prompt.
+
+    Live-DB shape this reproduces: 12 active beliefs, only 2 indexed, 12 dead
+    rows still occupying the index."""
+    if not store._vec_ok:
+        print("[check 6b] partial index: SKIPPED (sqlite-vec unavailable)")
+        return
+
+    fake: dict[str, list[float]] = {}
+    orig_embed, orig_failed = store._embed, store._embed_failed
+    saved_conn = store._conn
+    store._conn = None
+    store._embed = lambda text: fake.get(text)  # None -> written but never indexed
+    store._embed_failed = False
+    with tempfile.TemporaryDirectory() as isolated:
+        try:
+            store.connect(Path(isolated) / "partial.db")
+
+            def vec(axis: int) -> list[float]:
+                v = [0.0] * store.EMBED_DIM
+                v[axis] = 1.0
+                return v
+
+            # Dead rows crowding the index, all near the query (they are what
+            # the k-window would otherwise spend itself on).
+            for i in range(6):
+                name = f"dead {i}"
+                fake[name] = vec(0)
+                store.set_belief_status(store.add_belief(name, "fact", "user"), "archived")
+
+            # Two indexed live beliefs -- enough to make the vector result
+            # non-empty, which is what defeats the empty-result fallthrough.
+            for i in range(2):
+                name = f"indexed live {i}"
+                fake[name] = vec(0)
+                store.add_belief(name, "fact", "user")
+
+            # Live beliefs written while the embedder was unavailable: stored,
+            # never indexed, and nothing ever backfills them.
+            unindexed = [f"unindexed live {i}" for i in range(5)]
+            for name in unindexed:  # no fake[] entry -> _embed returns None
+                store.add_belief(name, "preference", "user")
+
+            fake["what do you know about me"] = vec(0)
+            got = {r["text"] for r in await asyncio.to_thread(memory.retrieve, "what do you know about me")}
+
+            missing = [t for t in unindexed if t not in got]
+            assert not missing, f"unindexed live beliefs never reached the prompt: {missing}"
+            # The model's view must match the panel's view (both are live_beliefs).
+            panel = {r["text"] for r in store.live_beliefs(50)}
+            assert panel <= got, f"panel shows beliefs the model never saw: {panel - got}"
+            assert "dead 0" not in got, "archived belief leaked into the prompt"
+        finally:
+            store.close()
+            store._embed, store._embed_failed = orig_embed, orig_failed
+            store._conn = saved_conn
+    print("[check 6b] partial index: unindexed live beliefs still reach the prompt, dead ones do not: OK")
+
+
 async def check_decay() -> None:
     victim = store.add_belief("stale editor note", "preference", "inferred")
     old = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
@@ -364,6 +430,7 @@ async def main() -> None:
         await check_failure_does_not_advance_cursor()
         await check_flush_all()
         await check_retrieval_and_episodic()
+        await check_partial_index_does_not_hide_live_beliefs()
         await check_decay()
         await check_memory_edit()
         await check_push_beliefs_live_and_capped()
