@@ -4,20 +4,20 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this repo is
 
-**H.A.L.O.** - a local, resident desktop AI companion: Tauri+React UI, Python/LangGraph brain, Python/Pipecat voice worker, talking over an authenticated local-loopback WebSocket. **Phase 0 (skeleton & contract), Phase 1 (front-end shell), and the Phase 2 backend/exit-hardening implementation are present; formal Phase 2 closure remains gated by `VERIFY.md`.** The default Brain now provides real chat/model routing, checkpointing, permissions, activity/undo, Lane-1 file tools, memory, snapshots, history summarization, spend rollups, and durable background tasks. The Voice worker is still a Phase-0 idle stub; Phase 3 heavy systems (coding orchestration, browser automation, real voice, GUI control, self-improvement, and integrations) have not started.
+**H.A.L.O.** - a local, resident desktop AI companion: Tauri+React UI, Python/LangGraph Brain, and Python/Pipecat Voice worker over an authenticated local-loopback WebSocket. **Phases 0 (skeleton & contract), 1 (front-end shell), and 2 (backend spine + exit-hardening) are COMPLETE** (declared 2026-08-01). The default Brain provides real chat/model routing, checkpointing, permissions, activity/undo, Lane-1 file and document tools, memory consolidation, snapshots, history summarization, spend rollups, and durable background tasks (`TaskRuntime`, schema v5). Voice is still audio-idle (no wake word, capture, STT, or TTS), but its authenticated sidecar now reconnects in-process when Brain restarts. Phase 3 heavy systems (coding orchestration, browser automation, real voice, GUI control, self-improvement, and integrations) have not started. Human/native visual, accessibility, recovery, and broader real-key checks remain recommended follow-ups in `VERIFY.md` and do not block Phase 3 work.
 
 The repo has two layers: design docs (source of truth for *behavior* and *architecture*) and the code that implements them.
 
 - **[Halo-PRD.md](Halo-PRD.md)** - product spec: *what* Halo is and *how it behaves* (capabilities, control lanes, permissions, memory, self-improvement). Stack-agnostic by design - keep tech choices out of it.
 - **[systemdesign/](systemdesign/00-overview.md)** - architecture per feature. **[11-ipc-contract.md](systemdesign/11-ipc-contract.md) is the canonical spec for the process model and message envelope** - read it before touching any cross-process code.
+- **[systemdesign/12-task-runtime.md](systemdesign/12-task-runtime.md)** - implemented task-runtime architecture. Read it before changing long-running tools or starting Phase 3 work; it defines the separation between interactive turns and durable tasks.
 - **[techstack/](techstack/00-stack-summary.md)** - concrete technology choice per feature.
 - **[ui_ux/](ui_ux/00-design-language.md)** - visual/interaction spec (tokens, motion, copy voice). Check `00-design-language.md` for existing tokens before inventing new ones.
-- **[phases.md](phases.md)** - the roadmap. Phase 0 and Phase 1 are complete. The Phase 2 feature and exit-hardening implementation is present; native checks and a final current-tree integrated gate must pass before Phase 3 starts.
-- **[phase-0-plan.md](phase-0-plan.md)** - the 8-step Phase 0 implementation plan and its exit criteria (all met - see Commands below to re-verify).
-- **[phase-1-plan.md](phase-1-plan.md)** - the completed 15-step front-end shell plan.
-- **[phase-2-plan.md](phase-2-plan.md)** - the completed 10-step backend spine plan.
-- **[VERIFY.md](VERIFY.md)** - automated and native verification status. The Phase 2 native checklist still requires a human run with a real OpenRouter key.
+- **[phases.md](phases.md)** - the roadmap. Phases 0, 1, and 2 are complete; their step-by-step implementation plans (formerly `phase-0/1/2-plan.md`) were retired 2026-08-01 once implemented - see git history for the original checklists.
+- **[VERIFY.md](VERIFY.md)** - automated and native verification status. A real-key OpenRouter walkthrough and human visual/NVDA pass remain as recommended, non-blocking follow-ups.
 - **[AUDIT_PLAN.md](AUDIT_PLAN.md)** - the 2026-07-22 evidence ledger: findings, fixes, explicit deferrals, test/native evidence, sources, and exit criteria.
+
+**Current working situation (2026-08-02).** The checked-out branch is `token-cost-reduction` and the working tree is intentionally dirty. There are uncommitted changes in code, tests, design/docs, and `mem/`; inspect `git status` and the relevant `git diff` before editing and preserve unrelated work. The latest project-memory entry says the Phase-3a architectural gate is met: PyInstaller packaging (C3) remains scheduled before 3c, and per-client `stream_frame` subscription (C4) remains scheduled with 3d.
 
 Each `systemdesign/`/`techstack/`/`ui_ux/` folder numbers files by feature (`01-chat`, `02-voice`, `03-memory`, ...) - the same number across folders covers the same feature from architecture, technology, and UI angles. When changing one, check whether the matching file in the others needs to move with it. Treat the PRD as the source of truth for behavior; if a design decision changes a PRD claim, update the PRD too.
 
@@ -28,12 +28,16 @@ Three independent process trees (`ui/` Rust+Node, `brain/` Python, `voice/` Pyth
 **Run everything for local dev:**
 ```powershell
 ./dev.ps1               # launches Tauri with the real Brain and Voice
+./dev.ps1 -Only ui      # standalone UI/native debugging: ui | brain | voice
 ./dev.ps1 -Browser      # launches the real Brain in a functional browser workspace
 ./dev.ps1 -Only brain   # standalone worker debugging: brain | voice | ui
 ./dev.ps1 -Mock         # launches Tauri against the scripted mock Brain
 ./dev.ps1 -Smoke        # runs Phase 0/1/2 automated gates in-place (no windows)
-./dev.ps1 -Verify       # full repository gate; required again after the 2026-07-31 exit-hardening changes
+./dev.ps1 -Verify       # full repository gate: contract sync, Python suites, UI checks/build, Rust tests, phase checks
+./dev.ps1 -WatchNative  # opt into Vite/Rust hot reload; stable attached mode is the default
 ```
+
+`-Smoke`, `-Verify`, and `-Browser` are mutually exclusive with one another and with `-Only`, `-Mock`, and `-WatchNative`. Browser mode serves the real Brain plus a loopback-only Vite workspace at `http://127.0.0.1:1420/`; it sets `HALO_BROWSER_DEV=1`, has no Tauri supervision, and has no Voice process. A bare `npm run dev` is UI-only and does not expose the browser session endpoint. The default launcher is attached and stable (`vite preview` plus `tauri dev --no-watch`); use `-WatchNative` only when interactive hot reload is needed.
 
 **UI (`ui/`, Tauri + Vite + React + TS):**
 ```powershell
@@ -42,8 +46,10 @@ npm install
 npm run tauri dev       # native window; needs Rust/cargo + MSVC Build Tools (C++ workload) on Windows
 npm run dev             # UI-only browser preview; use ../dev.ps1 -Browser for a live Brain
 npx tsc --noEmit        # typecheck
-node ui/src/ipc/contract.selfcheck.ts   # contract self-check (from repo root)
-node ui/src/ipc/queue.selfcheck.ts      # interrupted queue flush preserves unsent messages
+ui/node_modules/.bin/vite-node.cmd ui/src/ipc/contract.selfcheck.ts   # contract self-check (from repo root)
+ui/node_modules/.bin/vite-node.cmd ui/src/ipc/queue.selfcheck.ts      # interrupted queue flush preserves unsent messages
+ui/node_modules/.bin/vite-node.cmd ui/src/state/reducer.selfcheck.ts   # frame-log event-store projection self-check
+ui/node_modules/.bin/vite-node.cmd ui/src/state/conversations.selfcheck.ts # conversation registry/unread/eviction self-check
 npm test -- --run                       # Vitest hook/component tests (from ui/)
 ```
 
@@ -60,6 +66,8 @@ python brain/tests/test_server.py        # auth/ordering tests (plain asyncio+as
 python shared/phase2_check.py             # real-Brain backend E2E gate with offline stubs (from repo root)
 python -m brain.ipc.contract             # contract self-check
 ```
+
+The focused protocol checks are also runnable directly: `python shared/smoke_test.py`, `python shared/phase1_check.py`, and `python shared/phase2_check.py`. `./dev.ps1 -Smoke` runs them in sequence; `./dev.ps1 -Verify` adds the full Python/Voice suite, UI checks/build, Rust tests, and phase checks.
 
 **Voice (`voice/`, Python 3.11+):**
 ```powershell
@@ -86,15 +94,21 @@ Backend and cross-process checks use plain `asyncio` + `assert` scripts; the UI 
 
 **Session handshake.** The Brain holds a crash-safe OS lock so only one instance can own `session.json`, binds a random free loopback port, and atomically writes `{port, token}` to `%LOCALAPPDATA%\Halo\session.json`. **Every client must re-read this file fresh on every connect/reconnect attempt** - the Brain gets a new port on every restart, so caching the port anywhere causes silent reconnect failure. Every WS connection's first frame must be `{type:"hello", token}` matching that file; the Brain enforces this with `secrets.compare_digest`, silently drops failures, and sends `hello_ack` on success. Clients must not send or flush application messages before that acknowledgement.
 
-**IPC contract - one schema, two hand-mirrored implementations.** `shared/ipc-contract.json` is the single source of truth for every message type and its required fields. `ui/src/ipc/contract.ts` and `brain/brain/ipc/contract.py` are hand-mirrored from it (not codegen - deliberate, for simplicity at this scale). `shared/check_contract_sync.py` fails if the three diverge. The envelope is `{type, id, ts, ...payload}` - payload fields must never reuse the key `id` for a domain-specific identity (it collides with the envelope's own message id; this is why `approval_request`'s field is `approval_id`, not `id`).
+**IPC contract - two hand-mirrored implementations, diffed against each other.** There is no separate JSON schema: commit `e41d77b` deleted the old `shared/ipc-contract.json`, so the contract now lives as two hand-mirrored `CONTRACT_SPEC` dicts - `ui/src/ipc/contract.ts` and `brain/brain/ipc/contract.py` (not codegen - deliberate, for simplicity at this scale). `shared/check_contract_sync.py` diffs those two runtime dicts directly and fails if they diverge. The envelope is `{type, id, ts, ...payload}` - payload fields must never reuse the key `id` for a domain-specific identity (it collides with the envelope's own message id; this is why `approval_request`'s field is `approval_id`, not `id`).
 
-**Tauri<->React state events are separate from the WS contract.** The supervisor emits a webview event (`"sidecar-state"`, via `tauri::Emitter::emit`) carrying OS-process health (`starting`/`running`/`restarting`/`error`) - this is not part of `shared/ipc-contract.json` and never should be. The UI keeps two genuinely distinct pieces of state: whether the WebSocket itself is connected+authenticated (drives the chat input and reconnect indicator) versus whether the Brain *process* is alive (drives a separate "Brain failed to start" banner from sidecar-state). Do not conflate them.
+**Tauri<->React state events are separate from the WS contract.** The supervisor emits a webview event (`"sidecar-state"`, via `tauri::Emitter::emit`) carrying OS-process health (`starting`/`running`/`restarting`/`error`) - this is not part of the IPC contract (`contract.ts`/`contract.py`) and never should be. The UI keeps two genuinely distinct pieces of state: whether the WebSocket itself is connected+authenticated (drives the chat input and reconnect indicator) versus whether the Brain *process* is alive (drives a separate "Brain failed to start" banner from sidecar-state). Do not conflate them.
 
 **Conversation serialization.** The Brain keeps an `asyncio.Lock` per `conversation_id` in `brain/server.py`, so concurrent messages to the same conversation are handled in arrival order.
 
 **Real Brain backend.** The non-`--mock` Brain uses SQLite for durable state, keyring for secrets, an async OpenRouter client with a light/heavy rule-based router, LangGraph checkpointing keyed by `conversation_id`, and a single permission-gate/tool-registry choke point. Lane-1 local file operations and allowlisted read-only commands run under that gate; activity, undo, memory, snapshot hydration, summarization, and spend reporting are real. Offline automated checks use the env-gated `HALO_LLM_STUB` and `HALO_EXTRACT_STUB` seams; native real-model verification is not yet complete.
 
+**Task runtime.** Task-shaped tools detach from the short interactive-turn pool and per-conversation lock into the bounded, durable `TaskRuntime` (`HALO_TASK_CONCURRENCY`, default 2). It persists intent/result metadata in schema v5, gives tools cooperative stop/pause/progress/log callbacks, emits bounded `task_log` tails to UI clients, and reconciles torn tasks after restart without blindly replaying side effects. `dir_organize` and `doc_digest` are the first task-shaped tools. `task_op` is real; unsupported pause is reported as a correlated error. Read `systemdesign/12-task-runtime.md` before adding long-running work.
+
+**Readiness hardening now in the tree.** Pending checkpoint rehydration is scoped to threads with a live interrupt; whole-thread archival is deliberately deferred because there is no reliable closed-thread signal and deleting dormant checkpoints would lose resumable history. Voice re-reads `session.json` on every reconnect and follows Brain's new ephemeral port. The UI caps live turns per conversation at `MAX_TURNS=200` while leaving explicit history loads uncapped. The activity-array ring rewrite was intentionally deferred because high-rate task output already uses bounded `task_log` state and ordinary activity is human-paced.
+
 **UI WS client** (`ui/src/ipc/useHaloConnection.ts`) is transport-only by design - no business logic lives in the UI. It re-reads `session.json` via a Tauri command (`read_session` in `lib.rs`) on every (re)connect, queues outbound `user_msg`s until `hello_ack`, and is written to survive React StrictMode's double-invoke of effects (teardown flag checked before every async continuation; handlers nulled before the intentional close so it does not trigger the reconnect loop).
+
+**UI event store.** `ui/src/state/reducer.ts` is a framework-free `applyFrame` projection of IPC frames; `store.ts` is the zustand wrapper plus UI-only navigation state. The orb and workspace windows each have their own store and WebSocket connection. `taskLogs` is a bounded volatile tail (500 chunks per task); the Brain remains authoritative for durable history and task/activity records.
 
 ## Repo conventions (public open-source repo)
 
@@ -105,7 +119,7 @@ Backend and cross-process checks use plain `asyncio` + `assert` scripts; the UI 
 
 ## Picking a skill/plugin
 
-Before doing non-trivial work, check whether an available skill or agent already fits the task rather than solving it from scratch. This workspace has skills disabled granularly in `.Codex/settings.local.json`, so check there before assuming one is unavailable.
+Before doing non-trivial work, check the skills available in the current session and use the smallest matching skill. Repository policy requires `codexautopilot` for substantial requests (workspace changes, investigations, research, deliverables, meaningful tool use, or verification). Do not assume an optional plugin is installed; use the available fallback or request installation only when the user explicitly named a missing plugin and tool search is exhausted.
 
 ## Project memory
 
@@ -115,6 +129,6 @@ Before doing non-trivial work, check whether an available skill or agent already
 
 - Phase 0 — complete: authenticated three-process lifecycle, IPC contract, crash recovery, and reconnect behavior.
 - Phase 1 — complete: mocked premium UI shell, orb/workspace windows, chat, activity, approvals, tasks, memory, skills/settings, voice presence, and automated/native verification.
-- Phase 2 — Steps 1–10 plus the exit-hardening implementation are present. Durable tasks, authority separation, bounded admission, atomic batch undo, turn correlation, project-root repair, dependency locks, and CI are implemented. Formal closure still requires the unchecked native scenarios in `VERIFY.md` and one final integrated green gate.
-- Phase 3 — not started and remains gated on formal Phase 2 closure.
+- Phase 2 — COMPLETE (declared 2026-08-01). Steps 1–10 plus exit hardening are implemented: durable tasks (`TaskRuntime`, schema v5), authority separation, bounded admission, atomic batch undo, turn correlation, project-root repair, dependency locks, scoped checkpoint rehydration, Voice reconnect, and bounded UI turns. The unchecked native scenarios in `VERIFY.md` remain recommended, non-blocking follow-ups.
+- Phase 3 — not started; no longer gated on Phase 2 closure. The Phase-3a architectural gate is met. Read `PHASE3_READINESS_AUDIT.md` and `systemdesign/12-task-runtime.md` before starting; C3 (PyInstaller) and C4 (`stream_frame` subscription) are just-in-time prerequisites for later sub-phases.
 - Recent hardening: the 2026-07-22 tool-result/confabulation fix makes data-returning file tools visible to the model, anchors relative paths at the user home, and documents accessible roots. Re-verify this behavior when changing the gate or file tools.

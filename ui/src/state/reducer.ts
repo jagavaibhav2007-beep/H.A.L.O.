@@ -120,6 +120,22 @@ export interface HaloState {
 
 export const ACTIVITY_CAP = 10_000;
 
+// B5: cap in-memory turns per conversation. The Brain owns the full history
+// (checkpoints keyed by conversation_id) and serves it on demand via
+// conversation_history_query, so trimming the UI's copy loses nothing durable —
+// it only bounds an always-on session's live growth. Trim from the FRONT so the
+// tail is always kept, which makes it structurally impossible to drop the open
+// streaming turn (always the last element) — the invariant ChatView's
+// activeAssistantId / composer send-gate depends on. History load
+// (reconcileHistory) is deliberately left uncapped: it is one-shot and
+// user-initiated, so hiding messages the user asked to see would be wrong.
+export const MAX_TURNS = 200;
+
+function pushTurn(turns: Turn[], turn: Turn): Turn[] {
+  const next = [...turns, turn];
+  return next.length > MAX_TURNS ? next.slice(next.length - MAX_TURNS) : next;
+}
+
 // Bound on resident conversations. The orb window never calls the workspace's
 // chat registry (that's what bounds the workspace at RECENT_CAP=50), yet
 // applyFrame's getConversation creates an entry for every conversation_id it
@@ -247,7 +263,7 @@ export function appendUserTurn(
   const turn: UserTurn = { id, role: "user", text, turnId: id };
   return replaceConversation(state, {
     ...conv,
-    turns: [...conv.turns, turn],
+    turns: pushTurn(conv.turns, turn),
     needsInputRestore: false,
   });
 }
@@ -269,7 +285,7 @@ export function beginUserRequest(
     text: "",
     turnId: id,
   };
-  return replaceConversation(withUser, { ...conv, turns: [...conv.turns, pending] });
+  return replaceConversation(withUser, { ...conv, turns: pushTurn(conv.turns, pending) });
 }
 
 function replaceConversation(state: HaloState, conv: ConversationState): HaloState {
@@ -435,9 +451,9 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       // at render time is the upgrade path, and it costs the views a change.
       const turns: Turn[] = open
         ? conv.turns.map((t) => (t === open ? { ...t, text: t.text + frame.text } : t))
-        : [...conv.turns, {
+        : pushTurn(conv.turns, {
             id: frame.id, role: "assistant", status: "streaming", text: frame.text, turnId: frame.turn_id,
-          }];
+          });
       return replaceConversation(state, { ...conv, turns });
     }
 
@@ -481,9 +497,9 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       const error = { code: frame.code, message: frame.message, recoverable: frame.recoverable };
       const turns: Turn[] = open
         ? patchOpenTurn(conv.turns, open, { status: "error", error })
-        : [...conv.turns, {
+        : pushTurn(conv.turns, {
             id: frame.id, role: "assistant", status: "error", text: "", error, turnId: frame.turn_id,
-          }];
+          });
       // rule 8: a turn is never lost — flag the input for restore regardless
       // of whether a turn had started streaming yet.
       return resolveApprovalsForConversation(
@@ -619,7 +635,7 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
       if (frame.final) {
         const conv = getConversation(state, frame.conversation_id);
         const turn: UserTurn = { id: frame.id, role: "user", text: frame.text, viaVoice: true };
-        const withTurn = replaceConversation(state, { ...conv, turns: [...conv.turns, turn] });
+        const withTurn = replaceConversation(state, { ...conv, turns: pushTurn(conv.turns, turn) });
         return { ...withTurn, voice: { ...withTurn.voice, transcript: null } };
       }
       return {

@@ -28,8 +28,8 @@ For a fixed-capacity collection such as the 10,000-entry activity ring buffer, c
 ## Native Windows capsule: transparent WebView plus HWND region - 2026-07-17
 For a non-rectangular Tauri window on Windows, combine `transparent:true` and `backgroundColor:"#00000000"` with a native `SetWindowRgn` region. `ui/src-tauri/src/windows.rs::clip_window_to_capsule` creates a round-rect region whose corner ellipse equals the physical window height, applies it after enforcing the 360x52 logical size, and reapplies it on resize or DPI scale changes. Keep the `windows` crate dependency target-specific and enable only `Win32_Graphics_Gdi`.
 
-## Single-source-of-truth IPC contract with a drift check — 2026-07-10, hardened 2026-07-22
-`shared/ipc-contract.json` is canonical for message directions, required/optional fields, types, enums, and allowed shape. The TypeScript/Python mirrors runtime-validate at the boundary, and `shared/check_contract_sync.py` compares all 25 complete schemas. Run sync plus both runtime self-checks after edits; name/required-field parity alone is insufficient.
+## Two-mirror IPC contract with a direct drift check — 2026-07-10, hardened 2026-07-22, JSON retired 2026-07-31
+The contract is two hand-mirrored `CONTRACT_SPEC` dicts — `ui/src/ipc/contract.ts` and `brain/brain/ipc/contract.py` — that runtime-validate at the boundary. `shared/check_contract_sync.py` diffs the two dicts directly (directions, required/optional fields, types, enums, shape) and fails on any divergence. **The former `shared/ipc-contract.json` canonical file was deleted in commit `e41d77b`** (ponytail: it was a third copy read only by the drift check, so the check was rewritten to compare the two things that actually run). To add/change a type, edit BOTH mirrors; run sync plus both runtime self-checks after edits — name/required-field parity alone is insufficient.
 
 ## Full repository gate is broader than protocol smoke - 2026-07-22
 Use `./dev.ps1 -Smoke` only for Phase 0/1/2 protocol checks. Use `./dev.ps1 -Verify` before a repository-green claim. A partial run proves only the steps reached; require the final success marker.

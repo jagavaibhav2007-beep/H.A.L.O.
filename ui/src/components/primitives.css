@@ -6,13 +6,6 @@
   color: var(--text);
   font-family: var(--font-sans);
 }
-.halo-elevation-panel {
-  z-index: var(--z-panel);
-}
-.halo-elevation-card {
-  z-index: var(--z-card);
-}
-
 /* Button */
 .halo-btn {
   display: inline-flex;

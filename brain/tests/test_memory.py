@@ -32,6 +32,10 @@ from brain import memory, store
 from brain.ipc.contract import parse_ipc_message
 
 
+def _add_belief(text: str, kind: str, provenance: str) -> str:
+    return store.add_candidate_belief(text, kind, provenance)[0]
+
+
 class Sink:
     """Fake broadcast: contract-validates every frame, then records it."""
 
@@ -81,8 +85,8 @@ async def check_add_and_summary() -> None:
     # cursor advanced to the full span length
     assert store.get_conversation_meta(cid)["consolidation_cursor"] == len(messages)
     # a session_summary row was written
-    summaries = store.list_session_summaries(cid)
-    assert summaries and summaries[0]["text"].startswith("session:"), summaries
+    summary = store.latest_session_summary(cid)
+    assert summary and summary["text"].startswith("session:"), summary
     print("[check 1] consolidate: new fact -> ADD + belief_state + summary row + cursor advance: OK")
 
 
@@ -201,7 +205,7 @@ async def check_retrieval_and_episodic() -> None:
 
     # Budget: many long beliefs -> the injected set fits ~1000 tokens.
     for i in range(30):
-        store.add_belief(f"long belief {i}: " + ("detail " * 55), "project", "inferred")
+        _add_belief(f"long belief {i}: " + ("detail " * 55), "project", "inferred")
     out = await asyncio.to_thread(memory.retrieve, "long belief details")
     assert out and sum(len(r["text"]) // 4 + 1 for r in out) <= 1000, out
     print("[check 6] retrieval bumps salience + budget-caps; episodic prepend returns latest summary: OK")
@@ -242,20 +246,20 @@ async def check_partial_index_does_not_hide_live_beliefs() -> None:
             for i in range(6):
                 name = f"dead {i}"
                 fake[name] = vec(0)
-                store.set_belief_status(store.add_belief(name, "fact", "user"), "archived")
+                store.set_belief_status(_add_belief(name, "fact", "user"), "archived")
 
             # Two indexed live beliefs -- enough to make the vector result
             # non-empty, which is what defeats the empty-result fallthrough.
             for i in range(2):
                 name = f"indexed live {i}"
                 fake[name] = vec(0)
-                store.add_belief(name, "fact", "user")
+                _add_belief(name, "fact", "user")
 
             # Live beliefs written while the embedder was unavailable: stored,
             # never indexed, and nothing ever backfills them.
             unindexed = [f"unindexed live {i}" for i in range(5)]
             for name in unindexed:  # no fake[] entry -> _embed returns None
-                store.add_belief(name, "preference", "user")
+                _add_belief(name, "preference", "user")
 
             fake["what do you know about me"] = vec(0)
             got = {r["text"] for r in await asyncio.to_thread(memory.retrieve, "what do you know about me")}
@@ -274,7 +278,7 @@ async def check_partial_index_does_not_hide_live_beliefs() -> None:
 
 
 async def check_decay() -> None:
-    victim = store.add_belief("stale editor note", "preference", "inferred")
+    victim = _add_belief("stale editor note", "preference", "inferred")
     old = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
     with store.connect() as conn:
         conn.execute("UPDATE belief SET last_used_at=? WHERE belief_id=?", (old, victim))
@@ -327,7 +331,7 @@ async def check_memory_edit() -> None:
 async def check_push_beliefs_live_and_capped() -> None:
     # A superseded belief (from check 3) and an archived one must NOT hydrate.
     superseded = next(b for b in store.list_beliefs() if b["status"] == "superseded")
-    archived = store.add_belief("archived note", "preference", "inferred")
+    archived = _add_belief("archived note", "preference", "inferred")
     store.set_belief_status(archived, "archived")
 
     sink = Sink()
@@ -347,7 +351,7 @@ async def check_push_beliefs_live_and_capped() -> None:
 
     # Cap at 50: seed well past 50 live beliefs, confirm the snapshot is bounded.
     for i in range(60):
-        store.add_belief(f"cap belief {i}", "preference", "user")
+        _add_belief(f"cap belief {i}", "preference", "user")
     sink2 = Sink()
     await memory.push_beliefs(sink2)
     assert len(sink2.of("belief_state")) == 50, len(sink2.of("belief_state"))

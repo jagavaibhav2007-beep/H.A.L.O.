@@ -366,9 +366,54 @@ def check_generated_context_never_has_system_authority() -> None:
     print("[check 4e] generated summaries/memories are clearly marked untrusted and never receive system authority: OK")
 
 
+async def check_rehydrate_scoping() -> None:
+    """B3: `_threads_with_open_interrupt` must return exactly the currently
+    suspended threads, independent of how many total threads exist (the property
+    that keeps connect time flat as thread count grows). Uses a minimal graph on
+    an isolated checkpoint DB so it does not depend on driving a real Tier-3
+    turn."""
+    from typing import TypedDict
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command, interrupt
+
+    class _S(TypedDict):
+        x: int
+
+    def _suspend(state: _S) -> _S:
+        interrupt({"approval_id": f"ap-{state['x']}", "task_id": f"t-{state['x']}"})
+        return {"x": state["x"]}
+
+    def _plain(state: _S) -> _S:
+        return {"x": state["x"] + 1}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = str(Path(tmp) / "cp.db")
+        async with AsyncSqliteSaver.from_conn_string(db) as saver:
+            gi = (lambda g: (g.add_node("n", _suspend), g.add_edge(START, "n"), g.add_edge("n", END), g.compile(checkpointer=saver))[-1])(StateGraph(_S))
+            gp = (lambda g: (g.add_node("n", _plain), g.add_edge(START, "n"), g.add_edge("n", END), g.compile(checkpointer=saver))[-1])(StateGraph(_S))
+
+            # 25 plain (completed) threads + 3 that suspend at an interrupt.
+            for i in range(25):
+                await gp.ainvoke({"x": i}, {"configurable": {"thread_id": f"plain-{i}"}})
+            for i in range(3):
+                await gi.ainvoke({"x": i}, {"configurable": {"thread_id": f"intr-{i}"}})
+
+            found = set(await graph._threads_with_open_interrupt(saver))
+            assert found == {"intr-0", "intr-1", "intr-2"}, f"scoping wrong: {sorted(found)}"
+
+            # Resolve one interrupt -> it must drop out of the set.
+            await gi.ainvoke(Command(resume={"decision": "approve"}), {"configurable": {"thread_id": "intr-1"}})
+            after = set(await graph._threads_with_open_interrupt(saver))
+            assert after == {"intr-0", "intr-2"}, f"resumed thread not excluded: {sorted(after)}"
+    print("[check 6] rehydrate scoping: only suspended threads returned, resumed ones excluded, regardless of total: OK")
+
+
 async def main() -> None:
     check_cancelled_gate_is_terminal()
     check_generated_context_never_has_system_authority()
+    await check_rehydrate_scoping()
     server, token = await start()
     port = server.sockets[0].getsockname()[1]
     try:

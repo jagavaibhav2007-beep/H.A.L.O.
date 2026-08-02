@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import suppress
 from operator import add
 from pathlib import Path
 from typing import Annotated, TypedDict
@@ -252,11 +253,9 @@ def _tool_stub(content: str, fn: dict) -> str:
     the path is the reference the model re-fetches with offset/limit."""
     name = fn.get("name") or "tool"
     ref = name
-    try:
+    with suppress(ValueError, TypeError, AttributeError):
         parsed = json.loads(fn.get("arguments") or "{}")
         ref = parsed.get("path") or name  # raw model string: may be non-dict/invalid
-    except (ValueError, TypeError, AttributeError):
-        pass
     return (
         f"[{name} result for {ref} ({len(content)} chars) elided — "
         "call the tool again (offset/limit) if you need it]"
@@ -704,6 +703,29 @@ async def _finish_turn(result: dict, cid: str, broadcast) -> bool:
     return False
 
 
+async def _threads_with_open_interrupt(saver) -> list[str]:
+    """Thread ids whose LATEST checkpoint still carries an `__interrupt__` write
+    -- i.e. currently suspended at a Tier-3 approval. This replaces the old
+    "scan every thread ever created and aget_state each one" cost that ran on
+    EVERY connect (both webviews connect), which was the reconnect-livelock
+    amplifier in PHASE3_READINESS_AUDIT finding #2. A resumed interrupt writes a
+    newer checkpoint with no `__interrupt__` write, so pinning to the newest
+    checkpoint_id per thread excludes already-answered ones. Verified against the
+    real DB and a live interrupt/resume round-trip to equal aget_state(...)
+    .interrupts exactly (test_graph check 6). Depends on the langgraph
+    `writes`/`checkpoints` table shape -- the same coupling _prune_checkpoints
+    already relies on; if langgraph renames the interrupt channel this returns
+    [] and rehydrate degrades to "no pending approvals restored", never a crash."""
+    q = (
+        "SELECT DISTINCT w.thread_id FROM writes w "
+        "WHERE w.channel = '__interrupt__' AND w.checkpoint_id = ("
+        "  SELECT checkpoint_id FROM checkpoints ck WHERE ck.thread_id = w.thread_id "
+        "  ORDER BY checkpoint_id DESC LIMIT 1)"
+    )
+    async with saver.lock, saver.conn.execute(q) as cur:
+        return [row[0] async for row in cur]
+
+
 async def rehydrate_pending() -> None:
     """Rebuild gate's approval_id -> conversation_id map from the checkpoints
     after a Brain restart. Without this a Tier-3 approval that was open when
@@ -716,11 +738,13 @@ async def rehydrate_pending() -> None:
     graph = await _ensure_graph()
     saver = graph.checkpointer
     await saver.setup()
-    # ponytail: one row per suspended thread via a direct DISTINCT query --
-    # alist(None) would deserialize every checkpoint in the file just to read
-    # thread ids. Personal-scale table; add an index if it ever gets big.
-    async with saver.lock, saver.conn.execute("SELECT DISTINCT thread_id FROM checkpoints") as cur:
-        thread_ids = [row[0] async for row in cur]
+    # B3: only threads whose LATEST checkpoint carries an unresolved interrupt
+    # can hold a pending approval, so deserialize exactly those instead of every
+    # thread ever created (see _threads_with_open_interrupt). snap.interrupts
+    # below stays the authority that builds the payload -- the query only narrows
+    # which threads we touch, so a false positive is harmless and empty is a
+    # no-op.
+    thread_ids = await _threads_with_open_interrupt(saver)
     for cid in thread_ids:
         snap = await graph.aget_state({"configurable": {"thread_id": cid}})
         for intr in snap.interrupts:

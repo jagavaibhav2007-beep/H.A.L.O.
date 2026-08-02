@@ -342,24 +342,6 @@ def _unindex(conn: sqlite3.Connection, belief_id: str) -> None:
 # ---------------------------------------------------------------- beliefs --
 
 
-def add_belief(text: str, kind: str, provenance: str, salience: float = 0.6) -> str:
-    # A4: embed BEFORE the lock -- first call may load/download the fastembed
-    # model, which must not stall every other store-touching turn.
-    vec = _embed(text)
-    with _OP_LOCK:
-        conn = connect()
-        belief_id = str(uuid.uuid4())
-        now = _now()
-        with conn:
-            conn.execute(
-                "INSERT INTO belief(belief_id, text, kind, provenance, salience, status, created_at, last_used_at, valid_at) "
-                "VALUES (?,?,?,?,?,'active',?,?,?)",
-                (belief_id, text, kind, provenance, salience, now, now, now),
-            )
-            _index_embedding(conn, belief_id, vec)
-    return belief_id
-
-
 def add_candidate_belief(
     text: str,
     kind: str,
@@ -374,7 +356,8 @@ def add_candidate_belief(
     bookkeeping share one transaction. An inferred candidate is retained but
     cannot displace a user-stated belief, matching the existing rule.
     """
-    # A4: embed BEFORE the lock (see add_belief).
+    # A4: embed BEFORE the lock -- first call may load/download the fastembed
+    # model, which must not stall every other store-touching turn.
     vec = _embed(text)
     with _OP_LOCK:
         conn = connect()
@@ -435,7 +418,7 @@ def list_beliefs(status: str | None = None) -> list[dict]:
 
 
 def update_belief(belief_id: str, text: str, provenance: str | None = None) -> None:
-    # A4: embed BEFORE the lock (see add_belief).
+    # A4: embed before the lock, matching add_candidate_belief.
     vec = _embed(text)
     with _OP_LOCK:
         conn = connect()
@@ -535,27 +518,6 @@ def restore_belief(belief_id: str) -> list[dict]:
     return [get_belief(changed_id) for changed_id in changed_ids]
 
 
-@_serialized
-def supersede(old_id: str, new_id: str) -> None:
-    """Enforces the provenance rule (cross-cutting rule 6): a user-stated
-    belief can never be superseded by an inferred one."""
-    conn = connect()
-    with conn:
-        old = conn.execute("SELECT provenance FROM belief WHERE belief_id=?", (old_id,)).fetchone()
-        new = conn.execute("SELECT provenance FROM belief WHERE belief_id=?", (new_id,)).fetchone()
-        if old is None or new is None:
-            raise ValueError("supersede: unknown belief_id")
-        if old["provenance"] == "user" and new["provenance"] == "inferred":
-            raise ValueError("user-stated beliefs can only be superseded by a newer user statement")
-        cur = conn.execute(
-            "UPDATE belief SET status='superseded', superseded_by=?, invalid_at=? WHERE belief_id=?",
-            (new_id, _now(), old_id),
-        )
-        if cur.rowcount != 1:
-            raise ValueError("supersede: old belief changed before update")
-        _unindex(conn, old_id)  # superseded belief leaves the live set
-
-
 def search_beliefs(query_text: str, k: int = 15, live_only: bool = True) -> list[dict]:
     """Vector similarity over active beliefs; falls back to recency if the
     embedder/vec table is unavailable (memory degrades, never breaks).
@@ -564,7 +526,7 @@ def search_beliefs(query_text: str, k: int = 15, live_only: bool = True) -> list
     (invalid_at set). ponytail: for active rows invalid_at is always NULL, so
     this is belt-and-suspenders today; it becomes load-bearing if invalidation
     ever detaches from the status enum."""
-    # A4: embed BEFORE the lock (see add_belief).
+    # A4: embed before the lock, matching add_candidate_belief.
     vec = _embed(query_text)
     with _OP_LOCK:
         conn = connect()
@@ -648,26 +610,6 @@ def decay(half_life_days: float = 30, archive_below: float = 0.2, now: datetime 
     return archived
 
 
-@_serialized
-def invalidate_belief(belief_id: str, superseded_by: str | None = None, *, by_inferred: bool = False) -> None:
-    """Close a belief's validity window (Graphiti pattern): invalid_at=now,
-    status='superseded', optional superseded_by -- one transaction. Enforces
-    rule 6 in-store, below the LLM decision layer: an inferred caller
-    (by_inferred=True) can never invalidate a user-stated belief."""
-    conn = connect()
-    with conn:
-        row = conn.execute("SELECT provenance FROM belief WHERE belief_id=?", (belief_id,)).fetchone()
-        if row is None:
-            raise ValueError("invalidate_belief: unknown belief_id")
-        if by_inferred and row["provenance"] == "user":
-            raise ValueError("user-stated beliefs can only be invalidated by a newer user statement")
-        conn.execute(
-            "UPDATE belief SET status='superseded', invalid_at=?, superseded_by=? WHERE belief_id=?",
-            (_now(), superseded_by, belief_id),
-        )
-        _unindex(conn, belief_id)  # invalidated belief leaves the live set
-
-
 # ------------------------------------------------- conversation meta + episodic --
 
 
@@ -728,21 +670,6 @@ def add_session_summary(conversation_id: str, text: str, key_points: dict) -> st
             (summary_id, conversation_id, text, json.dumps(key_points or {}), _now()),
         )
     return summary_id
-
-
-@_serialized
-def list_session_summaries(conversation_id: str | None = None, limit: int = 20) -> list[dict]:
-    conn = connect()
-    if conversation_id is None:
-        rows = conn.execute(
-            "SELECT * FROM session_summary ORDER BY created_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM session_summary WHERE conversation_id=? ORDER BY created_at DESC LIMIT ?",
-            (conversation_id, limit),
-        ).fetchall()
-    return [dict(r) for r in rows]
 
 
 @_serialized

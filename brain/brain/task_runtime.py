@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
@@ -56,10 +57,8 @@ class TaskContext:
         while self.pause_requested.is_set():
             if self.cancelled.is_set():
                 raise TaskStopped()
-            try:
+            with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self.cancelled.wait(), timeout=0.1)
-            except asyncio.TimeoutError:
-                pass
         if self.cancelled.is_set():
             raise TaskStopped()
         await self._state("running")
@@ -106,11 +105,9 @@ class TaskContext:
             self._log_timer = asyncio.create_task(self._flush_later())
 
     async def _flush_later(self) -> None:
-        try:
+        with suppress(asyncio.CancelledError):
             await asyncio.sleep(_LOG_FLUSH_SECONDS)
             await self.flush_log()
-        except asyncio.CancelledError:
-            return
 
     async def flush_log(self) -> None:
         timer = self._log_timer
@@ -394,10 +391,8 @@ class TaskRuntime:
         for row in rows:
             checkpoint = None
             if row.get("checkpoint_json"):
-                try:
+                with suppress(TypeError, ValueError):
                     checkpoint = json.loads(row["checkpoint_json"])
-                except (TypeError, ValueError):
-                    pass
             reason = "Brain restarted; task was reconciled without replaying side effects"
             undo_token = None
             entry = gate.TOOLS.get(row.get("tool"))

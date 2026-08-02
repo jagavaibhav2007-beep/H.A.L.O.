@@ -2,18 +2,13 @@
 
 Status: **Phase 1 COMPLETE** — automated gate passed, native checklist
 user-confirmed complete on 2026-07-13.
-Status: **The Phase 2 feature set and 2026-07-31 exit-hardening implementation are present, but formal closure is pending.**
-The 2026-07-27 baseline `./dev.ps1 -Verify` reached `FULL AUTOMATED
-VERIFICATION PASSED`. After the exit-hardening changes, focused Brain/Voice
-checks, TypeScript, the UI production build, focused Vitest suites, Rust, and
-dependency audits passed. The final current-tree one-shot `-Verify` rerun is
-still required; its latest attempt found deterministic test expectations that
-were then corrected, and local execution approval became unavailable before a
-clean rerun. App-scoped
-native mock startup confirmed Brain/Voice authentication, and forced death of
-the exact Tauri PID reaped its exact Brain/Voice child PIDs. Human visual,
-keyboard/NVDA, minimum-size, and real-OpenRouter-key checks remain unchecked.
-See [AUDIT_PLAN.md](AUDIT_PLAN.md).
+Status: **Phase 2 COMPLETE (declared 2026-08-01).** The feature set and
+2026-07-31 exit-hardening implementation (durable TaskRuntime, security/reconnect
+fixes) are in place and automated-gate-verified. The checklist items below —
+human visual, keyboard/NVDA, minimum-size, and real-OpenRouter-key checks —
+remain unchecked and are still worth running, but are recommended follow-ups
+rather than a blocker on Phase 3 work. See [AUDIT_PLAN.md](AUDIT_PLAN.md) and
+[DEEPSCAN_AUDIT.md](DEEPSCAN_AUDIT.md) for the audit trail behind this status.
 
 Run the full automated gate first. Use `./dev.ps1 -Mock` for the scripted
 Phase-1 visual scenarios (`demo ...`). Use the normal `./dev.ps1` launcher for

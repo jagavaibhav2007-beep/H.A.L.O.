@@ -75,28 +75,15 @@ def get_key() -> str | None:
     try:
         return _read_key()
     except Exception as exc:
-        # A backend failure is NOT the same as "no key stored" -- see
-        # keystore_available(). Callers that only need the value still get
-        # None, but key_status() reports the difference so the UI can't tell
+        # A backend failure is NOT the same as "no key stored". Callers that
+        # only need the value still get None, but key_status() reports the
+        # difference so the UI can't tell
         # the user "not set" when the truth is "I couldn't ask".
         # Credential backends can expose machine/user paths in exception
         # details. Value callers only need the degraded result; status callers
         # use the strict path below for an actionable UI error.
         logger.warning("keyring read failed (%s); backend unavailable", type(exc).__name__)
         return None
-
-
-def keystore_available() -> bool:
-    """Can we actually reach the keystore? Distinguishes 'no key stored' from
-    'the vault itself is broken' -- conflating those is what makes a user go
-    buy a replacement key they didn't need."""
-    if os.environ.get("HALO_KEYRING_DIR"):
-        return True
-    try:
-        _read_key()
-        return True
-    except Exception:
-        return False
 
 
 def set_key(value: str) -> None:

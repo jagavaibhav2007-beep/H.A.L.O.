@@ -89,6 +89,6 @@ Source of truth for *what* each thing does stays in [Halo-PRD.md](Halo-PRD.md), 
 
 ## How to use this file
 
-- **Phase 0 and Phase 1 are done.** The Phase 2 feature set and 2026-07-31 exit-hardening implementation are present, including the durable TaskRuntime and security/reconnect fixes. Formal Phase 2 closure still requires the unchecked human/native scenarios in [VERIFY.md](VERIFY.md) and a final green integrated gate at the resulting commit. Phase 3 remains blocked until those checks close.
+- **Phases 0, 1, and 2 are COMPLETE** (declared 2026-08-01), including the durable TaskRuntime and the 2026-07-22/07-28/07-29 security/reconnect hardening. The unchecked human/native scenarios in [VERIFY.md](VERIFY.md) (visual/NVDA pass, real-key OpenRouter walkthrough) remain as recommended follow-ups but no longer block starting Phase 3. Read [PHASE3_READINESS_AUDIT.md](PHASE3_READINESS_AUDIT.md) and [systemdesign/12-task-runtime.md](systemdesign/12-task-runtime.md) before starting Phase 3a.
 - To start a phase: "let's start Phase N" → a `phase-N-plan.md` gets written with concrete tasks, file layout, and interfaces, grounded in the then-current docs.
 - If a phase reveals a design gap, fix the relevant `systemdesign/`/`techstack/`/`ui_ux/` doc first, then continue — this roadmap follows the docs, not the other way around.

@@ -19,6 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from brain import store
 
 
+def _add_belief(text: str, kind: str, provenance: str, salience: float = 0.6) -> str:
+    return store.add_candidate_belief(text, kind, provenance, salience=salience)[0]
+
+
 def check_fresh_connect_and_reconnect_no_redo_ddl(tmp: Path) -> None:
     db_path = tmp / "halo.db"
     conn = store.connect(db_path)
@@ -32,7 +36,7 @@ def check_fresh_connect_and_reconnect_no_redo_ddl(tmp: Path) -> None:
     # simulate a second Brain start against the same file: close, reconnect,
     # and prove the DDL guard (user_version) skips re-running CREATE TABLE,
     # and a previously-written row survives the restart.
-    bid = store.add_belief("survives restart", "fact", "user")
+    bid = _add_belief("survives restart", "fact", "user")
     store.close()
     conn3 = store.connect(db_path)
     assert conn3 is not conn
@@ -42,7 +46,7 @@ def check_fresh_connect_and_reconnect_no_redo_ddl(tmp: Path) -> None:
 
 
 def check_belief_crud() -> None:
-    bid = store.add_belief("the sky is blue", "fact", "user")
+    bid = _add_belief("the sky is blue", "fact", "user")
     got = store.get_belief(bid)
     assert got is not None and got["text"] == "the sky is blue"
     assert got["status"] == "active"
@@ -64,7 +68,7 @@ def check_belief_crud() -> None:
 
 
 def check_archived_belief_purge() -> None:
-    bid = store.add_belief("remove me permanently", "preference", "user")
+    bid = _add_belief("remove me permanently", "preference", "user")
     try:
         store.purge_belief(bid)
         raise AssertionError("expected active belief purge to be rejected")
@@ -77,54 +81,25 @@ def check_archived_belief_purge() -> None:
     print("[check 2b] only archived beliefs can be permanently purged: OK")
 
 
-def check_supersede_provenance_matrix() -> None:
-    user1 = store.add_belief("user said A", "preference", "user")
-    user2 = store.add_belief("user said A2", "preference", "user")
-    store.supersede(user1, user2)  # user <- user: ok
-    assert store.get_belief(user1)["status"] == "superseded"
-    assert store.get_belief(user1)["superseded_by"] == user2
-
-    inf1 = store.add_belief("inferred B", "workflow", "inferred")
-    inf2 = store.add_belief("inferred B2", "workflow", "inferred")
-    store.supersede(inf1, inf2)  # inferred <- inferred: ok
-    assert store.get_belief(inf1)["status"] == "superseded"
-
-    user3 = store.add_belief("user said C", "decision", "user")
-    inf3 = store.add_belief("inferred C2", "decision", "inferred")
-    store.supersede(inf3, user3)  # inferred <- user: ok (user statement supersedes inference)
-    assert store.get_belief(inf3)["status"] == "superseded"
-
-    user4 = store.add_belief("user said D", "decision", "user")
-    inf4 = store.add_belief("inferred D2", "decision", "inferred")
-    try:
-        store.supersede(user4, inf4)  # user <- inferred: must RAISE
-        raise AssertionError("expected ValueError for user superseded by inferred")
-    except ValueError:
-        pass
-    assert store.get_belief(user4)["status"] == "active"
-    print("[check 3] supersede provenance matrix (user/inferred x4): OK")
-
-
 def check_candidate_transaction_atomicity() -> None:
-    old_inferred = store.add_belief("my editor is vim okay", "preference", "inferred")
-    new_user, superseded = store.add_candidate_belief(
-        "my editor is emacs okay", "preference", "user", supersede_id=old_inferred
-    )
-    assert superseded is True
-    assert store.get_belief(old_inferred)["status"] == "superseded"
-    assert store.get_belief(old_inferred)["superseded_by"] == new_user
-    assert store.get_belief(new_user)["status"] == "active"
+    for index, (old_provenance, new_provenance, expected) in enumerate((
+        ("user", "user", True),
+        ("inferred", "inferred", True),
+        ("inferred", "user", True),
+        ("user", "inferred", False),
+    )):
+        old_id = _add_belief(f"old belief {index}", "preference", old_provenance)
+        new_id, superseded = store.add_candidate_belief(
+            f"new belief {index}", "preference", new_provenance, supersede_id=old_id
+        )
+        old = store.get_belief(old_id)
+        assert superseded is expected
+        assert store.get_belief(new_id)["status"] == "active"
+        assert old["status"] == ("superseded" if expected else "active")
+        assert old["superseded_by"] == (new_id if expected else None)
+        assert (old["invalid_at"] is not None) is expected
 
-    old_user = store.add_belief("my terminal is wezterm okay", "preference", "user")
-    new_inferred, superseded = store.add_candidate_belief(
-        "my terminal is alacritty okay", "preference", "inferred", supersede_id=old_user
-    )
-    assert superseded is False
-    assert store.get_belief(old_user)["status"] == "active"
-    assert store.get_belief(old_user)["superseded_by"] is None
-    assert store.get_belief(new_inferred)["status"] == "active"
-
-    rollback_old = store.add_belief("my formatter is black okay", "preference", "inferred")
+    rollback_old = _add_belief("my formatter is black okay", "preference", "inferred")
     before_ids = {row["belief_id"] for row in store.list_beliefs()}
     conn = store.connect()
     before_maps = conn.execute("SELECT COUNT(*) FROM belief_map").fetchone()[0]
@@ -149,7 +124,7 @@ def check_candidate_transaction_atomicity() -> None:
     rollback_row = store.get_belief(rollback_old)
     assert rollback_row["status"] == "active" and rollback_row["superseded_by"] is None, rollback_row
     assert conn.execute("SELECT COUNT(*) FROM belief_map").fetchone()[0] == before_maps
-    print("[check 4] candidate insert/provenance/supersession/vector bookkeeping is atomic: OK")
+    print("[check 3] candidate provenance matrix and transaction/vector bookkeeping are atomic: OK")
 
 
 def check_vector_search_synthetic() -> None:
@@ -183,8 +158,8 @@ def check_vector_search_synthetic() -> None:
         fake_vectors[friday_text] = friday_vec
         fake_vectors["which package manager"] = query_vec
 
-        pnpm_id = store.add_belief(pnpm_text, "preference", "user")
-        store.add_belief(friday_text, "workflow", "user")
+        pnpm_id = _add_belief(pnpm_text, "preference", "user")
+        _add_belief(friday_text, "workflow", "user")
 
         results = store.search_beliefs("which package manager", k=5)
         ids_in_order = [r["belief_id"] for r in results]
@@ -237,9 +212,9 @@ def check_dead_rows_do_not_starve_search() -> None:
             ids = []
             for name in ["near0", "near1", "near2", "near3"]:
                 fake[name] = vec(0)  # cluster on axis 0, right next to the query
-                ids.append(store.add_belief(name, "fact", "user"))
+                ids.append(_add_belief(name, "fact", "user"))
             fake["survivor"] = vec(1)  # farther, on axis 1
-            store.add_belief("survivor", "fact", "user")
+            _add_belief("survivor", "fact", "user")
             fake["q"] = vec(0)  # query points at the crowded axis
 
             # k=4 window is exactly the 4 near rows; survivor is live but excluded.
@@ -263,7 +238,7 @@ def check_dead_rows_do_not_starve_search() -> None:
 
 
 def check_bump_salience_caps_at_one() -> None:
-    bid = store.add_belief("something", "fact", "user", salience=0.9)
+    bid = _add_belief("something", "fact", "user", salience=0.9)
     store.bump_salience([bid])
     assert store.get_belief(bid)["salience"] == 1.0
     store.bump_salience([bid])
@@ -273,8 +248,8 @@ def check_bump_salience_caps_at_one() -> None:
 
 def check_decay_archives_old_not_fresh() -> None:
     now = datetime.now(timezone.utc)
-    old_id = store.add_belief("stale fact", "fact", "user", salience=0.6)
-    fresh_id = store.add_belief("fresh fact", "fact", "user", salience=0.6)
+    old_id = _add_belief("stale fact", "fact", "user", salience=0.6)
+    fresh_id = _add_belief("fresh fact", "fact", "user", salience=0.6)
 
     conn = store.connect()
     old_ts = (now - timedelta(days=90)).isoformat()
@@ -372,29 +347,6 @@ def check_tasks() -> None:
     print("[check 11] upsert_task merges fields, list_tasks filters by state: OK")
 
 
-def check_invalidate_belief_rule_six() -> None:
-    """invalidate_belief closes the validity window and enforces rule 6:
-    an inferred caller can never invalidate a user-stated belief."""
-    inf = store.add_belief("inferred claim", "workflow", "inferred")
-    store.invalidate_belief(inf, by_inferred=True)  # inferred target + inferred caller: ok
-    row = store.get_belief(inf)
-    assert row["status"] == "superseded" and row["invalid_at"] is not None, row
-
-    usr = store.add_belief("user claim", "preference", "user")
-    try:
-        store.invalidate_belief(usr, by_inferred=True)  # inferred caller vs user: must RAISE
-        raise AssertionError("expected ValueError for inferred invalidating user belief")
-    except ValueError:
-        pass
-    assert store.get_belief(usr)["status"] == "active", store.get_belief(usr)
-
-    other = store.add_belief("newer user claim", "preference", "user")
-    store.invalidate_belief(usr, superseded_by=other, by_inferred=False)  # user statement: ok
-    row = store.get_belief(usr)
-    assert row["status"] == "superseded" and row["superseded_by"] == other and row["invalid_at"] is not None, row
-    print("[check 12] invalidate_belief closes the window; rule-6 refusal for inferred-vs-user: OK")
-
-
 def check_conversation_meta_and_dirty() -> None:
     store.note_conversation_activity("cv", 5)
     meta = store.get_conversation_meta("cv")
@@ -417,9 +369,8 @@ def check_session_summary_crud() -> None:
     assert sid
     latest = store.latest_session_summary("cv")
     assert latest["text"] == "session: hello world" and latest["summary_id"] == sid, latest
-    assert store.list_session_summaries("cv"), "summary not listed"
     assert store.latest_session_summary("no-such-conversation") is None
-    print("[check 14] session_summary add/list/latest round-trip: OK")
+    print("[check 14] session_summary add/latest round-trip: OK")
 
 
 def check_migration_v1_to_v3(tmp: Path) -> None:
@@ -572,7 +523,7 @@ def check_migration_v2_to_v3(tmp: Path) -> None:
     v2_path = tmp / "v2.db"
     store.close()
     store.connect(v2_path)  # lands at SCHEMA_VERSION
-    store.add_belief("keep-me", kind="preference", provenance="user")
+    _add_belief("keep-me", kind="preference", provenance="user")
     store.close()
 
     raw = sqlite3.connect(str(v2_path))
@@ -709,7 +660,7 @@ def check_embed_computed_outside_lock() -> None:
     released = False
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(store.add_belief, "lock ordering probe", "fact", "user")
+            future = pool.submit(_add_belief, "lock ordering probe", "fact", "user")
             assert embed_started.wait(1), "_embed was not called while _OP_LOCK was held elsewhere"
             release_embed.set()
             store._OP_LOCK.release()
@@ -728,7 +679,6 @@ def main() -> None:
         check_fresh_connect_and_reconnect_no_redo_ddl(tmp_path)
         check_belief_crud()
         check_archived_belief_purge()
-        check_supersede_provenance_matrix()
         check_candidate_transaction_atomicity()
         check_vector_search_synthetic()
         check_dead_rows_do_not_starve_search()
@@ -739,7 +689,6 @@ def main() -> None:
         check_spend_accumulation()
         check_settings_roundtrip()
         check_tasks()
-        check_invalidate_belief_rule_six()
         check_conversation_meta_and_dirty()
         check_session_summary_crud()
         check_action_retention_bounds_table()

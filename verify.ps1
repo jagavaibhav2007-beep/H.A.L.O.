@@ -74,12 +74,13 @@ foreach ($suite in @("brain", "voice")) {
 
 $uiSelfChecks = Get-ChildItem -LiteralPath "$root\ui\src" -Recurse -Filter "*.selfcheck.ts" |
     Sort-Object FullName
+$viteNode = "$root\ui\node_modules\.bin\vite-node.cmd"
 foreach ($selfCheck in $uiSelfChecks) {
     $relativeSelfCheck = $selfCheck.FullName.Substring($root.Length).TrimStart("\").Replace("\", "/")
     Invoke-VerificationStep `
         -Label "UI self-check: $relativeSelfCheck" `
         -WorkingDirectory $root `
-        -Command "node" `
+        -Command $viteNode `
         -Arguments @($selfCheck.FullName)
 }
 
@@ -99,7 +100,7 @@ Invoke-VerificationStep `
     -Label "Rust tests" `
     -WorkingDirectory "$root\ui\src-tauri" `
     -Command "cargo" `
-    -Arguments @("test")
+    -Arguments @("test", "-j", "1")
 
 $phaseChecks = @(
     @{ Label = "Phase 0 protocol smoke"; Script = "shared/smoke_test.py" },

@@ -13,7 +13,7 @@ import os
 import secrets
 import sys
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -178,10 +178,8 @@ async def _broadcast(authenticated: dict[ServerConnection, str], msg_type: str, 
                 authenticated.pop(client, None)
                 _deferred.pop(client, None)
                 _deferred_bytes.pop(client, None)
-                try:
+                with suppress(ConnectionClosed, asyncio.TimeoutError):
                     await asyncio.wait_for(client.close(code=1013, reason="snapshot backlog overflow"), _SEND_TIMEOUT_S)
-                except (ConnectionClosed, asyncio.TimeoutError):
-                    pass
                 continue
             held.append(raw)
             _deferred_bytes[client] = held_bytes + raw_bytes
@@ -195,10 +193,8 @@ async def _broadcast(authenticated: dict[ServerConnection, str], msg_type: str, 
             # its `finally` once the socket closes, so leaving teardown to it
             # leaks the socket, its task and its state for the process lifetime.
             authenticated.pop(client, None)
-            try:
+            with suppress(ConnectionClosed, asyncio.TimeoutError):
                 await asyncio.wait_for(client.close(code=1013, reason="send timeout"), _SEND_TIMEOUT_S)
-            except (ConnectionClosed, asyncio.TimeoutError):
-                pass
 
 
 async def _release_deferred(ws: ServerConnection, authenticated: dict[ServerConnection, str]) -> None:
@@ -399,10 +395,8 @@ class _ServerRuntime:
                 correlation = _operation_correlation(context)
                 if correlation:
                     payload.update(correlation)
-                try:
+                with suppress(ConnectionClosed, asyncio.TimeoutError):
                     await send_fn("error", payload)
-                except (ConnectionClosed, asyncio.TimeoutError):
-                    pass
 
         task = asyncio.create_task(supervised())
         self.tasks.add(task)
@@ -626,7 +620,7 @@ async def _auth(
     their_major = contract_major(parsed.get("contract_version"))
     if their_major is not None and their_major != contract_major(CONTRACT_VERSION):
         logger.info("dropping connection: incompatible contract major (client=%s)", their_major)
-        try:
+        with suppress(ConnectionClosed, asyncio.TimeoutError):
             await _send(ws, "error", {
                 "code": "incompatible_contract",
                 "message": (
@@ -635,8 +629,6 @@ async def _auth(
                 ),
                 "recoverable": False,
             })
-        except (ConnectionClosed, asyncio.TimeoutError):
-            pass
         return None
 
     return matched_role
@@ -828,15 +820,14 @@ async def start(
         from brain import graph, task_runtime
 
         async def continue_task(conversation_id: str, text: str, task_id: str) -> None:
-            async with locks.hold(conversation_id):
-                async with turn_slots:
-                    await graph.run_turn({
-                        "text": text,
-                        "conversation_id": conversation_id,
-                        "source": "ui",
-                        "task_id": task_id,
-                        "_internal": True,
-                    }, _broadcast_all)
+            async with locks.hold(conversation_id), turn_slots:
+                await graph.run_turn({
+                    "text": text,
+                    "conversation_id": conversation_id,
+                    "source": "ui",
+                    "task_id": task_id,
+                    "_internal": True,
+                }, _broadcast_all)
 
         task_engine = task_runtime.TaskRuntime(_broadcast_all, continue_task)
         task_runtime.install(task_engine)

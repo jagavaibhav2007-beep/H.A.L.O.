@@ -117,7 +117,7 @@ async def check_snapshot_content() -> None:
     store.connect()
     store.upsert_task("t-live", state="running", lane=1, title="Organizing Downloads", step=2, steps_total=5)
     store.upsert_task("t-old", state="done", lane=1, title="Finished ages ago")
-    store.add_belief("the user ships on Fridays", "preference", "user")
+    store.add_candidate_belief("the user ships on Fridays", "preference", "user")
     store.add_spend(0.42)
 
     snap = Collector()

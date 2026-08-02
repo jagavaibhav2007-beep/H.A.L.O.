@@ -7,7 +7,7 @@ import tempfile
 # Add brain to path so we can import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from brain.secrets_store import get_key, set_key, delete_key, key_status, keystore_available
+from brain.secrets_store import delete_key, get_key, key_status, set_key
 
 
 def test_missing_key():
@@ -118,7 +118,6 @@ def test_broken_keystore_is_not_reported_as_missing():
     saved = os.environ.pop("HALO_KEYRING_DIR", None)  # force the production path
     try:
         with unittest.mock.patch("keyring.get_password", side_effect=RuntimeError("vault unavailable")):
-            assert not keystore_available(), "a raising backend must not report itself available"
             try:
                 key_status()
             except RuntimeError as exc:

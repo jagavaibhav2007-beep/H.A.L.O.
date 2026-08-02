@@ -53,11 +53,8 @@
   --text-empty: 28px; /* empty states */
   --line-height: 1.55;
 
-  /* ---- Elevation (companion < panel < card < modal) ---- */
-  --z-companion: 10;
-  --z-panel: 20;
+  /* ---- Elevation (floating cards and overlays) ---- */
   --z-card: 30;
-  --z-modal: 40;
 
   /* ---- Interaction constants ---- */
   --hit-min: 32px; /* minimum click target */

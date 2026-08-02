@@ -11,9 +11,10 @@ voice/   Python package (voice/__main__.py) — authenticated idle sidecar; real
 shared/  IPC contract source of truth (JSON descriptor) + the TS/Python drift check
 ```
 
-Phases 0–1 are complete. The Phase 2 implementation and exit-hardening tranche
-are present; the remaining formal exit work is the human/native checklist in
-`VERIFY.md`. Voice remains an authenticated idle worker until Phase 3.
+Phases 0, 1, and 2 are complete (declared 2026-08-01), including the Phase 2
+exit-hardening tranche. A human/native checklist remains in `VERIFY.md` as a
+recommended, non-blocking follow-up. Voice remains an authenticated idle
+worker until Phase 3.
 
 Brain uses an OS-level lock to prevent multiple instances from competing for `session.json`. After sending `hello`, UI and Voice wait for `hello_ack` before sending application messages.
 
@@ -60,7 +61,7 @@ sets only while Vite runs. Production Tauri behavior is unchanged.
 
 ## Shared IPC contract
 
-`shared/ipc-contract.json` is the single source of truth for every message `type` in the envelope. `ui/src/ipc/contract.ts` and `brain/brain/ipc/contract.py` are hand-mirrored from it and must not drift — run the drift check:
+The contract is two hand-mirrored `CONTRACT_SPEC` dicts — `ui/src/ipc/contract.ts` and `brain/brain/ipc/contract.py` — that must not drift (the old `shared/ipc-contract.json` was removed in commit `e41d77b`; the two mirrors are now the whole contract). Run the drift check, which diffs them directly:
 
 ```powershell
 python shared/check_contract_sync.py
@@ -74,13 +75,13 @@ Self-checks (round-trip a `user_msg`, confirm unknown/malformed frames are rejec
 
 ```powershell
 python -m brain.ipc.contract          # from brain/
-node ui/src/ipc/contract.selfcheck.ts # from repo root
-node ui/src/ipc/queue.selfcheck.ts    # from repo root
+ui/node_modules/.bin/vite-node.cmd ui/src/ipc/contract.selfcheck.ts # from repo root
+ui/node_modules/.bin/vite-node.cmd ui/src/ipc/queue.selfcheck.ts    # from repo root
 ```
 
 ## Phase 0 smoke test
 
-`shared/smoke_test.py` is the one repeatable check that all four Phase 0 exit criteria (see `phase-0-plan.md`) hold, run from the repo root:
+`shared/smoke_test.py` is the one repeatable check that all four Phase 0 exit criteria (see [phases.md](phases.md#phase-0--skeleton--contract-the-plumbing)) hold, run from the repo root:
 
 ```powershell
 python shared/smoke_test.py

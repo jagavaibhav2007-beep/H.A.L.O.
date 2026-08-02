@@ -115,6 +115,53 @@ def check_non_ack_rejected() -> None:
     print("[check 4] non-ack authentication response is rejected: OK")
 
 
+async def check_reconnect_loop_rereads_session_on_a_new_port() -> None:
+    """B4: the in-process reconnect loop must re-read session.json FRESH each
+    attempt, so it follows the Brain to its new ephemeral port after a restart
+    (mem/Gotchas.md: a cached port dials a dead socket forever)."""
+    import voice.__main__ as vmod
+
+    calls: list[tuple[str, str]] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "session.json"
+        path.write_text(json.dumps({"port": 1111, "voice_token": "tok-A"}), encoding="utf-8")
+
+        async def fake_run(uri, token, *, authenticated=None):
+            calls.append((uri, token))
+            if authenticated is not None:
+                authenticated.set()  # a healthy connect that then drops
+            # Simulate the Brain restarting on a new port before the next attempt.
+            path.write_text(json.dumps({"port": 2222, "voice_token": "tok-B"}), encoding="utf-8")
+
+        orig_run, orig_backoff = vmod.run, vmod._backoff_delay
+        vmod.run, vmod._backoff_delay = fake_run, lambda attempt: 0.0
+        try:
+            await vmod._reconnect_loop(max_attempts=2, session_file=path)
+        finally:
+            vmod.run, vmod._backoff_delay = orig_run, orig_backoff
+
+    assert len(calls) == 2, f"expected 2 reconnect attempts, got {len(calls)}"
+    assert calls[0] == ("ws://127.0.0.1:1111", "tok-A"), calls[0]
+    assert calls[1] == ("ws://127.0.0.1:2222", "tok-B"), calls[1]
+    print("[check 5] reconnect loop re-reads session.json fresh and follows a new port: OK")
+
+
+async def check_reconnect_loop_survives_missing_session() -> None:
+    """A Brain that is down (no session.json yet) must make Voice back off and
+    retry, not crash the process -- otherwise a Brain crash-loop kills Voice."""
+    import voice.__main__ as vmod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "never-created.json"
+        orig_backoff = vmod._backoff_delay
+        vmod._backoff_delay = lambda attempt: 0.0
+        try:
+            await vmod._reconnect_loop(max_attempts=3, session_file=missing)  # must not raise
+        finally:
+            vmod._backoff_delay = orig_backoff
+    print("[check 6] reconnect loop tolerates a missing session.json without crashing: OK")
+
+
 async def main() -> None:
     server, token = await start()
     port = server.sockets[0].getsockname()[1]
@@ -127,6 +174,8 @@ async def main() -> None:
     await check_blackhole_never_counts_as_authenticated()
     check_invalid_session_rejected()
     check_non_ack_rejected()
+    await check_reconnect_loop_rereads_session_on_a_new_port()
+    await check_reconnect_loop_survives_missing_session()
     print("[voice.client] self-check OK")
 
 

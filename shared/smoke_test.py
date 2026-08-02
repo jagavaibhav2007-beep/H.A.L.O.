@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import json
 import os
 import shutil
 import sys
@@ -70,7 +71,6 @@ import test_server  # brain/tests/test_server.py -- reused for criteria 1 & 3
 import test_client  # voice/tests/test_client.py -- reused for criterion 4
 
 from brain.server import start, write_session_file  # noqa: E402 (path set above)
-from voice.__main__ import _read_session  # noqa: E402
 
 
 async def check_criterion_2_reconnect_new_port() -> None:
@@ -86,7 +86,7 @@ async def check_criterion_2_reconnect_new_port() -> None:
         session_file = Path(tmp) / "session.json"
         server_a, token_a = await start(port=0)
         port_a = server_a.sockets[0].getsockname()[1]
-        write_session_file(port_a, token_a, session_file)
+        write_session_file(port_a, token_a, session_file, voice_token=server_a.voice_token)
         await test_server.check_good_token_echo(port_a, token_a)
 
         server_a.close()
@@ -96,8 +96,9 @@ async def check_criterion_2_reconnect_new_port() -> None:
         try:
             port_b = server_b.sockets[0].getsockname()[1]
             assert port_b != port_a, "test invalid: new server bound the same port"
-            write_session_file(port_b, token_b, session_file)
-            read_port, read_token = _read_session(session_file)
+            write_session_file(port_b, token_b, session_file, voice_token=server_b.voice_token)
+            session = json.loads(session_file.read_text(encoding="utf-8"))
+            read_port, read_token = session["port"], session["token"]
             assert (read_port, read_token) == (port_b, token_b), "session.json not rewritten to new port/token"
             await test_server.check_good_token_echo(read_port, read_token)
         finally:
@@ -131,7 +132,7 @@ async def main() -> int:
             print(f"FAIL -- criterion 3: {exc}")
 
         try:
-            await test_client.check_good_token_connects(port, token)
+            await test_client.check_good_token_connects(port, server.voice_token)
             print("PASS -- criterion 4: voice sidecar authenticates and idles")
         except AssertionError as exc:
             ok = False

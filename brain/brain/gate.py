@@ -92,11 +92,6 @@ def classify(tool: str, args: dict) -> int:
         return 3
 
 
-def is_mutating(tool: str) -> bool:
-    entry = TOOLS.get(tool)
-    return bool(entry and entry.get("mutating"))
-
-
 def classify_for_request(tool: str, args: dict, user_text: str) -> int:
     """Bind approval-free mutations to the current human request.
 

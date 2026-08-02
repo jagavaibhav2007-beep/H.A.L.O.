@@ -155,9 +155,10 @@ cursor advances. Memory stays short by design.
   every status — 60% dead — on every connect; that is retired.
 - Superseded/archived history is fetched on demand: new inbound message
   `memory_query` (panel opens history → Brain replies with the same
-  `belief_state` frames). Contract addition mirrored in
-  `shared/ipc-contract.json`, both contract mirrors, and the mock, per the
-  standard new-message-type checklist.
+  `belief_state` frames). Contract addition mirrored in both contract mirrors
+  (`contract.ts` + `contract.py` — the former `shared/ipc-contract.json` was
+  retired in commit `e41d77b`) and the mock, per the standard new-message-type
+  checklist.
 - Permanent removal is a separate, explicit archived-view action. The Brain
   rejects purge requests for active or superseded history.
 - The memory panel gains a "Sessions" section (Phase 3 UI) listing session

@@ -4,7 +4,9 @@
 // src/state/reducer.selfcheck.ts`).
 import {
   ACTIVITY_CAP,
+  MAX_TURNS,
   appendUserTurn,
+  beginUserRequest,
   applyConnectionEvent,
   applyFrame,
   initialState,
@@ -363,6 +365,46 @@ function token(text: string, conversation_id: string): TokenMsg {
   assert(state.tasks["stale-task"] === undefined, "snapshot: absent stale task is removed");
   assert(state.activities.length === 1, "snapshot: replayed activity is deduplicated");
   assert(state.approvals["pending-after-reconnect"] !== undefined, "snapshot: backlog does not erase pending approval");
+}
+
+// ---- Scenario: turns are capped per conversation, streaming turn survives (B5) ----
+{
+  let state: HaloState = initialState;
+  // Drive well past MAX_TURNS with completed user+assistant pairs.
+  for (let i = 0; i < MAX_TURNS + 50; i += 1) {
+    state = beginUserRequest(state, "cap", `msg-${i}`, `msg-${i}`);
+    state = applyFrame(state, { type: "token", ...envelope(), text: `reply ${i}`, conversation_id: "cap", turn_id: `msg-${i}` });
+    state = applyFrame(state, { type: "done", ...envelope(), conversation_id: "cap", turn_id: `msg-${i}` });
+  }
+  const turns = state.conversations["cap"].turns;
+  assert(turns.length <= MAX_TURNS, `turns capped: got ${turns.length}, cap ${MAX_TURNS}`);
+  // Oldest were trimmed from the front; the most recent pair is retained.
+  assert(
+    turns.some((t) => t.role === "user" && t.text === `msg-${MAX_TURNS + 49}`),
+    "cap: newest user turn retained",
+  );
+  assert(
+    !turns.some((t) => t.role === "user" && t.text === "msg-0"),
+    "cap: oldest user turn trimmed from the front",
+  );
+
+  // Now open a fresh streaming turn and cross the cap again: the OPEN streaming
+  // turn must never be trimmed (ChatView's send-gate depends on finding it).
+  let s2: HaloState = initialState;
+  for (let i = 0; i < MAX_TURNS - 1; i += 1) {
+    s2 = beginUserRequest(s2, "live", `m-${i}`, `m-${i}`);
+    s2 = applyFrame(s2, { type: "done", ...envelope(), conversation_id: "live", turn_id: `m-${i}` });
+  }
+  // Start a streaming turn (user + pending assistant), then append more user
+  // turns via appendUserTurn to push the array over the cap without closing it.
+  s2 = beginUserRequest(s2, "live", "streaming-one", "streaming-one");
+  for (let i = 0; i < 10; i += 1) s2 = appendUserTurn(s2, "live", `later-${i}`, `later-${i}`);
+  const liveTurns = s2.conversations["live"].turns;
+  assert(liveTurns.length <= MAX_TURNS, `live cap holds: ${liveTurns.length}`);
+  assert(
+    liveTurns.some((t) => t.role === "assistant" && t.status === "streaming"),
+    "cap: the open streaming turn is never trimmed",
+  );
 }
 
 console.log("[reducer.selfcheck] OK");
