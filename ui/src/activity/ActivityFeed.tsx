@@ -9,7 +9,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Activity as ActivityIcon, ArrowDown, RotateCcw, ShieldAlert } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
-import { useHaloStore, selectActivities, selectOperationErrors } from "../state/store";
+import { useHaloStore, selectActivities, selectOperationErrors, selectTasks } from "../state/store";
 import { operationCorrelationKey } from "../ipc/contract";
 import { LANE_LABEL, LANE_ICON } from "../lib/lanes";
 import type { ActivityMsg } from "../ipc/contract";
@@ -31,6 +31,7 @@ interface ActivityFeedProps {
 export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
   const activities = useHaloStore(selectActivities);
   const operationErrors = useHaloStore(selectOperationErrors);
+  const tasks = useHaloStore(selectTasks);
   const [undoError, setUndoError] = useState<string>();
 
   const [tier, setTier] = useState<TierFilter>("all");
@@ -157,7 +158,7 @@ export function ActivityFeed({ sendUndo }: ActivityFeedProps) {
           <option value="all">All tasks</option>
           {taskIds.map((id) => (
             <option key={id} value={id}>
-              {id}
+              {tasks[id]?.title ?? id}
             </option>
           ))}
         </select>
