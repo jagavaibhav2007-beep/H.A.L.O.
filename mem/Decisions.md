@@ -1,6 +1,13 @@
 # Decisions
 _Architectural, structural, and system design choices._
 
+## Phase 3 UI foundation uses one compact rail and history-only terminal tasks — 2026-08-02
+**Decision:** the existing workspace switches its 176px labelled sidebar to a 56px icon rail at `max-width: 640px`; it does not gain a second layout, collapse state, or another breakpoint. Settings stays at the rail bottom at every width. Existing views reflow with local flex wrapping and the current design tokens.
+
+**Task-state rule:** `done` and `failed` task cards remain visible as history, but their lane selector is disabled and their operation row is absent. Only non-terminal tasks expose Pause/Resume/Stop or lane changes. Do not delete terminal cards merely to remove invalid controls.
+
+**Why:** rendered checks at the native 720×480 minimum and a 360px compact viewport showed that the fixed rail consumed most of the content width, while terminal cards offered operations the runtime could not truthfully perform. One CSS breakpoint and one terminal predicate solve those verified failures without introducing Phase 3 feature UI, protocol fields, duplicated state, or a responsive-layout abstraction.
+
 ## Phase-3a readiness (Tranche B) — two calls not to re-litigate — 2026-08-01
 Context: closing PHASE3_READINESS_AUDIT.md's Tranche B (B3/B4/B5). Two decisions have non-obvious trade-offs a future session is likely to re-open:
 

@@ -104,6 +104,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-height: var(--hit-min);
   padding: 0;
   background: none;
   border: none;
@@ -134,6 +135,7 @@
   flex: 1;
 }
 .belief-history-list button {
+  min-height: var(--hit-min);
   background: none;
   border: none;
   color: var(--primary);
@@ -146,6 +148,7 @@
 
 .belief-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -171,6 +174,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-height: var(--hit-min);
   background: none;
   border: none;
   color: var(--primary);

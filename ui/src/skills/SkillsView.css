@@ -109,6 +109,7 @@
 
 .skill-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -137,6 +138,10 @@
   color: var(--text);
 }
 .trial-drawer-head button {
+  display: grid;
+  place-items: center;
+  min-width: var(--hit-min);
+  min-height: var(--hit-min);
   background: none;
   border: none;
   color: var(--text-muted);

@@ -7,6 +7,7 @@
   display: flex;
   flex-direction: column;
   gap: 20px;
+  min-width: 0;
   max-width: 480px;
   margin: 0 auto;
 }
@@ -24,6 +25,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   min-height: var(--hit-min);
 }
 .settings-row[data-disabled] {
@@ -33,11 +35,14 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   font-size: var(--text-base);
   color: var(--text);
 }
 .settings-value {
   margin-left: auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: var(--text-sm);
   color: var(--text-muted);
 }
@@ -47,7 +52,8 @@
 }
 #halo-openrouter-key {
   margin-left: auto;
-  width: 200px;
+  width: auto;
+  flex: 1 1 120px;
 }
 .settings-roots {
   width: 100%;
@@ -67,8 +73,23 @@
   padding-top: 12px;
 }
 .settings-advanced summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--hit-min);
   cursor: pointer;
 }
 .settings-advanced .settings-row {
   margin-top: 8px;
+}
+
+@media (max-width: 640px) {
+  .settings-row {
+    flex-wrap: wrap;
+  }
+
+  .settings-value {
+    flex: 1 1 140px;
+    margin-left: 0;
+    text-align: right;
+  }
 }

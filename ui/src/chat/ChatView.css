@@ -104,6 +104,7 @@
   border-bottom: 1px solid var(--border);
 }
 .md-code-btn {
+  min-height: var(--hit-min);
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -204,6 +205,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-height: var(--hit-min);
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -354,6 +356,8 @@
    old fixed single row rather than breaking. */
 .chat-input {
   flex: 1;
+  box-sizing: border-box;
+  min-width: 0;
   resize: none;
   field-sizing: content;
   max-height: 160px;
@@ -379,4 +383,19 @@
      is the AA-passing text variant of the same signal. */
   color: var(--tier-3-text);
   white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .chat-input-bar {
+    flex-wrap: wrap;
+    padding-inline: 12px;
+  }
+
+  .chat-queued-badge {
+    order: 1;
+    flex: 1 0 100%;
+    box-sizing: border-box;
+    padding-left: calc(var(--hit-min) + 8px);
+    white-space: normal;
+  }
 }
