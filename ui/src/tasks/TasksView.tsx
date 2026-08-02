@@ -119,13 +119,14 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
   const busy = pending !== undefined;
   const hasProgress = step != null && steps_total != null;
   const collapsed = state === "done";
+  const terminal = state === "done" || state === "failed";
 
   return (
     <div className="halo-card task-card" data-state={state}>
       <div className="task-head">
         <span className="task-title">{title ?? "Working"}</span>
         <TaskStateChip state={state} />
-        <LanePin task={task} disabled={busy || !controlsAvailable} onPin={pin} />
+        <LanePin task={task} disabled={busy || !controlsAvailable || terminal} onPin={pin} />
       </div>
 
       {!collapsed && (
@@ -170,24 +171,26 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
             </pre>
           )}
 
-          <div className="task-actions">
-            {(state === "running" || state === "waiting_approval") && (
-              <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={() => op(task, "pause", "pausing")}>
-                <Icon icon={Pause} size={16} />
-                {pending === "pausing" ? "Pausing…" : "Pause"}
+          {!terminal && (
+            <div className="task-actions">
+              {(state === "running" || state === "waiting_approval") && (
+                <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={() => op(task, "pause", "pausing")}>
+                  <Icon icon={Pause} size={16} />
+                  {pending === "pausing" ? "Pausing…" : "Pause"}
+                </Button>
+              )}
+              {state === "paused" && (
+                <Button variant="primary" disabled={busy || !controlsAvailable} onClick={() => op(task, "resume", "resuming")}>
+                  <Icon icon={Play} size={16} />
+                  {pending === "resuming" ? "Resuming…" : "Resume"}
+                </Button>
+              )}
+              <Button variant="destructive" disabled={busy || !controlsAvailable} onClick={() => op(task, "stop", "stopping")}>
+                <Icon icon={Square} size={16} />
+                {pending === "stopping" ? "Stopping…" : "Stop"}
               </Button>
-            )}
-            {state === "paused" && (
-              <Button variant="primary" disabled={busy || !controlsAvailable} onClick={() => op(task, "resume", "resuming")}>
-                <Icon icon={Play} size={16} />
-                {pending === "resuming" ? "Resuming…" : "Resume"}
-              </Button>
-            )}
-            <Button variant="destructive" disabled={busy || !controlsAvailable} onClick={() => op(task, "stop", "stopping")}>
-              <Icon icon={Square} size={16} />
-              {pending === "stopping" ? "Stopping…" : "Stop"}
-            </Button>
-          </div>
+            </div>
+          )}
         </>
       )}
     </div>
