@@ -175,7 +175,7 @@ export function MemoryView({ active: viewActive, sendMemoryEdit, sendMemoryQuery
             if (group.length === 0) return null;
             return (
               <section key={kind} className="memory-group">
-                <h3 className="halo-group-title memory-group-title">{KIND_LABEL[kind]}</h3>
+                <h2 className="halo-group-title memory-group-title">{KIND_LABEL[kind]}</h2>
                 <ul className="halo-list memory-list">
                   {group.map((b) => (
                     <li key={b.belief_id}>

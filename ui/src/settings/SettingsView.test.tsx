@@ -41,3 +41,15 @@ test("an unavailable Brain disables key controls without an endless status spinn
   expect(screen.getByText("Voice input is not available in this build; typed chat still works.")).toBeTruthy();
   expect(document.querySelector(".halo-spinner")).toBeNull();
 });
+
+test("settings groups continue the view heading hierarchy", () => {
+  render(<SettingsView sendSettingsUpdate={vi.fn()} />);
+
+  expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual([
+    "General",
+    "Voice",
+    "Models",
+    "Accessible folders",
+    "Keys & connections",
+  ]);
+});

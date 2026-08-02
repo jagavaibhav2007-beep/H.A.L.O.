@@ -32,10 +32,11 @@ export function Sidebar() {
         className="sidebar-item"
         data-active={active || undefined}
         aria-current={active ? "page" : undefined}
+        aria-label={label}
         onClick={() => setActiveView(id)}
       >
         <Icon icon={icon} size={20} />
-        <span>{label}</span>
+        <span className="sidebar-label">{label}</span>
         {id === "tasks" && pendingApprovals > 0 && (
           <Chip
             icon={AlertCircle}

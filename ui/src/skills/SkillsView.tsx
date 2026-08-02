@@ -133,7 +133,7 @@ function SkillGroup({
   if (skills.length === 0) return null;
   return (
     <section className="skills-group">
-      <h3 className="halo-group-title skills-group-title">{title}</h3>
+      <h2 className="halo-group-title skills-group-title">{title}</h2>
       <ul className="halo-list skills-list">
         {skills.map((s) => (
           <li key={s.skill_name}>

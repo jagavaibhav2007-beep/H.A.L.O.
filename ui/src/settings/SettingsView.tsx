@@ -92,7 +92,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
     <div className="halo-scroll">
       <div className="settings-content">
         <section className="settings-group">
-          <h3 className="halo-group-title settings-group-title">General</h3>
+          <h2 className="halo-group-title settings-group-title">General</h2>
           <div className="settings-row">
             <span className="settings-label">Summon hotkey</span>
             <span className="settings-value">{hotkey ?? (isTauri() ? "…" : "not available in browser preview")}</span>
@@ -115,7 +115,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
         </section>
 
         <section className="settings-group">
-          <h3 className="halo-group-title settings-group-title">Voice</h3>
+          <h2 className="halo-group-title settings-group-title">Voice</h2>
           <div className="settings-row">
             <label className="settings-label">
               <input
@@ -154,7 +154,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
         </section>
 
         <section className="settings-group">
-          <h3 className="halo-group-title settings-group-title">Models</h3>
+          <h2 className="halo-group-title settings-group-title">Models</h2>
           <div className="settings-row">
             <span className="settings-label">Routing</span>
             <span className="settings-value">Selected automatically by the Brain</span>
@@ -173,7 +173,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
         </section>
 
         <section className="settings-group">
-          <h3 className="halo-group-title settings-group-title">Accessible folders</h3>
+          <h2 className="halo-group-title settings-group-title">Accessible folders</h2>
           <label className="settings-label" htmlFor="halo-project-roots">
             One folder per line
           </label>
@@ -201,7 +201,7 @@ export function SettingsView({ sendSettingsUpdate }: SettingsViewProps) {
         </section>
 
         <section className="settings-group">
-          <h3 className="halo-group-title settings-group-title">Keys &amp; connections</h3>
+          <h2 className="halo-group-title settings-group-title">Keys &amp; connections</h2>
           <div className="settings-row">
             <label className="settings-label" htmlFor="halo-openrouter-key">OpenRouter</label>
             <input

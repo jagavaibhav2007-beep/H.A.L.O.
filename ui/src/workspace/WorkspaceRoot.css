@@ -129,7 +129,7 @@ html[data-transparency="off"] #root {
 
 .sidebar-separator {
   height: 1px;
-  margin: 8px 16px;
+  margin: auto 16px 8px;
   background: var(--border);
 }
 
@@ -289,4 +289,49 @@ html[data-transparency="off"] #root {
 }
 .workspace-view:not([hidden]) {
   animation: workspace-view-in var(--motion-slow) var(--ease-out);
+}
+
+@media (max-width: 640px) {
+  .sidebar {
+    width: 56px;
+  }
+
+  .sidebar-item {
+    justify-content: center;
+    gap: 0;
+    padding-inline: 8px;
+  }
+
+  .sidebar-label {
+    display: none;
+  }
+
+  .sidebar-badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    margin: 0;
+  }
+
+  .sidebar-badge svg {
+    display: none;
+  }
+
+  .sidebar-separator {
+    margin-inline: 8px;
+  }
+
+  .status-strip {
+    flex-wrap: wrap;
+  }
+
+  .status-task-chip {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+
+  .status-task-title {
+    flex: 1;
+    max-width: none;
+  }
 }

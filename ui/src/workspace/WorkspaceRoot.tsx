@@ -240,7 +240,7 @@ export function WorkspaceRoot() {
       <div ref={shellRef} className="workspace-shell" data-anim={anim} style={{ transformOrigin: origin }}>
         <GlassPanel elevation="panel" className="workspace-content">
           <Sidebar />
-          <div className="workspace-main">
+          <main className="workspace-main">
             {brainStatus === "error" && (
               <div className="process-health process-health-error" role="alert">
                 Halo’s Brain failed to start. Chat and actions are unavailable until it recovers.
@@ -314,7 +314,7 @@ export function WorkspaceRoot() {
                 sendInterrupt={sendInterrupt}
               />
             </div>
-          </div>
+          </main>
         </GlassPanel>
       </div>
     </div>
