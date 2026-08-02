@@ -101,3 +101,97 @@ test("invalid edited arguments stay editable and never send or lock the card", (
   expect((screen.getByRole("button", { name: "Approve with edits" }) as HTMLButtonElement).disabled).toBe(false);
   expect((editor as HTMLTextAreaElement).value).toBe("{not valid json");
 });
+
+test("an answered card leaves the screen as soon as the decision is on the wire", () => {
+  const sendApprovalResponse = vi.fn(() => true);
+  useHaloStore.setState({
+    approvals: { "ap-live": approval("ap-live") },
+    connection: { ...useHaloStore.getState().connection, wsStatus: "connected" },
+  });
+  render(
+    <ApprovalOverlay
+      conversationId="chat"
+      sendApprovalResponse={sendApprovalResponse}
+      sendInterrupt={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /^Deny/ }));
+
+  expect(sendApprovalResponse).toHaveBeenCalledWith("ap-live", "deny");
+  // Gone immediately — no spinner to sit and watch, and no second click target
+  // for an impatient user to hit.
+  expect(screen.queryByText("Delete file ap-live?")).toBeNull();
+  expect(useHaloStore.getState().approvals["ap-live"]).toBeUndefined();
+
+  // The Brain's confirming frame still arrives afterwards; it must be a no-op,
+  // not a crash or a resurrected card.
+  act(() => {
+    useHaloStore.getState().applyFrame({
+      type: "task_state",
+      id: "confirm-1",
+      ts: "2026-07-22T00:00:01Z",
+      task_id: "task-ap-live",
+      state: "done",
+      lane: 1,
+      title: "Delete file",
+    });
+  });
+  expect(useHaloStore.getState().approvals["ap-live"]).toBeUndefined();
+});
+
+test("a card answered while the socket is down stays up until the decision can reach the Brain", () => {
+  // The decision is only sitting in the reconnect queue here. Dismissing would
+  // tell the user they approved something the Brain has never heard.
+  const sendApprovalResponse = vi.fn(() => true);
+  useHaloStore.setState({
+    approvals: { "ap-offline": approval("ap-offline") },
+    connection: { ...useHaloStore.getState().connection, wsStatus: "reconnecting" },
+  });
+  render(
+    <ApprovalOverlay
+      conversationId="chat"
+      sendApprovalResponse={sendApprovalResponse}
+      sendInterrupt={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /^Deny/ }));
+
+  expect(screen.getByText("Delete file ap-offline?")).toBeTruthy();
+  expect(useHaloStore.getState().approvals["ap-offline"]).toBeTruthy();
+  // ...and it stays locked (rule 3) rather than inviting a second answer.
+  expect((screen.getByRole("button", { name: /^Deny/ }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("a card whose offline decision was dropped on reconnect unlocks instead of hanging", () => {
+  // dropStaleControlFrames discards a queued approval_response when the Brain
+  // restarts on a fresh port, but the approval is durable and comes back in the
+  // snapshot still pending. Without an unlock the card sits on "Denying…" with
+  // no frame left that could ever clear it — the stuck-forever class from
+  // mem/Bugs.md.
+  useHaloStore.setState({
+    approvals: { "ap-drop": approval("ap-drop") },
+    connection: { ...useHaloStore.getState().connection, wsStatus: "reconnecting" },
+  });
+  render(
+    <ApprovalOverlay
+      conversationId="chat"
+      sendApprovalResponse={vi.fn(() => true)}
+      sendInterrupt={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /^Deny/ }));
+  expect((screen.getByRole("button", { name: /^Deny/ }) as HTMLButtonElement).disabled).toBe(true);
+
+  // Brain restarts; the still-pending approval returns and the socket is live.
+  act(() => {
+    useHaloStore.setState({
+      connection: { ...useHaloStore.getState().connection, wsStatus: "connected" },
+    });
+  });
+
+  expect(screen.getByText("Delete file ap-drop?")).toBeTruthy();
+  expect((screen.getByRole("button", { name: /^Deny/ }) as HTMLButtonElement).disabled).toBe(false);
+});

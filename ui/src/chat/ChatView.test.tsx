@@ -272,7 +272,10 @@ test("a message queued during reconnect is labelled queued and cannot be stopped
   fireEvent.keyDown(composer, { key: "Enter", shiftKey: false });
 
   expect(screen.getByText("Queued — waiting for Halo to reconnect.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Stop response" })).toBeNull();
+  // The composer's send/stop control now stays mounted and goes disabled rather
+  // than unmounting (no layout shift mid-stream) — still unpressable offline,
+  // which is what "cannot be stopped" is actually asserting.
+  expect((screen.getByRole("button", { name: "Stop response" }) as HTMLButtonElement).disabled).toBe(true);
 });
 
 test("the active Halo turn exposes the existing conversation interrupt", () => {
@@ -357,4 +360,86 @@ test("a failed answer offers a one-click retry using the original user message",
     role: "assistant",
     status: "streaming",
   });
+});
+
+test("a second message cannot be sent while a response is still streaming", () => {
+  const sendUserMsg = vi.fn();
+  useHaloStore.setState({
+    conversations: {
+      a: {
+        conversationId: "a",
+        needsInputRestore: false,
+        turns: [{ id: "pending", role: "assistant", status: "streaming", text: "thinking" }],
+      },
+    },
+  });
+  render(
+    <ChatView
+      conversationId="a"
+      connState="connected"
+      sendUserMsg={sendUserMsg}
+      sendInterrupt={vi.fn(() => "interrupt")}
+      sendMic={vi.fn()}
+      inputId="composer"
+    />,
+  );
+
+  const composer = screen.getByRole("textbox", { name: "Message Halo" }) as HTMLTextAreaElement;
+  fireEvent.change(composer, { target: { value: "second question" } });
+  // Impatient double-Enter: neither keystroke may open a second turn.
+  fireEvent.keyDown(composer, { key: "Enter", shiftKey: false });
+  fireEvent.keyDown(composer, { key: "Enter", shiftKey: false });
+
+  expect(sendUserMsg).not.toHaveBeenCalled();
+  // rule 8-adjacent: a blocked send must not eat the text the user typed.
+  expect(composer.value).toBe("second question");
+
+  // ...and the typed-"stop" interrupt shortcut still has to work while gated.
+  const sendInterrupt = vi.fn(() => "interrupt-2");
+  cleanup();
+  render(
+    <ChatView
+      conversationId="a"
+      connState="connected"
+      sendUserMsg={sendUserMsg}
+      sendInterrupt={sendInterrupt}
+      sendMic={vi.fn()}
+      inputId="composer"
+    />,
+  );
+  const second = screen.getByRole("textbox", { name: "Message Halo" });
+  fireEvent.change(second, { target: { value: "stop" } });
+  fireEvent.keyDown(second, { key: "Enter", shiftKey: false });
+  expect(sendInterrupt).toHaveBeenCalledWith("a");
+});
+
+test("the send button sends when idle and stops when streaming", () => {
+  const sendUserMsg = vi.fn();
+  const sendInterrupt = vi.fn(() => "interrupt-3");
+  useHaloStore.setState({ conversations: {} });
+  render(
+    <ChatView
+      conversationId="a"
+      connState="connected"
+      sendUserMsg={sendUserMsg}
+      sendInterrupt={sendInterrupt}
+      sendMic={vi.fn()}
+      inputId="composer"
+    />,
+  );
+
+  const composer = screen.getByRole("textbox", { name: "Message Halo" });
+  // Idle + empty box: nothing to send, so the control is disabled.
+  expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(composer, { target: { value: "hello" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  expect(sendUserMsg).toHaveBeenCalledWith("a", "hello", expect.any(String));
+
+  // The same control is now the stop square for the turn it just opened.
+  const stop = screen.getByRole("button", { name: "Stop response" }) as HTMLButtonElement;
+  fireEvent.click(stop);
+  expect(sendInterrupt).toHaveBeenCalledWith("a");
+  // Spam-clicking stop must not fire a second interrupt.
+  fireEvent.click(screen.getByRole("button", { name: "Stop response" }));
+  expect(sendInterrupt).toHaveBeenCalledTimes(1);
 });

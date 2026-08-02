@@ -89,6 +89,30 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
   // Once the user commits a decision the buttons lock and show a spinner; the
   // card stays until the store removes it on the confirming frame (rule 3).
   const [pending, setPending] = useState<"idle" | "approving" | "denying" | "editing-send" | "stopping">("idle");
+  // An answered card is a question that has been answered, so it leaves the
+  // screen as soon as the decision is actually on the wire — the user should
+  // never have to watch a spinner on a dialog they already dismissed. Gated on
+  // a live socket on purpose: with the socket down the decision is only sitting
+  // in the reconnect queue, and silently dropping the card there would tell the
+  // user they approved something the Brain never heard. In that case the card
+  // stays with its rule-3 spinner until the flush lands.
+  const wsStatus = useHaloStore((s) => s.connection.wsStatus);
+  const resolveApprovalLocally = useHaloStore((s) => s.resolveApprovalLocally);
+  const settle = useCallback(() => {
+    if (wsStatus === "connected") resolveApprovalLocally(approval_id);
+  }, [wsStatus, resolveApprovalLocally, approval_id]);
+  // A decision taken while the socket was down can silently never arrive:
+  // dropStaleControlFrames discards a queued approval_response when the Brain
+  // comes back on a fresh port, while the approval itself is durable and
+  // returns in the reconnect snapshot still pending. Being still mounted once
+  // we are connected again is proof the answer did not land — so unlock and let
+  // the user answer again, rather than leaving a card stuck on "Denying…"
+  // forever with nothing left that could ever unlock it. A card whose answer
+  // DID land is already gone (settle, or the confirming frame), so this can
+  // only fire on the genuinely-unanswered ones.
+  useEffect(() => {
+    if (wsStatus === "connected") setPending("idle");
+  }, [wsStatus]);
   const [editing, setEditing] = useState(false);
   const [argsText, setArgsText] = useState(() => prettyJson(args_redacted));
   const [editError, setEditError] = useState<string | null>(null);
@@ -118,9 +142,10 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
       const ok = sendApprovalResponse(approval_id, edited_args === undefined ? "approve" : "edit", edited_args);
       if (!ok) return false;
       setPending(edited_args === undefined ? "approving" : "editing-send");
+      settle();
       return true;
     },
-    [busy, reveal, approval_id, sendApprovalResponse],
+    [busy, reveal, approval_id, sendApprovalResponse, settle],
   );
 
   const deny = useCallback(() => {
@@ -128,7 +153,8 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
     reveal();
     setPending("denying");
     sendApprovalResponse(approval_id, "deny");
-  }, [busy, reveal, approval_id, sendApprovalResponse]);
+    settle();
+  }, [busy, reveal, approval_id, sendApprovalResponse, settle]);
 
   const saveEdit = useCallback(() => {
     const parsed = parseArgs(argsText);
@@ -149,7 +175,8 @@ function ApprovalCard({ approval, conversationId, sendApprovalResponse, sendInte
     reveal();
     setPending("stopping");
     sendInterrupt(targetConversation); // implicit-deny + pause; distinct from Deny
-  }, [busy, reveal, targetConversation, sendInterrupt]);
+    settle();
+  }, [busy, reveal, targetConversation, sendInterrupt, settle]);
 
   return (
     <GlassPanel

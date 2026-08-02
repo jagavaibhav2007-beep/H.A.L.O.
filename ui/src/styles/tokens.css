@@ -63,7 +63,7 @@
   --hit-min: 32px; /* minimum click target */
   --press-scale: 0.97;
   /* Disabled controls were drifting per-consumer (0.4/0.55/0.6/0.7 across
-     chat-tab-more, halo-btn, approval-stop, chat-stop) — one token so
+     chat-tab-more, halo-btn, approval-stop, chat-send) — one token so
      "disabled" reads the same everywhere. */
   --disabled-opacity: 0.5;
 

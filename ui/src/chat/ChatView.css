@@ -176,27 +176,6 @@
   color: var(--text-muted);
 }
 
-.chat-stop {
-  min-width: var(--hit-min);
-  min-height: var(--hit-min);
-  margin-top: 8px;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  cursor: pointer;
-}
-.chat-stop:hover:not(:disabled) {
-  color: var(--destructive);
-  border-color: var(--destructive);
-}
-.chat-stop:disabled {
-  cursor: default;
-  opacity: var(--disabled-opacity);
-}
-
 .chat-retry {
   display: inline-flex;
   align-items: center;
@@ -327,6 +306,41 @@
 /* Muted is visually loud (design rule) — the slashed mic goes red. */
 .chat-input-mic[data-muted] {
   color: var(--destructive);
+}
+/* Send/stop, bottom-right of the composer. One control that swaps identity
+   with the turn state: filled accent arrow while idle, square while streaming.
+   Sized off --hit-min like the mic so the two align on the same baseline. */
+.chat-send {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--hit-min);
+  min-height: var(--hit-min);
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--on-primary);
+  cursor: pointer;
+  margin-bottom: 6px;
+  transition: background-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
+}
+.chat-send:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 85%, white);
+}
+.chat-send:disabled {
+  opacity: var(--disabled-opacity);
+  cursor: default;
+}
+/* Stop is a neutral surface, not the accent: stopping is a correction, and the
+   design language keeps blue as a glow accent rather than a flat action fill. */
+.chat-send[data-stop] {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+  color: var(--text);
+}
+.chat-send[data-stop]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 22%, transparent);
 }
 .chat-turn-mic {
   margin-right: 6px;

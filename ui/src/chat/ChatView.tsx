@@ -5,7 +5,7 @@
 // time (user_msg is never echoed back) — see reducer.ts UserTurn.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Mic, MicOff, Wrench, ChevronDown, ChevronRight } from "lucide-react";
+import { Mic, MicOff, Wrench, ChevronDown, ChevronRight, ArrowUp, Square } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Markdown } from "./Markdown";
 import type { ConnState } from "../ipc/useHaloConnection";
@@ -72,6 +72,10 @@ export function ChatView({
   const chats = useHaloStore(selectChats);
 
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // Interrupt lock for the composer's stop button (rule 3: locks on press,
+  // released only by a real outcome).
+  const [stopping, setStopping] = useState(false);
+  const [interruptId, setInterruptId] = useState<string | null>(null);
   const lastSentRef = useRef<Record<string, string>>({});
   const historyRequestedRef = useRef(new Set<string>());
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -89,6 +93,23 @@ export function ChatView({
       ? voice.transcript.text
       : null;
 
+  const interruptError = interruptId ? operationErrors[`interrupt:${interruptId}`] : undefined;
+  // Nothing is in flight when the turn ends (done/interrupted/errored —
+  // `activeAssistantId` only ever matches `streaming`), when a new one starts,
+  // or when the user switches threads, so drop the whole lock. Without this a
+  // spam-clicked stop leaves `stopping` true and the NEXT response begins with
+  // its stop button already disabled.
+  useEffect(() => {
+    setStopping(false);
+    setInterruptId(null);
+  }, [conversationId, activeAssistantId]);
+  // A rejected interrupt unlocks the button but deliberately KEEPS interruptId:
+  // that id is what resolves the error message, so clearing it here would erase
+  // the very explanation the user needs.
+  useEffect(() => {
+    if (interruptError) setStopping(false);
+  }, [interruptError]);
+
   const send = useCallback(
     (text: string) => {
       const trimmed = text.trim();
@@ -100,6 +121,14 @@ export function ChatView({
         setDrafts((current) => ({ ...current, [conversationId]: "" }));
         return;
       }
+      // One in-flight turn per conversation. Everything that can send — Enter,
+      // the send button, the example chips, Retry — funnels through here, so
+      // this is the only gate needed and no caller can route around it. The
+      // typed-"stop" shortcut above stays reachable on purpose: it is an
+      // interrupt, not a new turn. The draft is deliberately NOT cleared on a
+      // blocked send, so a message typed a keystroke before `done` lands is
+      // still sitting in the box rather than swallowed.
+      if (activeAssistantId) return;
       const turnId = crypto.randomUUID();
       appendUserTurn(conversationId, trimmed, turnId);
       titleFromMessage(conversationId, trimmed); // no-ops unless still untitled
@@ -248,9 +277,7 @@ export function ChatView({
                   key={t.id}
                   turn={t}
                   activities={activities}
-                  canInterrupt={connState === "connected" && t.role === "assistant" && t.id === activeAssistantId}
                   queued={connState !== "connected"}
-                  onInterrupt={() => sendInterrupt(conversationId)}
                   onRetry={retryText ? () => send(retryText) : undefined}
                 />
               );
@@ -260,6 +287,11 @@ export function ChatView({
         )}
       </div>
 
+      {/* A rejected interrupt has to say so somewhere, and its button now lives
+          down here rather than in the bubble. */}
+      {interruptError && (
+        <div className="chat-interrupted" role="alert">{interruptError.message}</div>
+      )}
       <div className="chat-input-bar">
         <label className="halo-sr-only" htmlFor={inputId}>Message Halo</label>
         <button
@@ -307,6 +339,33 @@ export function ChatView({
         ) : connState !== "connected" ? (
           <span className="chat-queued-badge">will send when reconnected</span>
         ) : null}
+        {/* One control, two jobs: send while idle, stop while streaming. The
+            in-bubble Stop it replaces is gone — two stop affordances for one
+            action is worse than either alone, and the composer is where the
+            hand already is. Rendered LAST so it stays pinned bottom-right even
+            when a status badge appears; the badge shrinks the box instead of
+            shoving the button inward. */}
+        <button
+          type="button"
+          className="chat-send"
+          data-stop={activeAssistantId ? "true" : undefined}
+          disabled={
+            connState === "incompatible"
+            || connState === "unavailable"
+            || (activeAssistantId ? stopping || connState !== "connected" : !input.trim())
+          }
+          aria-label={activeAssistantId ? "Stop response" : "Send message"}
+          onClick={() => {
+            if (activeAssistantId) {
+              setStopping(true);
+              setInterruptId(sendInterrupt(conversationId));
+              return;
+            }
+            send(input);
+          }}
+        >
+          <Icon icon={activeAssistantId ? Square : ArrowUp} size={20} />
+        </button>
       </div>
     </div>
   );
@@ -315,16 +374,12 @@ export function ChatView({
 function TurnRow({
   turn,
   activities,
-  canInterrupt,
   queued,
-  onInterrupt,
   onRetry,
 }: {
   turn: Turn;
   activities: ActivityMsg[];
-  canInterrupt: boolean;
   queued: boolean;
-  onInterrupt: () => string;
   onRetry?: () => void;
 }) {
   if (turn.role === "user") {
@@ -341,9 +396,7 @@ function TurnRow({
     <AssistantRow
       turn={turn}
       activities={activities}
-      canInterrupt={canInterrupt}
       queued={queued}
-      onInterrupt={onInterrupt}
       onRetry={onRetry}
     />
   );
@@ -352,25 +405,14 @@ function TurnRow({
 function AssistantRow({
   turn,
   activities,
-  canInterrupt,
   queued,
-  onInterrupt,
   onRetry,
 }: {
   turn: AssistantTurn;
   activities: ActivityMsg[];
-  canInterrupt: boolean;
   queued: boolean;
-  onInterrupt: () => string;
   onRetry?: () => void;
 }) {
-  const [stopping, setStopping] = useState(false);
-  const [interruptId, setInterruptId] = useState<string | null>(null);
-  const operationErrors = useHaloStore(selectOperationErrors);
-  const interruptError = interruptId ? operationErrors[`interrupt:${interruptId}`] : undefined;
-  useEffect(() => {
-    if (interruptError) setStopping(false);
-  }, [interruptError]);
   const thinking = turn.status === "streaming" && turn.text.length === 0;
   return (
     <div className="chat-turn chat-turn-halo">
@@ -401,25 +443,6 @@ function AssistantRow({
         )}
         {turn.status === "done" && turn.model && (
           <div className="chat-model">Model: {turn.model}</div>
-        )}
-        {canInterrupt && (
-          <button
-            type="button"
-            className="chat-stop"
-            aria-label="Stop response"
-            disabled={stopping}
-            onClick={() => {
-              setStopping(true);
-              setInterruptId(onInterrupt());
-            }}
-          >
-            {stopping ? "Stopping…" : "Stop"}
-          </button>
-        )}
-        {interruptError && (
-          <div className="chat-interrupted" role="alert">
-            {interruptError.message}
-          </div>
         )}
       </div>
       {turn.taskId && <WhatIDidRow taskId={turn.taskId} activities={activities} />}

@@ -74,6 +74,15 @@ interface HaloStore extends HaloState {
   appendLocalUserTurn: (conversationId: string, text: string, id: string) => void;
   acknowledgeInputRestore: (conversationId: string) => void;
   dismissError: (id: string) => void;
+  /** Drop an answered approval card the moment its decision goes out on a live
+   * socket. NOT a rule-3 violation: rule 3 stops us claiming a state change
+   * the Brain hasn't confirmed, and this claims none — the card is a question,
+   * and the question is answered. What the tool actually did still arrives on
+   * the confirming frame and renders in the activity row. The card is only
+   * dropped on a live send; if the socket was down the decision is sitting in
+   * the reconnect queue, so the card stays up rather than implying an approval
+   * that never reached the Brain. */
+  resolveApprovalLocally: (approvalId: string) => void;
   activeView: ActiveView;
   setActiveView: (view: ActiveView) => void;
   chats: ConversationRegistry;
@@ -121,6 +130,16 @@ export const useHaloStore = create<HaloStore>((set) => ({
         Object.entries(state.operationErrors).filter(([, error]) => error.id !== id),
       ),
     })),
+  resolveApprovalLocally: (approvalId) =>
+    set((state) =>
+      state.approvals[approvalId]
+        ? {
+            approvals: Object.fromEntries(
+              Object.entries(state.approvals).filter(([id]) => id !== approvalId),
+            ),
+          }
+        : state,
+    ),
   setActiveView: (view) => set({ activeView: view }),
   newConversation: () =>
     set((s) => commitChats(s, chats.newConversation(s.chats, crypto.randomUUID(), Date.now()))),
@@ -141,7 +160,14 @@ export const selectConversation = (conversationId: string) => (s: HaloStore) =>
   s.conversations[conversationId];
 export const selectActivities = (s: HaloStore) => s.activities;
 export const selectTasks = (s: HaloStore) => s.tasks;
-export const selectTaskLogs = (taskId: string) => (s: HaloStore) => s.taskLogs[taskId] ?? [];
+// One shared frozen empty array, NOT a fresh `[]` per call. zustand reads
+// selectors through useSyncExternalStore, which compares the result by
+// identity — a new array every read means "changed" every read, so React
+// re-renders forever, throws "The result of getSnapshot should be cached to
+// avoid an infinite loop", and the whole tree unmounts to a blank page. Any
+// selector with a `?? []`/`?? {}` fallback needs a shared constant like this.
+const NO_LOGS: readonly string[] = Object.freeze([]);
+export const selectTaskLogs = (taskId: string) => (s: HaloStore) => s.taskLogs[taskId] ?? NO_LOGS;
 export const selectStream = (taskId: string) => (s: HaloStore) => s.streams[taskId];
 export const selectApprovals = (s: HaloStore) => s.approvals;
 export const selectBeliefs = (s: HaloStore) => s.beliefs;
