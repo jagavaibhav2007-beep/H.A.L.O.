@@ -384,17 +384,27 @@ def check_git_helpers_are_disabled_by_construction() -> None:
 
 
 async def check_cmd_head_tail_truncation() -> None:
-    # This repo's own `git log` comfortably exceeds the head+tail cap -- no
-    # fixture needed. Layer 0 (systemdesign/13-document-ingestion.md) wants
-    # head+tail with the middle elided, not head-only, so both ends must
+    # Produce deterministic oversized output even in CI's default depth-1
+    # checkout. Layer 0 (systemdesign/13-document-ingestion.md) wants
+    # head+tail with the middle elided, not head-only, so both markers must
     # survive and a note must name what's missing.
+    head_marker = "HEAD-MARKER"
+    tail_marker = "TAIL-MARKER"
+    oversized_format = (
+        head_marker
+        + "H" * (files._CMD_HEAD_CAP - len(head_marker))
+        + "M" * 1024
+        + tail_marker
+        + "T" * (files._CMD_TAIL_CAP - len(tail_marker))
+    )
     FRAMES.clear()
     res = await gate.gated_execute(
-        "run_readonly_cmd", {"cmd": "git log"},
+        "run_readonly_cmd", {"cmd": f"git log -1 --format=format:{oversized_format}"},
         conversation_id="files-test", task_id=None, broadcast=broadcast,
     )
     content = res["messages"][0]["content"]
     assert "elided from the middle" in content, content
+    assert head_marker in content and tail_marker in content, content
     cap = files._CMD_HEAD_CAP + files._CMD_TAIL_CAP
     assert len(content) < cap + 2048, "truncated content should stay close to the head+tail cap"
     print("[check 12] run_readonly_cmd stdout truncates head+tail with the middle elided, not head-only: OK")
