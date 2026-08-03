@@ -1,5 +1,12 @@
 # Bugs
 
+## Mock serialization CI check consumed an unrelated broadcast token — 2026-08-03
+**Severity:** High (the first verification run on merged `main` failed after every setup and dependency check passed).
+**Symptom:** `check_same_conversation_is_serialized` occasionally received `['token', 'token']` instead of `['token', 'error']` on a hosted Windows runner, while repeated local runs passed.
+**Root cause:** the preceding Voice-routing check treated a one-second gap in Voice-visible frames as proof that its generic turn had completed, even though `done` is intentionally not routed to Voice. A delayed turn could therefore keep broadcasting into the next test client. The serialization check also asserted uncorrelated global frame types despite the protocol providing `turn_id` specifically to distinguish concurrent broadcasts.
+**Fix:** wait for the UI client's correlated `done` before closing the routing check, then assert serialization only over the two explicit `turn_id` values owned by that check.
+**Never do:** do not use temporary silence on a subscriber that cannot observe a terminal frame as a completion signal, and do not test turn ordering with uncorrelated frames from a global broadcast channel.
+
 ## Command-output truncation test depended on full Git history — 2026-08-03
 **Severity:** High (the hosted verification gate failed after the checkout issue was removed).
 **Symptom:** `brain/tests/test_files.py::check_cmd_head_tail_truncation` passed in a full local clone but failed in GitHub Actions because `git log` returned one short commit and therefore contained no `elided from the middle` marker.

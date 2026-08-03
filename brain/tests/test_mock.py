@@ -238,7 +238,19 @@ async def check_voice_routing_subset(port: int, token: str, voice_token: str) ->
         # A UI client drives a generic reply -- token(s) + done, broadcast to all.
         await _authenticate(ui, token)
         await _drain_snapshot(ui)
-        await ui.send(json.dumps(_frame("user_msg", text="route check", conversation_id="c-route", source="ui")))
+        route_turn_id = "mock-route-check"
+        await ui.send(json.dumps(_frame(
+            "user_msg", id=route_turn_id, text="route check", conversation_id="c-route", source="ui",
+        )))
+
+        # `done` is deliberately hidden from Voice, so silence on the Voice
+        # socket cannot prove the scenario has finished. Wait for the UI's
+        # correlated terminal frame first; otherwise a slow hosted runner can
+        # leave this turn streaming into the next check's new client.
+        while True:
+            frame = await _recv(ui)
+            if frame["type"] == "done" and frame.get("turn_id") == route_turn_id:
+                break
 
         # Voice must see the token (in its subset) but never the done (outside it).
         got_token = False
@@ -263,16 +275,30 @@ async def check_same_conversation_is_serialized(port: int, token: str) -> None:
         await _authenticate(ws, token)
         await _drain_snapshot(ws)
         conversation_id = "c-serialized"
-        await ws.send(json.dumps(_frame("user_msg", text="demo error", conversation_id=conversation_id, source="ui")))
-        await ws.send(json.dumps(_frame("user_msg", text="second turn", conversation_id=conversation_id, source="ui")))
-        first_two = [(await _recv(ws))["type"], (await _recv(ws))["type"]]
-        assert first_two == ["token", "error"], first_two
-        # Drain the second (generic) turn to its `done` before returning —
-        # otherwise its still-streaming tokens broadcast into the next check's
-        # freshly-connected client (the broadcast targets all authenticated
-        # clients, D4) and derail it.
-        while (await _recv(ws))["type"] != "done":
-            pass
+        first_turn_id = "mock-serialized-first"
+        second_turn_id = "mock-serialized-second"
+        await ws.send(json.dumps(_frame(
+            "user_msg", id=first_turn_id, text="demo error", conversation_id=conversation_id, source="ui",
+        )))
+        await ws.send(json.dumps(_frame(
+            "user_msg", id=second_turn_id, text="second turn", conversation_id=conversation_id, source="ui",
+        )))
+
+        correlated = []
+        while True:
+            frame = await _recv(ws)
+            turn_id = frame.get("turn_id")
+            if turn_id not in {first_turn_id, second_turn_id}:
+                continue
+            correlated.append((turn_id, frame["type"]))
+            if turn_id == second_turn_id and frame["type"] == "done":
+                break
+
+        assert correlated[:2] == [
+            (first_turn_id, "token"),
+            (first_turn_id, "error"),
+        ], correlated
+        assert all(turn_id == second_turn_id for turn_id, _ in correlated[2:]), correlated
     finally:
         await ws.close()
     print("[check 8] mock messages in one conversation are serialized: OK")
