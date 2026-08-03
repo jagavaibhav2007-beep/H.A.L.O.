@@ -3,7 +3,9 @@ name = "halo-voice"
 version = "0.1.0"
 description = "H.A.L.O. Voice sidecar — Python/Pipecat realtime audio worker."
 requires-python = ">=3.11"
-dependencies = ["websockets>=14"]
+# Voice shares a development/CI runtime with Brain, whose LangGraph SDK
+# currently requires websockets <16.
+dependencies = ["websockets>=14,<16"]
 # halo-brain (brain.ipc.contract) is installed separately in dev via
 # `pip install -e ../brain`, per DEVELOPMENT.md -- not declared here since
 # it isn't published anywhere pip could resolve it from.

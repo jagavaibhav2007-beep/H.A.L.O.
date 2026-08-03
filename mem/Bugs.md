@@ -1,5 +1,19 @@
 # Bugs
 
+## Command-output truncation test depended on full Git history — 2026-08-03
+**Severity:** High (the hosted verification gate failed after the checkout issue was removed).
+**Symptom:** `brain/tests/test_files.py::check_cmd_head_tail_truncation` passed in a full local clone but failed in GitHub Actions because `git log` returned one short commit and therefore contained no `elided from the middle` marker.
+**Root cause:** the test treated the repository's accumulated history as a fixture. `actions/checkout` uses a depth-1 clone by default, so output size varied with checkout depth and the latest commit-message length instead of the behavior under test.
+**Fix:** the test now invokes the real allowlisted Git command with a deterministic oversized `--format` value and asserts that explicit head and tail markers both survive truncation.
+**Never do:** do not use repository history size, commit count, or commit-message length as an implicit test fixture. Generate deterministic command output while still exercising the real boundary being tested.
+
+## GitHub Actions checkout failed before running any project code — 2026-08-03
+**Severity:** High (every push and pull request produced a failed CI notification).
+**Symptom:** the Windows `phase-2-gate` job stopped in `actions/checkout` with `Directory 'D:\\a\\H.A.L.O.\\H.A.L.O.' does not exist`; every setup, build, audit, and Phase 0–2 verification step was skipped. A separate annotation warned that the JavaScript actions still targeted deprecated Node.js 20.
+**Root cause:** the GitHub repository name ended in a period (`H.A.L.O.`). GitHub derived `GITHUB_WORKSPACE` from that name, but Windows cannot represent a directory whose final component ends in a period, so the runner's assigned workspace could not exist. This was a repository/runner naming incompatibility, not an application-code failure.
+**Fix:** renamed the GitHub repository to `H.A.L.O` (removed only the trailing period), retained the Windows runner, updated the local `origin`, and upgraded `actions/checkout`, `actions/setup-python`, and `actions/setup-node` to their Node.js 24 major releases.
+**Never do:** do not give a GitHub repository used by a Windows Actions job a name ending in a period or space. If Actions fails inside checkout before setup begins, validate the repository-derived workspace path before debugging project code.
+
 ## Browser-mode workspace rendered completely blank — 2026-08-01
 **Severity:** High (documented dev workflow broken). Found while investigating an unrelated UI/UX request; the user later pushed back for walking away from a crash seen live in the mock server instead of fixing it — correctly, since the root cause was one line away.
 **Symptom:** `./dev.ps1 -Browser` (and plain `vite` with `HALO_BROWSER_DEV=1`) served a page whose `#root` never got any content — `innerHTML.length === 0`. Console repeated `The result of getSnapshot should be cached to avoid an infinite loop`, with a warning naming `<TaskCard>`. Confirmed pre-existing: reproduced identically against a fully clean `git stash`-ed `ui/src`, i.e. present before any of this session's changes.
