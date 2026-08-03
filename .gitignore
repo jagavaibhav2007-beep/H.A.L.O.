@@ -1,46 +1,88 @@
-# Secrets / local config
+# Secrets / local configuration
 .env
 .env.*
 !.env.example
-.claude/settings.local.json
-*secret*
 *.key
 *.pem
+*.p12
+*.pfx
 
-# OS cruft
+# Repository-local agent and assistant state
+/.agents/
+/.claude/
+/.codex/
+/.codex-security-draft/
+
+# OS and editor state
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# Editor
+$RECYCLE.BIN/
 .vscode/
 .idea/
 *.swp
+*.swo
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
 
-# Node / React (UI)
+# Node / React / Vite
 node_modules/
 dist/
+dist-ssr/
 build/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # Rust / Tauri
 target/
+*.rs.bk
 
 # Python (Brain / Voice)
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .venv/
 venv/
+env/
+ENV/
 *.egg-info/
+*.whl
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
 .hypothesis/
+.tox/
+.nox/
 .coverage
 .coverage.*
 coverage/
-*.log
+htmlcov/
 
-# Local data (memory, logs, keys) — never leaves the machine per PRD
+# Test and browser artifacts
+test-results/
+playwright-report/
+blob-report/
+
+# Local runtime data - never leaves the machine per PRD
+*.db
+*.db-*
 *.sqlite
+*.sqlite-*
 *.sqlite3
+*.sqlite3-*
+session.json
 activity-log/
+logs/
+*.log
+*.pid
+*.dmp
+*.tmp
+*.bak
+/.tmp/
+/tmp/

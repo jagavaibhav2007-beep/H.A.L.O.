@@ -33,7 +33,7 @@ The expanded window — orb grows into a full glass app (user decision: **left s
 
 ## Settings (single scrollable view, grouped)
 - **General:** hotkey, theme (light/dark/auto), launch at startup.
-- **Voice:** mic device, wake word on/off, narration on/off, voice-approval toggle (see [04-permissions-trust](04-permissions-trust.md)).
+- **Voice:** mic device, wake word on/off, narration on/off, voice-approval toggle (see [05-permissions-trust](05-permissions-trust.md)).
 - **Models:** current light/heavy IDs (editable, from [techstack/00](../techstack/00-stack-summary.md)) + this month's estimated spend.
 - **Keys & connections:** OpenRouter, Deepgram, Chrome profile, MCP servers — status dots + re-auth buttons.
 - **Advanced (collapsed):** memory decay knobs, skill thresholds — the tunables from systemdesign, each with its default shown.

@@ -707,8 +707,8 @@ async def _threads_with_open_interrupt(saver) -> list[str]:
     """Thread ids whose LATEST checkpoint still carries an `__interrupt__` write
     -- i.e. currently suspended at a Tier-3 approval. This replaces the old
     "scan every thread ever created and aget_state each one" cost that ran on
-    EVERY connect (both webviews connect), which was the reconnect-livelock
-    amplifier in PHASE3_READINESS_AUDIT finding #2. A resumed interrupt writes a
+    EVERY connect (both webviews connect), which amplified reconnect work and
+    could overflow deferred snapshot broadcasts. A resumed interrupt writes a
     newer checkpoint with no `__interrupt__` write, so pinning to the newest
     checkpoint_id per thread excludes already-answered ones. Verified against the
     real DB and a live interrupt/resume round-trip to equal aget_state(...)

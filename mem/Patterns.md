@@ -1,6 +1,9 @@
 # Patterns
 _Established code patterns and conventions for this project._
 
+## Ignore concrete local artifacts, never security-related words - 2026-08-03
+Use repository-root rules for local agent state (`/.agents/`, `/.claude/`, `/.codex/`) and concrete patterns for credentials, databases/WAL files, session data, caches, test reports, logs, and crash/temp output. Never use a broad rule such as `*secret*`: it hides legitimate new source and tests like `secrets_store.py` or `test_secrets.py`. Keep dependency lockfiles and PyInstaller `.spec` files trackable because reproducible installs and the Phase 3c packaging prototype depend on them. Example: root `.gitignore`.
+
 ## A terminal backend frame may need to converge multiple UI projections at once - 2026-07-27
 Treat conversation turns, approvals, and pending operations as parallel projections of the same backend work, not as parent/child ownership. A single terminal `done` or `error` can legitimately need to close more than one of them in one reducer pass. `ui/src/state/reducer.ts` now resolves approval state by `conversation_id` even when the assistant turn is already closed, and it applies correlated operation failure plus conversation cleanup from the same frame. Reuse this shape for any new projection: if two UI surfaces are owned by the same backend turn, converge both from the same terminal frame instead of making one conditional on the other's local state still being open.
 

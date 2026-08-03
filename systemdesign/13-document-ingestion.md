@@ -91,7 +91,7 @@ New Lane-1 read-only tool `doc_digest(paths | path+glob, focus?)`:
 ## What this deliberately does not do
 
 - **No OCR / scanned PDFs.** Future path exists without new design: pypdfium2 already rasterizes pages → send PNG to an OpenRouter vision model, or the optional docling tier. Until then a scanned PDF returns an honest "no extractable text."
-- **No embedding/RAG index by default.** Digests answer most follow-ups; if pointed Q&A over big corpora becomes real, add fastembed chunks (256–512 tokens, top-k 5) into sqlite-vec — the memory system already owns that exact stack. Mind the embedding-lock contention noted in the Phase 3 readiness audit.
+- **No embedding/RAG index by default.** Digests answer most follow-ups; if pointed Q&A over big corpora becomes real, add fastembed chunks (256–512 tokens, top-k 5) into sqlite-vec — the memory system already owns that exact stack. Keep inference outside the SQLite operation lock and use the existing embedder-construction lock so first use cannot block unrelated store operations or race model initialization.
 - **No new IPC frames.** Tools are Brain-internal; `doc_digest` is Tier 1 inside roots under the existing gate. Contract untouched.
 - **`route()` escalation was a one-way latch — since fixed in [14-token-economics](14-token-economics.md) (Track B).** Layer 2 removes the failure that *caused* escalation; but the escalation mechanism itself had no reset path (once a conversation went HEAVY it stayed HEAVY forever), so the "honest fallback" claimed in earlier drafts of this doc was false. Track B1/B2 make escalation decay after a single turn and fire only on quality failures (not transport/5xx/429). Do not rely on escalation as a standing fallback.
 

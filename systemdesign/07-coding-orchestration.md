@@ -7,7 +7,9 @@ Halo directs Codex/Claude to build, continue, refactor, debug — including impr
 
 ## Mechanism
 - The Brain spawns the coding-agent **CLI** as a subprocess in the target project dir, streams its output, and parses results.
-- LangGraph models this as a long-running tool node with its own checkpoints (so a coding run is interruptible/resumable like any task).
+- The permission gate classifies the request before side effects, then submits a task-shaped tool to the implemented [TaskRuntime](12-task-runtime.md). The interactive LangGraph turn returns after reporting the task start; it never owns the subprocess lifetime.
+- `TaskContext.log()` carries coalesced output to the bounded `task_log` tail. Cooperative stop terminates the subprocess and escalates to kill within the runtime's halt budget.
+- Restart reconciliation reports an interrupted run truthfully and never blindly replays it. A future agent adapter may resume only when that CLI exposes a durable, explicitly verified resume token.
 
 ```
 "add feature X to project P"
@@ -28,6 +30,7 @@ Halo directs Codex/Claude to build, continue, refactor, debug — including impr
 
 ## Failure handling
 - Coding run errors/tests fail → Brain captures the output, reports honestly ("tests failed, here's why"), offers to retry with a refined brief. Never reports success it didn't verify.
+- A missing CLI, non-zero exit, cancellation, or Brain restart produces a durable terminal task result; it is not represented as a successful conversation checkpoint.
 - Writes a failure post-mortem to memory for next time.
 
 ## Cost note

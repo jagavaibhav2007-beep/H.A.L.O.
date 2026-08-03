@@ -1,6 +1,6 @@
 # Tech Stack: Task Runtime
 
-Status: design only — see [systemdesign/12-task-runtime.md](../systemdesign/12-task-runtime.md). Implementation is Tranche B2 of [PHASE3_READINESS_AUDIT.md](../PHASE3_READINESS_AUDIT.md).
+Status: **implemented in Phase 2 exit hardening** — see [systemdesign/12-task-runtime.md](../systemdesign/12-task-runtime.md) for behavior and evidence.
 
 | Concern | Choice | Why |
 |---|---|---|

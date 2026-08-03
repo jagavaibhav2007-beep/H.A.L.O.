@@ -69,10 +69,10 @@ Source of truth for *what* each thing does stays in [Halo-PRD.md](Halo-PRD.md), 
 **Goal:** the ambitious capabilities, layered on the proven spine. Each is independently shippable — sub-order by value, ship one at a time.
 
 **Build (suggested order — each its own mini-phase):**
-- **3a — Coding-agent orchestration.** Codex/Claude CLIs as subprocesses, Lane 1, cooperative cancellation ([07-coding-orchestration](systemdesign/07-coding-orchestration.md)). Highest-value, all Lane 1, no GUI brittleness.
+- **3a — Coding-agent orchestration.** Codex/Claude CLIs as TaskRuntime subprocesses, Lane 1, bounded logs, truthful restart reconciliation, and cooperative cancellation ([07-coding-orchestration](systemdesign/07-coding-orchestration.md)). Highest-value, all Lane 1, no GUI brittleness.
 - **3b — Browser automation.** Playwright over CDP → real Chrome profile; learn-once-replay-free playbooks; browser hard rule (submit/send/buy/post = confirm) ([06-browser](systemdesign/06-browser.md)).
-- **3c — Voice.** Pipecat pipeline, openWakeWord, Whisper STT, Deepgram TTS; barge-in, narration of main events, "stop" → redirect → resume ([02-voice](systemdesign/02-voice.md)).
-- **3d — GUI automation (Lanes 2 & 3).** Windows UI Automation → vision fallback; Lane 2 takeover, Lane 3 sandbox; live desktop stream ([05-computer-control](systemdesign/05-computer-control.md)). **Lane 3 sandbox deferred out of MVP** (PRD §15 — needs Win Pro or VirtualBox).
+- **3c — Voice.** First prove a PyInstaller spec-file build of the Brain/Voice sidecars, including frozen fastembed/sqlite-vec loading; then add the Pipecat pipeline, openWakeWord, local faster-whisper STT, local Kokoro TTS, cloud fallback, barge-in, narration of main events, and "stop" → redirect → resume ([02-voice](systemdesign/02-voice.md)).
+- **3d — GUI automation (Lanes 2 & 3).** Design per-client `stream_frame` subscription or a binary side-channel before adding live desktop frames; never send them through broadcast fan-out. Then build Windows UI Automation → vision fallback, Lane 2 takeover, and the live desktop stream ([05-computer-control](systemdesign/05-computer-control.md)). **Lane 3 sandbox deferred out of MVP** (PRD §15 — needs Win Pro or VirtualBox).
 - **3e — Self-improvement / skill loop.** Frequency-detect → generate → sandbox-eval → activate/retire; learn-from-failure post-mortems; skills panel trial/keep/kill ([08-self-improvement](systemdesign/08-self-improvement.md)).
 - **APIs & MCP integration** threads through 3a–3b (prefer authenticated API/MCP, fall back to browser/GUI) ([09-integrations-mcp](systemdesign/09-integrations-mcp.md)).
 
@@ -89,6 +89,6 @@ Source of truth for *what* each thing does stays in [Halo-PRD.md](Halo-PRD.md), 
 
 ## How to use this file
 
-- **Phases 0, 1, and 2 are COMPLETE** (declared 2026-08-01), including the durable TaskRuntime and the 2026-07-22/07-28/07-29 security/reconnect hardening. The unchecked human/native scenarios in [VERIFY.md](VERIFY.md) (visual/NVDA pass, real-key OpenRouter walkthrough) remain as recommended follow-ups but no longer block starting Phase 3. Read [PHASE3_READINESS_AUDIT.md](PHASE3_READINESS_AUDIT.md) and [systemdesign/12-task-runtime.md](systemdesign/12-task-runtime.md) before starting Phase 3a.
-- To start a phase: "let's start Phase N" → a `phase-N-plan.md` gets written with concrete tasks, file layout, and interfaces, grounded in the then-current docs.
+- **Phases 0, 1, and 2 are COMPLETE** (declared 2026-08-01), including the durable TaskRuntime and the 2026-07-22/07-28/07-29 security/reconnect hardening. The unchecked human/native scenarios in [VERIFY.md](VERIFY.md) (visual/NVDA pass, real-key OpenRouter walkthrough) remain as recommended follow-ups but no longer block starting Phase 3. Read [systemdesign/07-coding-orchestration.md](systemdesign/07-coding-orchestration.md) and [systemdesign/12-task-runtime.md](systemdesign/12-task-runtime.md) before starting Phase 3a.
+- To start a mini-phase, create a scoped implementation plan with concrete tasks, interfaces, gates, and an explicit retirement rule. Once implemented, migrate durable decisions into the canonical design/memory docs and remove the completed plan; git history preserves it.
 - If a phase reveals a design gap, fix the relevant `systemdesign/`/`techstack/`/`ui_ux/` doc first, then continue — this roadmap follows the docs, not the other way around.

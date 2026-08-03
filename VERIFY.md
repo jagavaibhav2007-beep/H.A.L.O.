@@ -7,8 +7,8 @@ Status: **Phase 2 COMPLETE (declared 2026-08-01).** The feature set and
 fixes) are in place and automated-gate-verified. The checklist items below —
 human visual, keyboard/NVDA, minimum-size, and real-OpenRouter-key checks —
 remain unchecked and are still worth running, but are recommended follow-ups
-rather than a blocker on Phase 3 work. See [AUDIT_PLAN.md](AUDIT_PLAN.md) and
-[DEEPSCAN_AUDIT.md](DEEPSCAN_AUDIT.md) for the audit trail behind this status.
+rather than a blocker on Phase 3 work. Historical audit reports were retired
+after remediation; their evidence remains available in git history and `mem/`.
 
 Run the full automated gate first. Use `./dev.ps1 -Mock` for the scripted
 Phase-1 visual scenarios (`demo ...`). Use the normal `./dev.ps1` launcher for
@@ -29,9 +29,9 @@ not respond to mock demo triggers.
 - [x] During focused protocol work, `./dev.ps1 -Smoke` may be used as the
       faster Phase 0/1/2 protocol-only check. A green `-Smoke` is not a
       substitute for `-Verify` before declaring the repository gate green.
-- [ ] Re-run `./dev.ps1 -Verify` on the final 2026-07-31 exit-hardening tree and
-      record `FULL AUTOMATED VERIFICATION PASSED`. Historical green runs do not
-      close this item for the modified tree.
+- [x] Re-run the full repository gate on the integrated tree and record success
+      (2026-08-03, `d505231`: local full verification passed; GitHub Actions run
+      30801830739 passed the same locked Phase 0–2 gate).
 
 ## Render matrix
 

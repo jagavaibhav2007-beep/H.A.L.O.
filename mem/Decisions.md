@@ -1,6 +1,15 @@
 # Decisions
 _Architectural, structural, and system design choices._
 
+## Completed one-off documents retire after durable guidance migrates — 2026-08-03
+**Decision:** completed implementation plans, readiness snapshots, and one-time audit reports are removed from the active documentation surface after any still-live requirements move into `phases.md`, `VERIFY.md`, `systemdesign/`, `techstack/`, `ui_ux/`, or `mem/`. Git history is the archive for the original evidence and task-by-task narrative.
+
+**Applied now:** retired `AUDIT_PLAN.md`, `DEEPSCAN_AUDIT.md`, `PHASE3_READINESS_AUDIT.md`, `PONYTAIL_DEEPSCAN_2026-08-02.md`, the implemented Phase 3 UI foundation plan/spec under `docs/superpowers/`, and `.claude/commands/write-test.md` (obsolete test-framework and runner guidance). PyInstaller-before-3c and per-client-streaming-with-3d moved into `phases.md`; coding orchestration now points directly at the implemented TaskRuntime contract.
+
+**Why:** point-in-time reports mixed historical failures, completed checklists, and stale status language into the same surface as current architecture. That makes humans and agents re-evaluate resolved work. Canonical docs should describe current behavior and future requirements; durable memory records decisions; git preserves forensic history.
+
+**How to apply:** every new mini-phase plan must state its retirement rule. On completion, move only reusable decisions and remaining work into canonical docs, then delete the plan rather than maintaining a second roadmap.
+
 ## Phase 3 UI foundation uses one compact rail and history-only terminal tasks — 2026-08-02
 **Decision:** the existing workspace switches its 176px labelled sidebar to a 56px icon rail at `max-width: 640px`; it does not gain a second layout, collapse state, or another breakpoint. Settings stays at the rail bottom at every width. Existing views reflow with local flex wrapping and the current design tokens.
 
@@ -21,7 +30,7 @@ Context: closing PHASE3_READINESS_AUDIT.md's Tranche B (B3/B4/B5). Two decisions
 ## Phase 2 declared complete; superseded phase-N-plan.md and dated audit snapshots retired — 2026-08-01
 **Decision:** Phase 2 is officially closed (user call). `phase-0-plan.md`, `phase-1-plan.md`, `phase-2-plan.md`, `PHASE2_EXIT_AUDIT_2026-07-30.md` (a NO-GO snapshot whose findings were resolved by `48a8392`), and `PONYTAIL_AUDIT_2026-08-01.md` (a one-time over-engineering scan whose recommendations were already committed in `e41d77b`/`bb2ceb6`) were deleted from the repo root. CLAUDE.md, AGENTS.md, DEVELOPMENT.md, `phases.md`, and `VERIFY.md` were updated so none of them still frame Phase 2 as "formal closure pending" or link the retired docs.
 
-**Why:** each retired doc was phrased as an open checklist or a point-in-time "NOT done yet" snapshot (`phase-2-plan.md`: "Phase exit criteria (the whole phase is done when): 1... 2..."; `PHASE2_EXIT_AUDIT_2026-07-30.md`: "NO-GO for declaring Phase 2 complete"). Their substance was fully superseded by later commits, but the docs themselves kept asserting incompleteness — a real risk that an LLM (or a human) skimming the repo would read stale "not done" language and either redo finished work or lose confidence in the actual (done) state. `DEEPSCAN_AUDIT.md` and `AUDIT_PLAN.md` were deliberately KEPT: both are already framed by CLAUDE.md as historical evidence/provenance (not open TODOs), are cross-cited by name across multiple `mem/` entries as audit trail, and — for a public OSS repo — audit transparency has standing value that a superseded implementation plan does not.
+**Why:** each retired doc was phrased as an open checklist or a point-in-time "NOT done yet" snapshot (`phase-2-plan.md`: "Phase exit criteria (the whole phase is done when): 1... 2..."; `PHASE2_EXIT_AUDIT_2026-07-30.md`: "NO-GO for declaring Phase 2 complete"). Their substance was fully superseded by later commits, but the docs themselves kept asserting incompleteness — a real risk that an LLM (or a human) skimming the repo would read stale "not done" language and either redo finished work or lose confidence in the actual (done) state. The decision to retain the older deep-scan/audit reports as active files was superseded on 2026-08-03; their evidence remains in git history and durable memory.
 
 **How to apply:** don't recreate a "phase-N-plan.md"-style standalone checklist doc for Phase 3 without an explicit plan to retire it the same way once Phase 3 ships — or write it so its own text states completion status inline (like `mem/Memory.md`'s dated entries do) rather than needing an external doc to know it's done. Source-code comments that still cite the retired plan docs by filename (e.g. `// Spec: phase-0-plan.md Step 7`) were deliberately left alone — low confusion risk (historical spec provenance in already-shipped code, not an assertion that anything is incomplete) and low value relative to the diff size of touching 7+ source files.
 
@@ -215,7 +224,7 @@ Compact record of `phase-2-plan.md`'s original "Architecture decisions" section 
 ## Deferred: back-fill of already-unindexed active beliefs stays off the connect() path — 2026-07-28
 **What:** the P0 fix that unindexes dead beliefs (see Bugs.md) does not also back-fill the beliefs already stranded (this machine had 8/8 active beliefs unindexed before the fix). Search now finds them via the recency fallback immediately; they just lack vector ranking until re-embedded.
 **Why:** A4 deliberately moved `_embed()` outside `_OP_LOCK` specifically so a slow/first-time embed can't stall every other store operation. A back-fill running inside `connect()` (the natural place to put it) would re-embed under the lock and reintroduce that exact stall on every Brain start until the backlog clears.
-**Trade-off:** a correct off-lock back-fill (lazy, triggered outside `connect()`, embedding one stranded belief per opportunity) is the real fix and is not yet built — tracked in DEEPSCAN_AUDIT.md Tranche 2. Until then, ranking quality for old beliefs is degraded (recency order, not similarity) but nothing is silently lost.
+**Trade-off:** a correct off-lock back-fill (lazy, triggered outside `connect()`, embedding one stranded belief per opportunity) is the real fix and is not yet built. This entry is the durable tracker after the one-time deep-scan report was retired. Until then, ranking quality for old beliefs is degraded (recency order, not similarity) but nothing is silently lost.
 
 ## Checkpoint pruning is timing-gated, not interrupt-filtered — 2026-07-29
 **What:** `graph.py._prune_checkpoints` (newest 20/thread) is only ever called from `_finish_turn`'s `error/done` branch — never from the `return True` branch that fires when the turn suspended on a Tier-3 `interrupt()`.
