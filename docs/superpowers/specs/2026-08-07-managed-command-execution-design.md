@@ -101,6 +101,8 @@ Two model-visible tools keep the intent unambiguous:
    - Optional fields: arguments, timeout, declared network requirement, and expected artifacts.
    - The Brain writes the source atomically into a task-specific scratch directory and invokes the interpreter without an intermediate command shell.
 
+Interpreter discovery is capability-aware. PowerShell resolves to the supported Windows installation; Python resolves to a probed script-capable interpreter and must not assume `sys.executable` is Python after the Brain is frozen as an application binary. If no suitable interpreter is available, `script_run` reports the capability as unavailable rather than silently installing Python or pretending the packaged Brain can execute source files. A future packaged script-runtime pack can satisfy the same discovery interface without changing the tool contract.
+
 Both tools are task-shaped, non-pausable in the first version, and stoppable. A future adapter may expose resumability, but ordinary commands never claim resume support.
 
 The existing `run_readonly_cmd` remains during migration for its narrow deterministic cases. After parity tests prove the new analyzer, its model-visible schema is retired or converted into an internal compatibility wrapper; there must not be two competing general command paths.
@@ -227,13 +229,15 @@ Persisted command metadata includes:
 - execution mode and resolved executable identity;
 - redacted arguments and environment-key names;
 - working directory and declared path set;
-- source digest and redacted bounded preview for generated scripts;
+- source digest and byte length in task/action metadata; generated source is omitted from task rows, action rows, logs, approvals, and ordinary IPC;
 - start/end timestamps, exit code, timeout/cancel reason, and output truncation metadata;
 - artifact verification results;
 - policy decision and approval linkage;
 - executor/capability version.
 
 On Brain restart, a waiting or running command is reconciled as `interrupted_after_restart`/failed using the current TaskRuntime semantics. H.A.L.O. never blindly reruns it. Scratch files are inspected for partial artifacts and cleaned according to retention policy only after their metadata is recorded.
+
+A pending Tier-3 script approval is a special durability boundary: the existing LangGraph checkpoint must retain the original tool call, including generated source, so the exact request can resume after a Brain restart. That checkpoint is local application state, never broadcast, and follows the existing checkpoint-retention rules. The source is not duplicated into the task table, action table, approval payload, task logs, or continuation. Raw credential values remain forbidden in source and are supplied only through opaque secret references.
 
 ## IPC and UI impact
 
