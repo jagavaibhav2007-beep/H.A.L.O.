@@ -31,6 +31,19 @@ _LOG_FLUSH_SECONDS = 0.25
 class TaskStopped(Exception):
     """Cooperative stop observed at a task step boundary."""
 
+    def __init__(self, result: dict | None = None) -> None:
+        super().__init__("stopped")
+        self.result = result
+
+
+class TaskFailed(Exception):
+    """Task failed with a structured result worth preserving."""
+
+    def __init__(self, reason: str, result: dict | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.result = result
+
 
 @dataclass
 class TaskContext:
@@ -167,6 +180,7 @@ class TaskRuntime:
         supports_pause: bool,
         fn,
         inverse_builder=None,
+        persisted_args: dict | None = None,
     ) -> str:
         if self._closing:
             raise RuntimeError("task runtime is shutting down")
@@ -190,7 +204,7 @@ class TaskRuntime:
             "step": 0,
             "conversation_id": conversation_id,
             "tool": tool,
-            "args_json": json.dumps(args, ensure_ascii=False, default=str),
+            "args_json": json.dumps(args if persisted_args is None else persisted_args, ensure_ascii=False, default=str),
             "supports_pause": int(supports_pause),
             "intent_action_id": action_id,
         }
@@ -243,8 +257,10 @@ class TaskRuntime:
                     output = await asyncio.to_thread(fn, job["args"], context)
                 await context.checkpoint()
                 await self._finish_success(output=output, **job)
-        except TaskStopped:
-            await self._finish_stopped(**job)
+        except TaskStopped as exc:
+            await self._finish_stopped(output=exc.result, **job)
+        except TaskFailed as exc:
+            await self._finish_failure(exc.reason, output=exc.result, **job)
         except asyncio.CancelledError:
             if not self._closing:
                 await self._finish_failure("task worker was cancelled", **job)
@@ -306,11 +322,14 @@ class TaskRuntime:
         payload, _ = gate._cap_result(output)
         await self._continue(job["conversation_id"], ctx.task_id, f"Task {ctx.task_id} completed. Untrusted task result: {payload}")
 
-    async def _finish_stopped(self, **job) -> None:
+    async def _finish_stopped(self, output=None, **job) -> None:
         ctx: TaskContext = job["context"]
-        output = ctx._checkpoint
+        output = ctx._checkpoint if output is None else output
         undo_token = await self._record_result(output, "stopped", **job) if output else None
-        await asyncio.to_thread(store.upsert_task, ctx.task_id, state="failed", reason="stopped")
+        fields = {"state": "failed", "reason": "stopped"}
+        if output is not None:
+            fields["result_json"] = json.dumps(output, ensure_ascii=False, default=str)
+        await asyncio.to_thread(store.upsert_task, ctx.task_id, **fields)
         await self._broadcast("task_state", {
             "task_id": ctx.task_id, "state": "failed", "lane": ctx.lane, "reason": "stopped",
         })
@@ -322,10 +341,14 @@ class TaskRuntime:
             )
         await self._continue(job["conversation_id"], ctx.task_id, f"Task {ctx.task_id} stopped before completion.")
 
-    async def _finish_failure(self, reason: str, **job) -> None:
+    async def _finish_failure(self, reason: str, output=None, **job) -> None:
         ctx: TaskContext = job["context"]
-        undo_token = await self._record_result(ctx._checkpoint, f"error: {reason}", **job)
-        await asyncio.to_thread(store.upsert_task, ctx.task_id, state="failed", reason=reason)
+        output = ctx._checkpoint if output is None else output
+        undo_token = await self._record_result(output, f"error: {reason}", **job)
+        fields = {"state": "failed", "reason": reason}
+        if output is not None:
+            fields["result_json"] = json.dumps(output, ensure_ascii=False, default=str)
+        await asyncio.to_thread(store.upsert_task, ctx.task_id, **fields)
         await self._broadcast("task_state", {
             "task_id": ctx.task_id, "state": "failed", "lane": ctx.lane, "reason": reason,
         })

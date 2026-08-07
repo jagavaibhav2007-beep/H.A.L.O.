@@ -35,6 +35,7 @@ from brain import gate, graph, store
 from brain.server import start
 
 EXECUTED: list[tuple[str, dict]] = []
+FINGERPRINT_VERSION = {"value": 1}
 
 
 def _make_tool(name):
@@ -71,6 +72,12 @@ gate.register(
     summary="I want to run redacted_argtool.",
 )
 gate.register("t_broken_rule", _make_tool("t_broken_rule"), tier=lambda args: 1 / 0)
+gate.register(
+    "fingerprinted_tool",
+    _make_tool("fingerprinted_tool"),
+    tier=3,
+    approval_fingerprint=lambda args: f"{args.get('target')}:{FINGERPRINT_VERSION['value']}",
+)
 
 
 def _frame(msg_type: str, **payload) -> dict:
@@ -156,6 +163,45 @@ def check_result_cap() -> None:
     payload, omitted = gate._cap_result(small)
     assert omitted == 0 and json.loads(payload) == small
     print("[check 1b] oversized list result stays valid JSON after cap: OK")
+
+
+async def check_dynamic_mutation_and_validation_hooks() -> None:
+    executed: list[dict] = []
+
+    def validate(args: dict) -> None:
+        if args.get("invalid"):
+            raise ValueError("invalid request shape")
+
+    gate.register(
+        "hooked_tool",
+        lambda args: executed.append(dict(args)),
+        tier=2,
+        mutating=lambda args: args.get("mode") == "write",
+        user_intent=lambda args, text: args.get("target", "").casefold() in text.casefold(),
+        validate=validate,
+    )
+
+    async def broadcast(_kind: str, _payload: dict) -> None:
+        return None
+
+    try:
+        assert gate.is_mutating("hooked_tool", {"mode": "write"}) is True
+        assert gate.is_mutating("hooked_tool", {"mode": "read"}) is False
+        assert gate.classify_for_request(
+            "hooked_tool", {"mode": "write", "target": "report.pdf"}, "write report.pdf",
+        ) == 2
+        assert gate.classify_for_request(
+            "hooked_tool", {"mode": "write", "target": "report.pdf"}, "say hello",
+        ) == 3
+        result = await gate.gated_execute(
+            "hooked_tool", {"invalid": True}, conversation_id="hook-test",
+            task_id=None, broadcast=broadcast,
+        )
+        assert result["pending_tool_result"]["status"].startswith("error"), result
+        assert executed == [], executed
+    finally:
+        gate.TOOLS.pop("hooked_tool", None)
+    print("[check 1c] dynamic mutation and validation hooks fail closed before execution: OK")
 
 
 async def check_sync_tool_does_not_block_event_loop() -> None:
@@ -372,6 +418,27 @@ async def check_destructive(port: int, token: str) -> None:
     print("[check 7] destructive tool -> approval_request.destructive == true: OK")
 
 
+async def check_stale_approval_reasks(port: int, token: str) -> None:
+    ws = await _connect_auth(port, token)
+    try:
+        FINGERPRINT_VERSION["value"] = 1
+        await _call_tool(ws, "gate-fingerprint", "fingerprinted_tool", {"target": "report.pdf"})
+        first = await _recv_type(ws, "approval_request")
+        assert "_approval_fingerprint" not in first, first
+        FINGERPRINT_VERSION["value"] = 2
+        await _respond(ws, first["approval_id"], "approve")
+        second = await _recv_type(ws, "approval_request")
+        assert second["approval_id"] != first["approval_id"], second
+        assert not any(name == "fingerprinted_tool" for name, _args in EXECUTED)
+        await _respond(ws, second["approval_id"], "approve")
+        await _recv_type(ws, "activity")
+        await _recv_type(ws, "done")
+        assert ("fingerprinted_tool", {"target": "report.pdf"}) in EXECUTED
+    finally:
+        await ws.close()
+    print("[check 7b] changed command fingerprint invalidates approval and requests consent again: OK")
+
+
 async def check_interrupt_while_waiting(port: int, token: str) -> None:
     ws = await _connect_auth(port, token)
     try:
@@ -418,6 +485,7 @@ async def check_restart_durability(port: int, token: str) -> None:
 async def main() -> None:
     check_classify_table()
     check_result_cap()
+    await check_dynamic_mutation_and_validation_hooks()
     await check_sync_tool_does_not_block_event_loop()
     server, token = await start()
     port = server.sockets[0].getsockname()[1]
@@ -428,6 +496,7 @@ async def main() -> None:
         await check_tier3_deny(port, token)
         await check_tier3_edit(port, token)
         await check_destructive(port, token)
+        await check_stale_approval_reasks(port, token)
         await check_interrupt_while_waiting(port, token)
         await check_restart_durability(port, token)
     finally:

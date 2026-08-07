@@ -663,9 +663,10 @@ async def _finish_turn(result: dict, cid: str, broadcast) -> bool:
     interrupts = result.get("__interrupt__")
     if interrupts:
         payload = dict(interrupts[0].value)
+        approval_fingerprint = payload.pop("_approval_fingerprint", None)
         if result.get("turn_id"):
             payload["turn_id"] = result["turn_id"]
-        gate.register_pending(payload, cid)
+        gate.register_pending(payload, cid, approval_fingerprint)
         await broadcast("approval_request", payload)
         if result.get("task_id"):
             # A real task context exists (Step 7+): surface the pause.
@@ -748,13 +749,14 @@ async def rehydrate_pending() -> None:
     for cid in thread_ids:
         snap = await graph.aget_state({"configurable": {"thread_id": cid}})
         for intr in snap.interrupts:
-            payload = intr.value
+            payload = dict(intr.value) if isinstance(intr.value, dict) else intr.value
             if not isinstance(payload, dict) or "approval_id" not in payload:
                 continue
+            approval_fingerprint = payload.pop("_approval_fingerprint", None)
             if gate.peek_conversation(payload["approval_id"]) is not None:
                 continue  # already registered (live, or a prior rehydrate)
             logger.info("rehydrated pending approval %s for %s", payload["approval_id"], cid)
-            gate.register_pending(payload, cid)
+            gate.register_pending(payload, cid, approval_fingerprint)
 
 
 _SNAPSHOT_TASK_STATES = ["waiting", "running", "paused", "waiting_approval", "failed"]
@@ -941,6 +943,8 @@ async def resume_turn(approval_id: str, decision: str, edited_args: dict | None,
         stubbed = bool(os.environ.get("HALO_LLM_STUB"))
         api_key = "stub-key" if stubbed else await asyncio.to_thread(secrets_store.get_key)
         resume_val: dict = {"decision": decision}
+        if entry.get("approval_fingerprint") is not None:
+            resume_val["approval_fingerprint"] = entry["approval_fingerprint"]
         if edited_args is not None:
             resume_val["edited_args"] = edited_args
         ctx = {

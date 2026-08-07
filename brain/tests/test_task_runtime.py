@@ -20,7 +20,7 @@ os.environ["LOCALAPPDATA"] = _TMP
 os.environ["HALO_LLM_STUB"] = "1"
 
 from brain import gate, store
-from brain.task_runtime import TaskRuntime
+from brain.task_runtime import TaskFailed, TaskRuntime, TaskStopped
 from brain.tools import files  # registers dir_organize for reconciliation
 import websockets
 
@@ -195,6 +195,46 @@ async def check_organize_emits_one_durable_receipt_per_move() -> None:
     print("[check 4] organize emits one durable receipt per move and one batch undo: OK")
 
 
+async def check_safe_persistence_and_structured_terminal_results() -> None:
+    async def broadcast(_kind: str, _payload: dict) -> None:
+        return None
+
+    seen: list[dict] = []
+
+    async def fail(args: dict, _ctx) -> dict:
+        seen.append(args)
+        raise TaskFailed("artifact invalid", {"artifacts": [{"status": "invalid"}]})
+
+    async def stop(_args: dict, _ctx) -> dict:
+        raise TaskStopped({"artifacts": [{"status": "partial"}]})
+
+    runtime = TaskRuntime(broadcast, concurrency=1)
+    raw = {"source": "secret source", "target": "report.pdf"}
+    await runtime.submit(
+        task_id="safe-failure", conversation_id="tasks", tool="command",
+        args=raw, persisted_args={"source_sha256": "abc", "target": "report.pdf"},
+        args_redacted={"target": "report.pdf"}, tier=3, lane=1,
+        title="Command", steps_total=None, supports_pause=False, fn=fail,
+    )
+    await wait_until(lambda: store.get_task("safe-failure")["state"] == "failed")
+    failed = store.get_task("safe-failure")
+    assert seen == [raw]
+    assert "secret source" not in failed["args_json"]
+    assert json.loads(failed["result_json"])["artifacts"][0]["status"] == "invalid"
+
+    await runtime.submit(
+        task_id="safe-stop", conversation_id="tasks", tool="command",
+        args={}, args_redacted={}, tier=3, lane=1, title="Command",
+        steps_total=None, supports_pause=False, fn=stop,
+    )
+    await wait_until(lambda: store.get_task("safe-stop")["state"] == "failed")
+    stopped = store.get_task("safe-stop")
+    assert stopped["reason"] == "stopped"
+    assert json.loads(stopped["result_json"])["artifacts"][0]["status"] == "partial"
+    await runtime.close()
+    print("[check 4b] raw args stay in memory; safe args and structured failure/stop results persist: OK")
+
+
 def frame(kind: str, **payload) -> dict:
     return {
         "type": kind,
@@ -276,6 +316,7 @@ async def main() -> None:
     await check_pause_resume_and_stop_within_two_seconds()
     await check_restart_reconciliation_preserves_partial_undo()
     await check_organize_emits_one_durable_receipt_per_move()
+    await check_safe_persistence_and_structured_terminal_results()
     await check_server_detaches_task_from_same_conversation_and_real_stop()
     print("[brain.task_runtime] self-check OK")
 

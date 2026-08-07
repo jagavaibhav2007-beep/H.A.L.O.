@@ -52,6 +52,7 @@ def register(
     name: str, fn, *, tier=3, destructive=False, redact=None, summary=None,
     inverse=None, schema=None, mutating: bool = False, user_intent=None,
     task: bool = False, supports_pause: bool = False, title=None, steps_total=None,
+    validate=None, persist_args=None, approval_fingerprint=None,
 ) -> None:
     """schema: the OpenAI function body sans name -- {"description": str,
     "parameters": <JSON Schema>}. Only tools WITH one are advertised to the
@@ -62,6 +63,8 @@ def register(
         "mutating": mutating, "user_intent": user_intent,
         "task": task, "supports_pause": supports_pause,
         "title": title, "steps_total": steps_total,
+        "validate": validate, "persist_args": persist_args,
+        "approval_fingerprint": approval_fingerprint,
     }
 
 
@@ -103,7 +106,7 @@ def classify_for_request(tool: str, args: dict, user_text: str) -> int:
     """
     tier = classify(tool, args)
     entry = TOOLS.get(tool)
-    if tier == 3 or not entry or not entry.get("mutating"):
+    if tier == 3 or not entry or not is_mutating(tool, args):
         return tier
     if os.environ.get("HALO_LLM_STUB") and user_text.startswith(f"CALL_TOOL {tool} "):
         # Deterministic test seam: the human fixture names the exact tool/args.
@@ -115,6 +118,18 @@ def classify_for_request(tool: str, args: dict, user_text: str) -> int:
     except Exception:  # noqa: BLE001 - authority checks always fail closed
         logger.exception("user-intent check failed for tool=%s; requiring approval", tool)
         return 3
+
+
+def is_mutating(tool: str, args: dict) -> bool:
+    entry = TOOLS.get(tool)
+    if entry is None:
+        return True
+    try:
+        value = entry.get("mutating", False)
+        return bool(value(args)) if callable(value) else bool(value)
+    except Exception:  # noqa: BLE001 - authority checks fail closed
+        logger.exception("mutation classification failed for tool=%s", tool)
+        return True
 def is_destructive(tool: str, args: dict) -> bool:
     entry = TOOLS.get(tool)
     if entry is None:
@@ -190,9 +205,14 @@ def _apply_redacted_edits(original, redacted, edited):
 # ------------------------------------------------- pending approval registry
 
 
-def register_pending(payload: dict, conversation_id: str) -> None:
+def register_pending(payload: dict, conversation_id: str, approval_fingerprint: str | None = None) -> None:
     aid = payload["approval_id"]
-    _pending[aid] = {"conversation_id": conversation_id, "task_id": payload["task_id"], "payload": payload}
+    _pending[aid] = {
+        "conversation_id": conversation_id,
+        "task_id": payload["task_id"],
+        "payload": payload,
+        "approval_fingerprint": approval_fingerprint,
+    }
     _by_conversation[conversation_id] = aid
 
 
@@ -256,6 +276,17 @@ async def gated_execute(
     else:
         frame_task = task_id or f"tool-{conversation_id}"  # contract: task_id is required in these frames
     while True:
+        validator = entry.get("validate") if entry else None
+        try:
+            if validator:
+                validator(args)
+        except Exception as exc:  # noqa: BLE001 - invalid shapes never execute
+            result = f"error: {exc}"
+            await asyncio.to_thread(_record, tool, redact(tool, args), 3, result, frame_task)
+            return {
+                "pending_tool_result": {"tool": tool, "status": result},
+                "messages": [{"role": "assistant", "content": f"I couldn't run {tool}: {exc}"}],
+            }
         tier = classify_for_request(tool, args, user_text) if user_text is not None else classify(tool, args)
         if tier != 3:
             break
@@ -276,6 +307,10 @@ async def gated_execute(
             # across a restart for rehydrate_pending too.
             "conversation_id": conversation_id,
         }
+        fingerprint_fn = entry.get("approval_fingerprint") if entry else None
+        fingerprint = fingerprint_fn(args) if fingerprint_fn else None
+        if fingerprint is not None:
+            payload["_approval_fingerprint"] = fingerprint
         decision = interrupt(payload)  # C2: never inside a try/except
         d = decision.get("decision")
         if d in ("deny", "cancelled"):
@@ -295,6 +330,8 @@ async def gated_execute(
             edited_args = decision.get("edited_args")
             if edited_args is not None:
                 args = _apply_redacted_edits(args, redact(tool, args), edited_args)
+            continue
+        if fingerprint is not None and decision.get("approval_fingerprint") != fingerprint:
             continue
         break  # approve
 
@@ -344,6 +381,7 @@ async def _start_task_tail(
         supports_pause=bool(entry.get("supports_pause")),
         fn=entry["fn"],
         inverse_builder=entry.get("inverse"),
+        persisted_args=(entry["persist_args"](args) if entry.get("persist_args") else None),
     )
     return {
         "pending_tool_result": {"tool": tool, "status": "started", "task_id": task_id},
