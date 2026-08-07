@@ -156,10 +156,13 @@ def check_tool_specs() -> None:
     assert "tc_read" in names and "tc_send" in names, names
     assert "tc_internal" not in names, "schema-less tool was advertised to the model"
     assert len(names) == len(set(names)), names
-    # The nine real file tools all carry schemas.
+    # Real file and managed-command tools carry schemas; the legacy command
+    # compatibility wrapper is internal-only.
     for real in ("file_read", "dir_list", "file_search", "file_create", "file_edit",
-                 "file_move", "file_delete", "dir_organize", "run_readonly_cmd"):
+                 "file_move", "file_delete", "dir_create", "dir_organize",
+                 "command_run", "script_run"):
         assert real in names, f"{real} not advertised"
+    assert "run_readonly_cmd" not in names
     for spec in specs:
         assert spec["type"] == "function", spec
         fn = spec["function"]
@@ -396,7 +399,7 @@ def check_cost_controls() -> None:
     assert graph._call_key(a) == graph._call_key(b), "arg order must not change the key"
     c = {"name": "file_read", "args": {"path": "/x", "offset": 50}}
     assert graph._call_key(a) != graph._call_key(c), "different offset is a different call"
-    assert graph._READONLY_TOOLS == {"dir_list", "file_search", "file_read", "run_readonly_cmd"}
+    assert graph._READONLY_TOOLS == {"dir_list", "file_search", "file_read"}
     assert "file_edit" not in graph._READONLY_TOOLS, "writes must never be suppressed"
     print("[check 2b] cost controls: B1 escalation decays, D1 budget reader, D2 call-keying: OK")
 

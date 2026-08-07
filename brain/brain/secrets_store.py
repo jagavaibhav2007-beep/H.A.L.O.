@@ -11,6 +11,7 @@ a plain file under that directory (test-only, no real app uses this).
 
 import logging
 import os
+import re
 import keyring
 import keyring.errors
 
@@ -20,6 +21,7 @@ SERVICE = "halo"
 KEY_NAME = "openrouter"
 STATUS_NAME = "openrouter_status"
 _VALID_STATUSES = {"set", "invalid", "unverified"}
+_REFERENCE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}\Z")
 
 
 # ponytail: the HALO_KEYRING_DIR test seam vs keyring fork lives here once.
@@ -57,6 +59,16 @@ def _backend_del(name: str) -> None:
         keyring.delete_password(SERVICE, name)
     except keyring.errors.PasswordDeleteError:
         pass  # Already deleted or never existed
+
+
+def resolve_reference(name: str) -> str:
+    """Resolve a named secret without ever accepting a path-like reference."""
+    if not _REFERENCE.fullmatch(name):
+        raise ValueError("invalid secret reference")
+    value = _backend_get(name)
+    if value is None:
+        raise ValueError(f"secret not found: {name}")
+    return value
 
 
 def _read_key() -> str | None:

@@ -900,12 +900,6 @@ gate.register(
 gate.register(
     "run_readonly_cmd", _run_cmd, tier=1,
     summary=lambda a: f"I want to run `{a['cmd']}`.",
-    schema=_schema(
-        "Run one read-only shell command and return its exit code, stdout and "
-        "stderr. ONLY 'git status', 'git log', 'git diff', 'dir' and 'ls' are "
-        "permitted; anything else, plus redirection (> | & ) and --output, is "
-        "refused. This is not a general shell.",
-        {"cmd": {"type": "string", "description": "e.g. 'git status' or 'ls /path'."}},
-        ["cmd"],
-    ),
+    # ponytail: compatibility for existing callers; command_run is the one
+    # model-visible path, so the model never has to choose between two runners.
 )
