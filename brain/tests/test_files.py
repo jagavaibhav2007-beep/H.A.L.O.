@@ -176,6 +176,32 @@ async def check_create_undo() -> None:
     print("[check 2] file_create: writes, redacts content, undo deletes it (trusted hash-guarded inverse): OK")
 
 
+async def check_dir_create_and_empty_only_undo() -> None:
+    inside = ROOT / "new-folder"
+    outside = OUT / "new-folder"
+    assert gate.classify("dir_create", {"path": str(inside)}) == 2
+    assert gate.classify("dir_create", {"path": str(outside)}) == 3
+
+    assert await _run("dir_create", {"path": str(inside)}) == "ok"
+    token = _activity()["undo_token"]
+    assert inside.is_dir()
+    await _undo(token)
+    assert not inside.exists()
+
+    inside.mkdir()
+    assert (await _run("dir_create", {"path": str(inside)})).startswith("error")
+    inside.rmdir()
+
+    await _run("dir_create", {"path": str(inside)})
+    token = _activity()["undo_token"]
+    (inside / "keep.txt").write_text("keep", encoding="utf-8")
+    await _undo(token)
+    assert inside.is_dir() and (inside / "keep.txt").exists()
+    (inside / "keep.txt").unlink()
+    inside.rmdir()
+    print("[check 2b] dir_create is exclusive and undo removes only an unchanged empty directory: OK")
+
+
 async def check_edit() -> None:
     p = ROOT / "edit.txt"
     p.write_text("alpha beta gamma", encoding="utf-8")
@@ -554,6 +580,7 @@ async def main() -> None:
     check_classify()
     check_stale_roots_are_pruned_without_replacing_defaults()
     await check_create_undo()
+    await check_dir_create_and_empty_only_undo()
     await check_edit()
     await check_move()
     await check_organize()

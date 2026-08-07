@@ -384,6 +384,20 @@ def _file_create(args: dict) -> dict:
     return {"path": str(p), "sha256": _sha(p)}
 
 
+def _dir_create(args: dict) -> dict:
+    p = _resolve(args["path"])
+    p.mkdir(parents=True, exist_ok=False)
+    return {"path": str(p)}
+
+
+def _dir_remove_empty(args: dict) -> None:
+    _resolve(args["path"]).rmdir()
+
+
+def _dir_create_inverse(_args: dict, result: dict) -> dict:
+    return {"tool": "dir_remove_empty", "args": {"path": result["path"]}}
+
+
 def _create_risky(args: dict) -> bool:
     p = _resolve(args["path"])
     return p.exists() or _is_repository_control(p) or not _in_roots(p)
@@ -781,6 +795,17 @@ gate.register(
         ["path", "content"],
     ),
 )
+gate.register(
+    "dir_create", _dir_create, tier=_path_tier("path", 2), mutating=True,
+    user_intent=_user_intent(("create", "make", "folder", "directory"), "path"),
+    summary=lambda a: f"I want to create the folder {a['path']}.",
+    inverse=_dir_create_inverse,
+    schema=_schema(
+        "Create one directory, including missing parents. Use this instead of a shell or generated script for a simple folder request. Fails if the final directory already exists.",
+        {"path": _PATH}, ["path"],
+    ),
+)
+gate.register("dir_remove_empty", _dir_remove_empty, tier=2)
 gate.register(
     "file_edit", _file_edit, tier=_path_tier("path", 2),
     mutating=True,
