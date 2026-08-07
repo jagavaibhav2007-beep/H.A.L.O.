@@ -86,3 +86,4 @@ logs/
 *.bak
 /.tmp/
 /tmp/
+/.worktrees/
