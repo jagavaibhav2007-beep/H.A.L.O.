@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from brain import gate
-from brain.commanding import analyze, normalize, redacted_args, run_managed
+from brain.commanding import (
+    PolicyRefusal, analyze, matches_user_intent, normalize, redacted_args, run_managed, validate_secrets,
+)
 from brain.tools.files import _roots
 
 
@@ -48,18 +50,24 @@ _COMMON = {
 def _register(tool: str, schema: dict) -> None:
     async def execute(args: dict, ctx):
         spec, decision = _request(tool, args)
+        if (ctx.admission_fingerprint and spec.fingerprint != ctx.admission_fingerprint) or decision.tier != ctx.tier:
+            raise PolicyRefusal("command changed after task admission")
         return await run_managed(spec, decision, ctx)
+
+    def validate(args: dict) -> None:
+        spec, _ = _request(tool, args)
+        validate_secrets(spec)
 
     gate.register(
         tool, execute,
-        validate=_hook(tool, lambda spec, _decision: spec),
+        validate=validate,
         tier=_hook(tool, lambda _spec, decision: decision.tier),
         destructive=_hook(tool, lambda _spec, decision: decision.destructive),
         mutating=_hook(tool, lambda _spec, decision: decision.mutating),
         redact=_hook(tool, lambda spec, _decision: redacted_args(spec)),
         persist_args=_hook(tool, lambda spec, _decision: redacted_args(spec)),
         approval_fingerprint=_hook(tool, lambda spec, _decision: spec.fingerprint),
-        user_intent=lambda _args, text: "run" in text.lower() or "execute" in text.lower(),
+        user_intent=lambda args, text: matches_user_intent(_request(tool, args)[0], text),
         task=True, supports_pause=False,
         title=lambda args: args.get("purpose") or f"Run {tool}",
         summary=lambda args: f"I want to {args.get('purpose') or 'run a managed command'}.",

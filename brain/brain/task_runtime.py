@@ -52,6 +52,7 @@ class TaskContext:
     tier: int
     supports_pause: bool
     broadcast: Broadcast
+    admission_fingerprint: str | None = None
     cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     pause_requested: asyncio.Event = field(default_factory=asyncio.Event)
     _seq: int = 0
@@ -181,6 +182,7 @@ class TaskRuntime:
         fn,
         inverse_builder=None,
         persisted_args: dict | None = None,
+        admission_fingerprint: str | None = None,
     ) -> str:
         if self._closing:
             raise RuntimeError("task runtime is shutting down")
@@ -219,7 +221,7 @@ class TaskRuntime:
             "step": 0,
             **({"steps_total": steps_total} if steps_total is not None else {}),
         })
-        context = TaskContext(task_id, lane, tier, supports_pause, self._broadcast)
+        context = TaskContext(task_id, lane, tier, supports_pause, self._broadcast, admission_fingerprint)
         runner = asyncio.create_task(self._run(
             context=context,
             conversation_id=conversation_id,
@@ -339,7 +341,15 @@ class TaskRuntime:
                 "activity",
                 gate._activity_frame(job["tool"], job["args"], ctx.task_id, True, job["tier"], ctx.lane, undo_token),
             )
-        await self._continue(job["conversation_id"], ctx.task_id, f"Task {ctx.task_id} stopped before completion.")
+        detail = ""
+        if output is not None:
+            from brain import gate
+            payload, _ = gate._cap_result(output)
+            detail = f" Untrusted partial result: {payload}"
+        await self._continue(
+            job["conversation_id"], ctx.task_id,
+            f"Task {ctx.task_id} stopped before completion.{detail}",
+        )
 
     async def _finish_failure(self, reason: str, output=None, **job) -> None:
         ctx: TaskContext = job["context"]
@@ -358,7 +368,15 @@ class TaskRuntime:
                 "activity",
                 gate._activity_frame(job["tool"], job["args"], ctx.task_id, True, job["tier"], ctx.lane, undo_token),
             )
-        await self._continue(job["conversation_id"], ctx.task_id, f"Task {ctx.task_id} failed: {reason}")
+        detail = ""
+        if output is not None:
+            from brain import gate
+            payload, _ = gate._cap_result(output)
+            detail = f" Untrusted partial result: {payload}"
+        await self._continue(
+            job["conversation_id"], ctx.task_id,
+            f"Task {ctx.task_id} failed: {reason}.{detail}",
+        )
 
     async def _continue(self, conversation_id: str, task_id: str, text: str) -> None:
         if self._continuation is not None and not self._closing:

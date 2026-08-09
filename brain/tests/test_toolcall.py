@@ -174,6 +174,9 @@ def check_tool_specs() -> None:
             assert req in fn["parameters"]["properties"], (fn["name"], req)
     # Tier must not leak into the advertisement -- the gate decides, not the model.
     assert "tier" not in json.dumps(specs), "tier leaked into tool specs"
+    prompt = graph._SYSTEM_PROMPT
+    for rule in ("dedicated structured tool", "command_run", "script_run", "expected_artifacts", "Do not install"):
+        assert rule in prompt, f"managed-command prompt rule missing: {rule}"
     print(f"[check 2] tool_specs: {len(specs)} tools advertised, schema-less excluded, shape valid: OK")
 
 

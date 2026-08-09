@@ -153,3 +153,29 @@ below when you work through that section.
   composer enabled, and accept a follow-up. Stop terminates queued tool calls
   instead of raising replacement permission cards. Ordinary orb click opens
   the workspace. Destructive approvals and destructive Undo were not executed.
+
+## Phase-3a managed-command foundation
+
+- [x] Normalization/policy covers structured argv, roots, scripts,
+      install/network/overwrite escalation, opaque-shell refusals, executable
+      identity, trusted-profile binding, outside path-bearing flags, destructive
+      Git escalation, custom environments, and current-user intent binding.
+- [x] Generated Python creates a PDF and succeeds only after `pypdf` plus
+      structural verification; exit-zero/missing and unchanged-overwrite cases
+      fail truthfully.
+- [x] Secret references stay out of approval/task/action/result projections and
+      split output chunks are redacted before broadcast.
+- [x] Native Windows Stop kills a spawned grandchild through the Job Object and
+      returns within the halt budget; the child begins suspended so it cannot
+      spawn before Job assignment.
+- [x] Task admission freezes the normalized fingerprint and policy tier across
+      queue waits; executable/cwd changes cannot acquire fresh authority later.
+- [x] Stdout/stderr live caps are independent, binary output is suppressed,
+      script scratch is capped, and artifact hashing does not block the event loop.
+- [x] Artifact leases span baseline through final verification; files above
+      256 MiB refuse, and a stalled PDF parser is killed at the operation deadline.
+- [x] Authenticated WebSocket -> Tier-3 approval -> TaskRuntime -> verified PDF
+      completes offline under `HALO_LLM_STUB`.
+- [ ] In the native UI with a real model, ask for a simple folder, project test,
+      and multi-step PDF respectively; confirm selection is `dir_create`,
+      `command_run`, then `script_run`, with no prose-only permission request.

@@ -1,6 +1,35 @@
 # Decisions
 _Architectural, structural, and system design choices._
 
+## Managed commands share one contained Lane-1 executor — 2026-08-07
+
+**What:** added model-visible `command_run` and `script_run` as durable
+TaskRuntime tools, plus typed `dir_create`. Direct execution is argv-only and
+generated Python/PowerShell is Tier 3. Approval binds the normalized request
+and executable identity. Windows Job Objects own descendant cleanup; output is
+bounded/redacted; declared artifacts, including PDFs, are verified separately
+from exit status. The old `run_readonly_cmd` remains only as a schema-less
+compatibility wrapper.
+
+**Why:** terminal access is useful capability but not authority. A single
+managed executor lets the Brain choose the cheapest capable route without
+creating an open shell, a second permission system, or a subprocess path that
+future Codex/Claude adapters could accidentally bypass.
+
+**Ponytail boundary:** command spec, policy, redaction, process management, and
+artifact checks deliberately live in one small module until independent reuse
+or churn proves a split valuable. Security boundaries were not simplified:
+unknowns fail Tier 3, opaque forms refuse, literal secrets fail before approval,
+and Stop is tested against grandchildren.
+
+**Hardening:** low-tier profiles belong only to the PATH-discovered executable,
+not a same-name file. Windows creates the child suspended before Job assignment.
+Task admission freezes both fingerprint and tier across queue waits. Custom
+environments and all non-read-only Git operations are Tier 3; destructive Git
+forms are marked destructive. Artifact hashing runs off the event loop, live
+output and script scratch are capped, and obvious literal credentials fail
+before approval. This is still same-user process containment, not an OS sandbox.
+
 ## Completed one-off documents retire after durable guidance migrates — 2026-08-03
 **Decision:** completed implementation plans, readiness snapshots, and one-time audit reports are removed from the active documentation surface after any still-live requirements move into `phases.md`, `VERIFY.md`, `systemdesign/`, `techstack/`, `ui_ux/`, or `mem/`. Git history is the archive for the original evidence and task-by-task narrative.
 

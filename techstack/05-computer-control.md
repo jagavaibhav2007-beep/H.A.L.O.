@@ -6,6 +6,11 @@ Design: [systemdesign/05-computer-control](../systemdesign/05-computer-control.m
 | Concern | Choice | Notes |
 |---|---|---|
 | File ops | Python stdlib (`pathlib`, `shutil`) | Lane 1, native |
+| Managed processes | `asyncio.create_subprocess_exec`, `shell=False` | Structured argv, closed stdin, per-stream live caps, threaded artifact verification |
+| Windows process trees | Native Job Objects via `ctypes` | Child starts suspended, is assigned, then resumes; kill-on-close contains descendants |
+| Generated scripts | Existing Python runtime / PowerShell | Always Tier 3; source hash persisted instead of source |
+| Artifact verification | `pathlib`, SHA-256, spawned `pypdf` verifier | 256 MiB/deadline bounds; exit zero alone is not success |
+| Command secrets | OS keystore references + streaming exact-value redaction | Suspicious literals/custom env escalate or refuse; no raw secret in tool metadata |
 | Launch/focus apps | Windows APIs (`subprocess`, `pywin32`) | Lane 1 |
 | GUI (primary) | **Windows UI Automation** via `uiautomation`/`pywinauto` | element-based |
 | GUI (fallback) | screenshot → model → `pyautogui` click/type | vision-based |

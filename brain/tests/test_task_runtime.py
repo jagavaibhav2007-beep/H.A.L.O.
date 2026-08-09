@@ -200,6 +200,10 @@ async def check_safe_persistence_and_structured_terminal_results() -> None:
         return None
 
     seen: list[dict] = []
+    continuations: list[str] = []
+
+    async def continuation(_conversation_id: str, text: str, _task_id: str) -> None:
+        continuations.append(text)
 
     async def fail(args: dict, _ctx) -> dict:
         seen.append(args)
@@ -208,7 +212,7 @@ async def check_safe_persistence_and_structured_terminal_results() -> None:
     async def stop(_args: dict, _ctx) -> dict:
         raise TaskStopped({"artifacts": [{"status": "partial"}]})
 
-    runtime = TaskRuntime(broadcast, concurrency=1)
+    runtime = TaskRuntime(broadcast, continuation, concurrency=1)
     raw = {"source": "secret source", "target": "report.pdf"}
     await runtime.submit(
         task_id="safe-failure", conversation_id="tasks", tool="command",
@@ -221,6 +225,8 @@ async def check_safe_persistence_and_structured_terminal_results() -> None:
     assert seen == [raw]
     assert "secret source" not in failed["args_json"]
     assert json.loads(failed["result_json"])["artifacts"][0]["status"] == "invalid"
+    await wait_until(lambda: len(continuations) >= 1)
+    assert '"status": "invalid"' in continuations[-1]
 
     await runtime.submit(
         task_id="safe-stop", conversation_id="tasks", tool="command",
@@ -231,6 +237,8 @@ async def check_safe_persistence_and_structured_terminal_results() -> None:
     stopped = store.get_task("safe-stop")
     assert stopped["reason"] == "stopped"
     assert json.loads(stopped["result_json"])["artifacts"][0]["status"] == "partial"
+    await wait_until(lambda: len(continuations) >= 2)
+    assert '"status": "partial"' in continuations[-1]
     await runtime.close()
     print("[check 4b] raw args stay in memory; safe args and structured failure/stop results persist: OK")
 

@@ -147,6 +147,16 @@ def check_classify_table() -> None:
     print("[check 1] classify table: T1/T2/T3, unknown->3 with empty redaction, exception->3: OK")
 
 
+def check_hidden_edit_fields() -> None:
+    original = {"source": "hidden program", "timeout": 30, "optional": "remove me"}
+    redacted = {"timeout": 30, "optional": "remove me"}
+    edited = {"timeout": 60}
+    assert gate._apply_redacted_edits(original, redacted, edited) == {
+        "source": "hidden program", "timeout": 60,
+    }
+    print("[check 1a] approval edits preserve undisclosed fields while displayed omissions still delete: OK")
+
+
 def check_result_cap() -> None:
     # An oversized list result must stay VALID JSON after capping -- the old
     # byte-slice cut mid-token and the model got garbage. Newest-first entries
@@ -484,6 +494,7 @@ async def check_restart_durability(port: int, token: str) -> None:
 
 async def main() -> None:
     check_classify_table()
+    check_hidden_edit_fields()
     check_result_cap()
     await check_dynamic_mutation_and_validation_hooks()
     await check_sync_tool_does_not_block_event_loop()

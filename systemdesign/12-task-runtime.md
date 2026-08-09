@@ -1,7 +1,7 @@
 # System Design: Task Runtime
 
-Status: **implemented in the Phase 2 exit-hardening tranche.** `dir_organize`
-and `doc_digest` are the first task-shaped tools; every Phase 3 sub-phase
+Status: **implemented in the Phase 2 exit-hardening tranche.** `dir_organize`,
+`doc_digest`, `command_run`, and `script_run` are task-shaped tools; every Phase 3 sub-phase
 (3a–3e) inherits this runtime.
 
 ## Problem
@@ -76,3 +76,6 @@ minor-version additions admitted by the A6 versioning scheme.
    500-chunk UI tail.
 4. `shared/phase2_check.py` exercises `doc_digest` through the authenticated
    WebSocket and verifies its durable terminal result and continuation.
+5. `brain/tests/test_commands.py` exercises command approval, safe task-arg
+   persistence, bounded logs/results, Job Object descendant cancellation,
+   secret redaction, and verified PDF output through the authenticated socket.

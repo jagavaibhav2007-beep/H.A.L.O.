@@ -185,10 +185,12 @@ def _apply_redacted_edits(original, redacted, edited):
         return original
     if isinstance(edited, dict) and isinstance(redacted, dict):
         source = original if isinstance(original, dict) else {}
-        return {
+        result = {
             key: _apply_redacted_edits(source.get(key), redacted.get(key), value)
             for key, value in edited.items()
         }
+        result.update((key, value) for key, value in source.items() if key not in redacted)
+        return result
     if isinstance(edited, list) and isinstance(redacted, list):
         source = original if isinstance(original, list) else []
         return [
@@ -288,6 +290,8 @@ async def gated_execute(
                 "messages": [{"role": "assistant", "content": f"I couldn't run {tool}: {exc}"}],
             }
         tier = classify_for_request(tool, args, user_text) if user_text is not None else classify(tool, args)
+        fingerprint_fn = entry.get("approval_fingerprint") if entry else None
+        fingerprint = fingerprint_fn(args) if fingerprint_fn else None
         if tier != 3:
             break
         payload = {
@@ -307,8 +311,6 @@ async def gated_execute(
             # across a restart for rehydrate_pending too.
             "conversation_id": conversation_id,
         }
-        fingerprint_fn = entry.get("approval_fingerprint") if entry else None
-        fingerprint = fingerprint_fn(args) if fingerprint_fn else None
         if fingerprint is not None:
             payload["_approval_fingerprint"] = fingerprint
         decision = interrupt(payload)  # C2: never inside a try/except
@@ -337,7 +339,7 @@ async def gated_execute(
 
     if entry and entry.get("task"):
         return await _start_task_tail(
-            tool, args, tier, frame_task, conversation_id, broadcast,
+            tool, args, tier, frame_task, conversation_id, broadcast, fingerprint,
         )
     return await _execute_tail(tool, args, tier, frame_task, broadcast)
 
@@ -352,6 +354,7 @@ async def _start_task_tail(
     task_id: str,
     conversation_id: str,
     broadcast,
+    admission_fingerprint: str | None,
 ) -> dict:
     from brain import task_runtime
 
@@ -382,6 +385,7 @@ async def _start_task_tail(
         fn=entry["fn"],
         inverse_builder=entry.get("inverse"),
         persisted_args=(entry["persist_args"](args) if entry.get("persist_args") else None),
+        admission_fingerprint=admission_fingerprint,
     )
     return {
         "pending_tool_result": {"tool": tool, "status": "started", "task_id": task_id},

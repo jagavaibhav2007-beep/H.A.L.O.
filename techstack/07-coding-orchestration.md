@@ -6,7 +6,7 @@ Design: [systemdesign/07-coding-orchestration](../systemdesign/07-coding-orchest
 | Concern | Choice | Notes |
 |---|---|---|
 | Agents | **Codex CLI**, **Claude CLI** | driven as subprocesses in the project dir |
-| Spawn/stream | Python `asyncio` subprocess | stream stdout, parse results |
+| Spawn/stream | Shared managed-command executor | `asyncio` argv-only spawn, Job Object containment, bounded/redacted streams |
 | As a task | Existing Brain `TaskRuntime` + `TaskContext` | Separate from interactive turn slots; bounded logs; cooperative terminate→kill |
 | Durability | Intent/result task rows + reconcile-on-startup | Interrupted subprocesses become truthful terminal results; never auto-replay side effects |
 | Repo context | git + file reads (Lane 1) | status/diff gathering |

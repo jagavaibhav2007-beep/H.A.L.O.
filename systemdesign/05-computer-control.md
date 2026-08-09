@@ -4,6 +4,7 @@ How Halo acts on the machine, and the three-lane model for *how* it acts.
 
 ## Capabilities
 - **Files:** inspect, create, edit, move, organize — via native filesystem calls (Tier 1–2 per [permissions](04-permissions.md)).
+- **Commands:** run installed CLIs or generated Python/PowerShell as bounded, durable Lane-1 tasks. Simple file/folder work still uses typed file tools.
 - **Apps:** open/focus apps; drive them when needed.
 - **GUI:** click/type into desktop apps that have no API.
 
@@ -21,6 +22,44 @@ task → has fast path? → Lane 1
                      → else default Lane 2, announce it
 ```
 Halo **always states the lane it used**; user can pin per task.
+
+## Managed command execution (implemented Phase-3a foundation)
+
+`command_run` accepts an executable plus a structured argv list; `script_run`
+accepts generated source only when real program logic is the economical route.
+Neither accepts an unparsed shell command. Both normalize the executable, cwd,
+arguments, environment references, timeout, and expected artifacts before the
+permission gate classifies them.
+
+- Known read-only profiles may run at Tier 1; explicit project-local runners
+  may run at Tier 2 when the current user message names both operation and
+  target. Unknown commands, generated scripts, network use, installs,
+  overwrites, and paths outside registered roots are Tier 3.
+- `cmd /c`, encoded PowerShell, detached/background execution, and broad
+  disk/boot/elevation tools are refused by the generic runner.
+- Processes run with `shell=False`, closed stdin, a minimal child environment,
+  independent 256 KiB live caps, bounded head/tail results, binary suppression,
+  and exact secret-value redaction. Generated-script scratch is capped at 64 MiB.
+- Windows children start suspended, enter a kill-on-close Job Object, and only
+  then resume. Stop and timeout therefore cover the complete descendant tree,
+  including grandchildren, without a pre-assignment escape window.
+- Requested outputs must be declared. A zero exit code with a missing, invalid,
+  or unchanged overwrite target is a failed task. PDFs receive structural and
+  parser verification in a disposable helper process; verification shares the
+  operation deadline and rejects files above 256 MiB. Useful artifacts from
+  non-zero exits remain visible as partial results.
+- Approval is bound to a digest of the resolved executable identity and exact
+  normalized request. Only the PATH-discovered executable may inherit a known
+  low-tier profile. Fingerprint and tier are frozen at task admission and both
+  are rechecked after any queue wait and immediately before spawn.
+  Raw generated source remains only in the resumable local graph checkpoint;
+  approvals, action rows, task args, logs, and continuations use hashes and
+  redacted metadata.
+
+This is process containment and permission gating, not a host sandbox: an
+approved project script still has the operating-system access of the Halo user.
+Unknown tools, custom environments, installs, networking, and generated source
+remain Tier 3 so that limitation is visible at the authority boundary.
 
 ## GUI mechanism (Lanes 2/3)
 - **Primary: Windows UI Automation** — drive by real UI elements (reliable).

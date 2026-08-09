@@ -7,6 +7,11 @@ Halo directs Codex/Claude to build, continue, refactor, debug — including impr
 
 ## Mechanism
 - The Brain spawns the coding-agent **CLI** as a subprocess in the target project dir, streams its output, and parses results.
+- The shared subprocess boundary is now implemented by `command_run` /
+  `script_run`: normalized argv, executable-identity binding, deterministic
+  tier policy, Job Object containment, bounded redacted output, and artifact
+  verification. Codex/Claude adapters must compose this executor rather than
+  adding another subprocess path.
 - The permission gate classifies the request before side effects, then submits a task-shaped tool to the implemented [TaskRuntime](12-task-runtime.md). The interactive LangGraph turn returns after reporting the task start; it never owns the subprocess lifetime.
 - `TaskContext.log()` carries coalesced output to the bounded `task_log` tail. Cooperative stop terminates the subprocess and escalates to kill within the runtime's halt budget.
 - Restart reconciliation reports an interrupted run truthfully and never blindly replays it. A future agent adapter may resume only when that CLI exposes a durable, explicitly verified resume token.
