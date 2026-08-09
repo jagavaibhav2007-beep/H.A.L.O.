@@ -322,7 +322,7 @@ interface HoldProps {
 // the hold's progress feedback is essential, not decoration. Cancels the
 // instant the pointer leaves or the key lifts (design: "cancels if the pointer
 // leaves the button"). Keyboard equivalent: hold Enter or Space.
-function HoldButton({ label, busyLabel, busy, disabled, hintId, onComplete }: HoldProps) {
+export function HoldButton({ label, busyLabel, busy, disabled, hintId, onComplete }: HoldProps) {
   const [progress, setProgress] = useState(0);
   const rafRef = useRef<number | null>(null);
   const firedRef = useRef(false);
