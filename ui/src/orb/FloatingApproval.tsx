@@ -41,7 +41,7 @@ export function FloatingApproval({ approval, count, connected, sendApprovalRespo
           <Button onClick={() => respond("approve")} disabled={!connected}>Approve</Button>
         )}
         <Button variant="ghost" onClick={() => respond("deny")} disabled={!connected}>Deny</Button>
-        <Button variant="ghost" onClick={onReview} disabled={!connected}>Review</Button>
+        <Button variant="ghost" onClick={onReview}>Review</Button>
       </div>
     </section>
   );

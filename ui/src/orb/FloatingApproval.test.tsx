@@ -84,7 +84,7 @@ test("does not dismiss a request when the approval response is not sent", () => 
   expect(useHaloStore.getState().approvals["approval-1"]).toBeDefined();
 });
 
-test("disables every action while disconnected without sending a response", () => {
+test("keeps review available while disabling disconnected decisions", () => {
   const send = vi.fn(() => true);
   const review = vi.fn();
   useHaloStore.setState({ approvals: { "approval-1": approval } });
@@ -99,13 +99,14 @@ test("disables every action while disconnected without sending a response", () =
     />,
   );
 
-  for (const name of ["Approve", "Deny", "Review"]) {
+  for (const name of ["Approve", "Deny"]) {
     const action = screen.getByRole("button", { name });
     expect((action as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(action);
   }
+  fireEvent.click(screen.getByRole("button", { name: "Review" }));
   expect(send).not.toHaveBeenCalled();
-  expect(review).not.toHaveBeenCalled();
+  expect(review).toHaveBeenCalledOnce();
 });
 
 test("sends a denial through the same guarded action", () => {
