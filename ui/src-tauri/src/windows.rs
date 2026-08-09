@@ -317,6 +317,12 @@ mod tests {
     }
 
     #[test]
+    fn orb_webview_may_resize_for_inline_approvals() {
+        let capability = include_str!("../capabilities/default.json");
+        assert!(capability.contains("\"core:window:allow-set-size\""));
+    }
+
+    #[test]
     fn oversized_window_clamps_to_monitor_origin_without_panicking() {
         assert_eq!(clamp_axis(2_000, 0, 1_366, 3_000), 0);
         assert_eq!(clamp_axis(-5_000, -1_920, 1_920, 2_500), -1_920);

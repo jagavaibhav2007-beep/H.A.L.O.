@@ -65,8 +65,10 @@ export function useApprovalWindow(expanded: boolean) {
         wasExpandedRef.current = false;
         collapsedPositionRef.current = null;
         expandedPositionRef.current = null;
-      } catch {
-        // A transient native-window failure should not take down the companion.
+      } catch (error) {
+        // Keep the companion alive, but never hide a clipped approval panel
+        // behind a swallowed native permission/window error again.
+        console.error("halo: failed to resize the approval pill", error);
       }
     })();
   }, [expanded]);

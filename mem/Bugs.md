@@ -1,5 +1,12 @@
 # Bugs
 
+## Floating approval panel was clipped behind its badge — 2026-08-09
+**Severity:** High UX (user-reported and reproduced in the native app).
+**Symptom:** an approval reached the floating pill and incremented its badge, but the window stayed 360×52; the user had to open the workspace to approve.
+**Root cause:** `useApprovalWindow` called Tauri's `setSize`, but `ui/src-tauri/capabilities/default.json` omitted `core:window:allow-set-size`. The rejected promise was swallowed, so the rendered 360×224 approval panel remained clipped with no diagnostic.
+**Fix:** granted the missing window capability, logged resize failures, and added a native regression asserting the capability remains present. A live mock approval expanded the real native window from 360×52 to 360×224. The Review fallback already restores a minimized workspace through `restore_workspace`.
+**Never do:** when frontend code calls a permissioned Tauri API, verify the capability manifest and exercise the real native window; do not swallow the error or treat a DOM/component test as proof that the native host resized.
+
 ## Mock serialization CI check consumed an unrelated broadcast token — 2026-08-03
 **Severity:** High (the first verification run on merged `main` failed after every setup and dependency check passed).
 **Symptom:** `check_same_conversation_is_serialized` occasionally received `['token', 'token']` instead of `['token', 'error']` on a hosted Windows runner, while repeated local runs passed.
