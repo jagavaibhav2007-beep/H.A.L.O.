@@ -1,6 +1,6 @@
 /* The companion capsule — ui_ux/01-companion-orb.md "Anatomy". Fixed size
-   (360x52, matches the orb window in tauri.conf.json exactly), never
-   resized -- there is no resize code here at all. */
+   no longer applies: it is 360x52 collapsed and 360x224 while an approval is
+   pending. */
 html,
 body,
 #root {
@@ -94,7 +94,7 @@ body,
   height: 170px;
   padding: 8px 16px 14px;
   border-top: 1px solid var(--cap-border);
-  animation: approval-panel-enter 220ms var(--ease-out);
+  animation: approval-panel-enter var(--motion-base) var(--ease-out);
 }
 .floating-approval {
   display: grid;
