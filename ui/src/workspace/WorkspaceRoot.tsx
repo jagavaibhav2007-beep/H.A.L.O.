@@ -3,15 +3,9 @@
 // panels. Spec: phase-1-plan.md and ui_ux/02-workspace.md.
 
 import { useEffect, useRef, useState } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import {
-  isPermissionGranted,
-  onAction,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
 import { GlassPanel } from "../components/GlassPanel";
 import { Sidebar } from "./Sidebar";
 import { StatusStrip } from "./StatusStrip";
@@ -26,7 +20,6 @@ import { useStoreConnection } from "../state/useStoreConnection";
 import {
   useHaloStore,
   selectActiveView,
-  selectApprovals,
   selectActiveConversationId,
   selectBrainStatus,
   selectGlobalErrors,
@@ -96,45 +89,6 @@ export function WorkspaceRoot() {
     ),
   ];
   const workspaceError = workspaceErrors[workspaceErrors.length - 1];
-
-  // Away flow (Step 10): a pending approval that arrives while this window is
-  // hidden fires a Windows toast; clicking it opens the workspace (Rust
-  // `show_workspace`), where the card is already waiting as an overlay. Only
-  // the workspace window toasts (it alone knows its own visibility) so the orb
-  // window doesn't double-fire. onAction click delivery is best-effort on
-  // Windows desktop; if it doesn't land the orb's amber badge is still the way
-  // back — see mem/Gotchas.md.
-  const approvals = useHaloStore(selectApprovals);
-  const toastedRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    // Keep the dedupe set bounded to what's actually pending — otherwise it
-    // grows one id per approval for the window's whole lifetime.
-    for (const id of toastedRef.current) {
-      if (!(id in approvals)) toastedRef.current.delete(id);
-    }
-    if (!isTauri()) return;
-    let cancelled = false;
-    void (async () => {
-      const visible = await getCurrentWindow().isVisible();
-      if (cancelled || visible) return;
-      const fresh = Object.values(approvals).filter((a) => !toastedRef.current.has(a.approval_id));
-      if (fresh.length === 0) return;
-      if (!((await isPermissionGranted()) || (await requestPermission()) === "granted")) return;
-      for (const a of fresh) {
-        toastedRef.current.add(a.approval_id);
-        sendNotification({ title: "Halo needs your OK", body: a.summary ?? `Approve ${a.tool}?` });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [approvals]);
-
-  useEffect(() => {
-    if (!isTauri()) return;
-    const p = onAction(() => void invoke("show_workspace"));
-    return () => void p.then((unlisten) => unlisten.unregister());
-  }, []);
 
   // Ctrl+K focuses the chat input from anywhere — not Tauri-specific, so it
   // works in the D9 browser fallback too.

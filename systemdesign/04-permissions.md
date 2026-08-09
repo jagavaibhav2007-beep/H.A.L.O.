@@ -32,7 +32,7 @@ yet to be designed and implemented; do not assume the code already does it.
 tool call → classify → Tier 3
    → LangGraph interrupt() (state checkpointed)
    → if user present: UI approval card (Approve / Deny / Edit)
-   → if away: pause silently + native desktop notification
+   → if away: pause; keep the floating companion expanded until the user decides
    → on approve: resume graph from checkpoint
    → on deny: graph takes the "denied" branch, continues what it can
 ```
@@ -48,9 +48,9 @@ In the signed-in browser: read/navigate = Tier 1. **Any click that submits, send
 - `undo_token` records the inverse where possible (moved file → move back; created file → delete). Undo surfaced in the activity feed.
 
 ## Away detection
-- No **user-generated** input for 5 minutes (proposed default, tunable) → "away." Tier-3 gates then pause + notify instead of blocking silently.
+- No **user-generated** input for 5 minutes (proposed default, tunable) → "away." Tier-3 gates still pause and remain visible in the always-on-top companion.
 - Input injected by Halo itself (Lane-2 takeover is driving the mouse/keyboard) **doesn't count as user presence** — detection uses last *physical* input (`GetLastInputInfo`) minus Halo-injected events, so a takeover session doesn't mask the user actually being away.
 
 ## Failure handling
 - Unknown/unclassifiable tool → **default to Tier 3** (fail safe, ask).
-- Notification system unavailable → still pause; show the pending approval on next UI focus.
+- Floating companion unavailable → still pause; show the pending approval on the next UI connection.

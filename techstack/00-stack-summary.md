@@ -5,7 +5,7 @@ The global stack. Per-feature files list only what's *specific* to that feature 
 ## Backbone
 | Concern | Choice | Why (cheap / efficient / quality) |
 |---|---|---|
-| **App shell** | **Tauri** (Rust core + web UI) | ~10× lighter RAM than Electron; native tray + notifications; fits an always-resident app |
+| **App shell** | **Tauri** (Rust core + web UI) | ~10× lighter RAM than Electron; native tray + always-on-top windows; fits an always-resident app |
 | **UI** | **React** + CSS (glassmorphism) | biggest component ecosystem for the premium look |
 | **Brain** | **Python + LangGraph** | provider-agnostic agent loop; **checkpointer** = resumable tasks; **`interrupt()`** = Tier-3 gate for free |
 | **Model access** | **OpenRouter** (one API key, many models) | provider-agnostic routing; per-task cost control |

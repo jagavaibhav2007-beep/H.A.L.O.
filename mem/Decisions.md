@@ -1,6 +1,19 @@
 # Decisions
 _Architectural, structural, and system design choices._
 
+## Floating pill is the sole approval notification surface — 2026-08-09
+
+**What:** removed per-approval Windows desktop toasts and the Tauri notification
+plugin. Tier-3 work still pauses, while the always-on-top companion expands with
+Approve, Deny, and Review controls.
+
+**Why:** the toast duplicated the actionable floating pill and appeared as
+repeated PowerShell notifications in development. One persistent approval
+surface is clearer and cannot create notification spam.
+
+**Tradeoff:** Halo no longer posts an Action Center entry for approvals. A
+pending request remains checkpointed and visible when the companion reconnects.
+
 ## Managed commands share one contained Lane-1 executor — 2026-08-07
 
 **What:** added model-visible `command_run` and `script_run` as durable

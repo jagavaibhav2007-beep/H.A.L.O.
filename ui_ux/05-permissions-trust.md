@@ -39,7 +39,7 @@ as the card. Requests wait for an explicit response forever: no timeout
 approval and no focus theft.
 
 ## When you're away
-Task pauses silently → Windows toast: "Halo is waiting for your OK." Clicking it opens the workspace focused on the card. The orb stays amber the whole time — walking past your desk tells you something's waiting.
+The task pauses and the always-on-top companion stays expanded and amber until you decide. Halo does not send a second OS notification for the same approval.
 
 ## Undo & the audit trail
 - Every action lands in the **Activity feed** with its tier chip. Undoable ones show **Undo** for as long as the inverse exists; irreversible ones are marked "not reversible" *before* you rely on them (`undoable:false` from the IPC contract — the UI never implies false safety).

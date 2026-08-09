@@ -84,9 +84,9 @@ In the signed-in browser, Halo may **read and navigate freely**, but **any click
 - **Undo** wherever technically possible.
 
 ### Away behavior
-- If a Tier-3 approval is needed while you're away, Halo **pauses silently and waits** — it does not guess or skip ahead.
-- It fires a **native desktop notification** (Windows toast — free, on-device, no cloud service) so you know it's waiting.
-- No phone/push notifications in scope (would require a paid service).
+- If a Tier-3 approval is needed while you're away, Halo **pauses and waits** — it does not guess or skip ahead.
+- The always-on-top companion expands and stays amber with the approval controls visible until you decide.
+- No duplicate OS toast or phone/push notification is sent for the same approval.
 
 ---
 

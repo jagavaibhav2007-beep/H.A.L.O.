@@ -22,7 +22,7 @@ The expanded window — orb grows into a full glass app (user decision: **left s
 ## Navigation rules
 - One primary view at a time; no drawers over drawers. Switching views preserves each view's scroll and state.
 - Approval cards are **overlays anchored bottom-center of the main view**, never a new window — whatever view you're in, the card comes to you.
-- Deep-jump affordances: clicking the orb's amber badge, a toast, or a task chip lands directly on the relevant card/task.
+- Deep-jump affordances: clicking the orb's amber badge or a task chip lands directly on the relevant card/task.
 
 ## First-run onboarding (5 steps, ~2 min, skippable)
 1. **Pick your hotkey** (default `Alt+Space`) — try it once.

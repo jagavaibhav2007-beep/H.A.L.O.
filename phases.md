@@ -84,7 +84,7 @@ Source of truth for *what* each thing does stays in [Halo-PRD.md](Halo-PRD.md), 
 ## Explicitly deferred (not in early build)
 
 - **Lane 3 sandbox** — until Win 11 Pro upgrade or a VirtualBox setup (PRD §15).
-- **Phone/push notifications** — out of scope; native Windows toast only (PRD §5).
+- **Phone/push and OS approval notifications** — out of scope; the floating companion is the sole approval notification surface (PRD §5).
 - **Decay/retirement threshold tuning** — ship the proposed defaults, tune with real usage (PRD §15).
 
 ## How to use this file

@@ -87,7 +87,6 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(sidecars.clone())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 // ponytail: POSITION+SIZE only — VISIBLE would fight the

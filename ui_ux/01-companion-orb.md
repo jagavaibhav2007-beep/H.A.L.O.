@@ -70,4 +70,4 @@ Short narration renders **inline in the capsule**, beside the orb: live transcri
 
 ## When the window is closed
 
-The capsule never disappears while Halo runs; quitting is explicit (right-click → Quit). If the user is away and a Tier-3 gate fires: the approval chip goes amber **and** a Windows toast fires ([systemdesign/04-permissions](../systemdesign/04-permissions.md)). Clicking the toast opens the workspace focused on the approval card.
+The capsule never disappears while Halo runs; quitting is explicit (right-click → Quit). If the user is away and a Tier-3 gate fires, the capsule expands and stays amber with the approval controls waiting. Halo does not duplicate this with a Windows toast.
