@@ -13,6 +13,7 @@ import { Icon } from "../components/Icon";
 import { useStoreConnection } from "../state/useStoreConnection";
 import {
   useHaloStore,
+  selectApprovals,
   selectBrainStatus,
   selectPendingApprovalCount,
   selectTasks,
@@ -21,6 +22,8 @@ import {
 } from "../state/store";
 import { LANE_ICON, LANE_LABEL, formatTaskProgress } from "../lib/lanes";
 import { usePeekSource, PEEK_DISMISS_MS } from "./usePeekSource";
+import { FloatingApproval } from "./FloatingApproval";
+import { useApprovalWindow } from "./useApprovalWindow";
 import "../styles/glass.css";
 import "./OrbRoot.css";
 
@@ -43,7 +46,7 @@ export function OrbRoot() {
 
   // The orb window owns its own live connection + store instance, wired the
   // same way the workspace is (each webview boots its own -- see store.ts).
-  useStoreConnection();
+  const { connState, sendApprovalResponse } = useStoreConnection();
 
   // Narration renders inline beside the orb -- the capsule has room, unlike
   // the old 64px circle (ui_ux/01-companion-orb.md "Narration"). A local
@@ -65,7 +68,10 @@ export function OrbRoot() {
     [],
   );
 
+  const approvals = useHaloStore(selectApprovals);
   const approvalCount = useHaloStore(selectPendingApprovalCount);
+  const activeApproval = Object.values(approvals)[0];
+  useApprovalWindow(Boolean(activeApproval));
   const brainStatus = useHaloStore(selectBrainStatus);
   const tasks = useHaloStore(selectTasks);
   const voice = useHaloStore(selectVoice);
@@ -175,6 +181,7 @@ export function OrbRoot() {
   // a cross-window nav channel. stopPropagation on pointerdown so the click
   // doesn't also register as the body's drag/click gesture.
   const stopChipPointer = useCallback((e: React.PointerEvent) => e.stopPropagation(), []);
+  const stopApprovalPointer = useCallback((e: React.PointerEvent) => e.stopPropagation(), []);
   const onChipClick = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!isTauri()) return;
@@ -183,6 +190,9 @@ export function OrbRoot() {
     const pos = (await win.outerPosition()).toLogical(scale);
     await invoke("toggle_workspace", { orbX: pos.x, orbY: pos.y });
   }, []);
+  const onReview = useCallback(() => {
+    if (isTauri()) void invoke("show_workspace");
+  }, []);
 
   const capsule = (
     // Not .glass: the capsule paints its own fixed midnight surface — native
@@ -190,6 +200,14 @@ export function OrbRoot() {
     // capsule must look identical in light/dark theme.
     <div className="capsule">
       <div className="capsule-glow" aria-hidden="true" />
+      <div
+        className="capsule-status"
+        onPointerDown={isTauri() ? onPointerDown : undefined}
+        onPointerMove={isTauri() ? onPointerMove : undefined}
+        onPointerUp={isTauri() ? onPointerUp : undefined}
+        onPointerCancel={isTauri() ? onPointerCancel : undefined}
+        onContextMenu={isTauri() ? onContextMenu : undefined}
+      >
       {/* Narration is the live transcript ("you always see what it heard",
           ui_ux/04-voice.md) — but this window never takes focus, so a screen
           reader only ever reaches it through a live region. The region is
@@ -274,26 +292,28 @@ export function OrbRoot() {
           <Icon icon={capabilities.voiceInput === true && voice.state !== "muted" ? Mic : MicOff} size={16} />
         </span>
       </div>
+      </div>
+      {activeApproval && (
+        <div
+          className="approval-panel"
+          onPointerDown={stopApprovalPointer}
+          onPointerMove={stopApprovalPointer}
+          onPointerUp={stopApprovalPointer}
+          onPointerCancel={stopApprovalPointer}
+        >
+          <FloatingApproval
+            approval={activeApproval}
+            count={approvalCount}
+            connected={connState === "connected"}
+            sendApprovalResponse={sendApprovalResponse}
+            onReview={onReview}
+          />
+        </div>
+      )}
     </div>
   );
 
-  // D9 browser fallback: no OS window to drag/expand, just the visual.
-  if (!isTauri()) {
-    return <div className="capsule-hit-area">{capsule}</div>;
-  }
-
-  return (
-    <div
-      className="capsule-hit-area"
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerCancel}
-      onContextMenu={onContextMenu}
-    >
-      {capsule}
-    </div>
-  );
+  return <div className="capsule-hit-area">{capsule}</div>;
 }
 
 // Small SVG progress ring for the task chip. Indeterminate spin is killed by

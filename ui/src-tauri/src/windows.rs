@@ -17,6 +17,11 @@ use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, HGDIOBJ, S
 
 const PRIMARY_HOTKEY: &str = "alt+space";
 const FALLBACK_HOTKEY: &str = "ctrl+alt+space";
+const CAPSULE_CORNER_RADIUS_LOGICAL: f64 = 26.0;
+
+fn capsule_corner_diameter_logical(_window_height: f64) -> f64 {
+    CAPSULE_CORNER_RADIUS_LOGICAL * 2.0
+}
 
 /// Which hotkey ended up registered (primary or fallback) — read by the
 /// `active_hotkey` command so a later step's status strip can show it
@@ -171,19 +176,20 @@ fn clamp_axis(position: i32, monitor_start: i32, monitor_extent: u32, window_ext
 
 #[cfg(windows)]
 fn clip_window_to_capsule(window: &tauri::WebviewWindow<Wry>) {
-    let (Ok(hwnd), Ok(size)) = (window.hwnd(), window.outer_size()) else {
+    let (Ok(hwnd), Ok(size), Ok(scale)) = (window.hwnd(), window.outer_size(), window.scale_factor()) else {
         return;
     };
     let width = size.width.min(i32::MAX as u32) as i32;
     let height = size.height.min(i32::MAX as u32) as i32;
+    let corner_diameter = (capsule_corner_diameter_logical(size.height as f64 / scale) * scale).round() as i32;
     let region = unsafe {
         CreateRoundRectRgn(
             0,
             0,
             width.saturating_add(1),
             height.saturating_add(1),
-            height,
-            height,
+            corner_diameter,
+            corner_diameter,
         )
     };
     if region.is_invalid() {
@@ -302,7 +308,13 @@ pub fn teardown(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_axis, should_hide_workspace};
+    use super::{capsule_corner_diameter_logical, clamp_axis, should_hide_workspace};
+
+    #[test]
+    fn capsule_corners_stay_26_logical_px_at_both_pill_heights() {
+        assert_eq!(capsule_corner_diameter_logical(52.0), 52.0);
+        assert_eq!(capsule_corner_diameter_logical(224.0), 52.0);
+    }
 
     #[test]
     fn oversized_window_clamps_to_monitor_origin_without_panicking() {
