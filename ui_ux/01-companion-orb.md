@@ -46,6 +46,22 @@ Every state also reads via icon/text, never colour alone (reduced-motion and col
 - **Voice needs no interaction** — say "Halo…" from anywhere; the orb acknowledges while collapsed.
 - Press-scale 0.97 on tappable chips; hover raises chip contrast.
 
+## Floating approvals
+
+When a request needs consent, the 360×52px capsule grows in place to 360×224px.
+The expanded lower panel shows the plain-language summary, tool name, pending
+count, and **Approve**, **Deny**, and **Review details** controls; it never
+shows unredacted arguments. The oldest pending request is first. Resolving one
+advances to the next without collapsing, then the capsule returns to 360×52px
+only when none remain. **Review details** opens the full workspace, where the
+user can inspect arguments and Edit before deciding.
+
+Approve and Deny are unavailable while the Brain is disconnected, but Review
+details remains available. Destructive requests use the same visible 700ms
+hold-to-approve as the workspace card. The capsule stays non-focusing: an
+approval must never steal the active app or approve by timeout. Its expanded
+bounds stay within the current monitor work area, including mixed-DPI setups.
+
 ## Narration
 
 Short narration renders **inline in the capsule**, beside the orb: live transcript while you speak, one-line narration of main task events, "made a new skill" notices. Auto-clears after 4s.

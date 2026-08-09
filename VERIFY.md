@@ -57,6 +57,25 @@ focus must remain visible, and no panel may clip at the minimum window size.
 - [ ] Voice moves wake -> listening -> partial ghost -> final user bubble ->
       thinking -> speaking -> barge-in listening -> speaking -> idle.
 - [ ] The orb shows task, approval, voice, error, and muted states without color alone.
+- [ ] A pending approval expands the floating pill from 360×52px to 360×224px;
+      resolving the final request collapses it without stealing focus.
+- [ ] A regular floating approval can Approve and Deny directly; its summary,
+      tool, and count remain legible with long copy and it exposes no unredacted
+      arguments.
+- [ ] A destructive floating approval requires the visible 700ms hold. Release
+      early, leave the control, then retry and confirm that only the completed
+      hold responds.
+- [ ] With multiple pending approvals, the oldest appears first and each
+      response advances to the next without an intermediate collapse.
+- [ ] **Review details** opens the workspace approval card, including arguments
+      and Edit.
+- [ ] Test the pill at monitor edges and across mixed-DPI monitors: expansion
+      remains within the active work area and restores sensibly when collapsed.
+- [ ] Disconnect/reconnect with an approval pending: Approve/Deny are disabled
+      while disconnected, Review details remains available, and controls resume
+      after reconnect without a duplicate response.
+- [ ] With reduced motion enabled, the expansion/collapse and destructive hold
+      remain understandable without non-essential animation.
 
 ## Keyboard and accessibility
 

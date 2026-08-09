@@ -24,6 +24,20 @@ Anchored bottom-center of the current view (or inline in chat when the task live
 - **Money / irreversible-external** variants: `--destructive` red border, the sentence states the amount/consequence in bold, **voice approval disabled** — click only (user decision). A 700ms hold-to-approve on the button prevents reflex clicks.
 - Card waits forever; the task stays checkpointed. Saying "stop" cancels it as an implicit deny (per [IPC rules](../systemdesign/11-ipc-contract.md)) and the card vanishes.
 
+## Floating companion approval
+
+The companion expands from 360×52px to 360×224px for the oldest pending
+request. It presents only the summary, tool, count, and Approve, Deny, and
+**Review details** controls: arguments remain in the workspace. Review details
+opens that card for full arguments and Edit. Each resolution advances to the
+next pending request without collapsing; the final resolution restores the
+compact pill.
+
+Approve and Deny are disabled while disconnected, while Review details still
+opens the workspace. Destructive companion approvals use the same 700ms hold
+as the card. Requests wait for an explicit response forever: no timeout
+approval and no focus theft.
+
 ## When you're away
 Task pauses silently → Windows toast: "Halo is waiting for your OK." Clicking it opens the workspace focused on the card. The orb stays amber the whole time — walking past your desk tells you something's waiting.
 
