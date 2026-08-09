@@ -84,8 +84,9 @@ test("does not dismiss a request when the approval response is not sent", () => 
   expect(useHaloStore.getState().approvals["approval-1"]).toBeDefined();
 });
 
-test("does not dismiss a queued approval response while disconnected", () => {
+test("disables every action while disconnected without sending a response", () => {
   const send = vi.fn(() => true);
+  const review = vi.fn();
   useHaloStore.setState({ approvals: { "approval-1": approval } });
 
   render(
@@ -94,13 +95,17 @@ test("does not dismiss a queued approval response while disconnected", () => {
       count={1}
       connected={false}
       sendApprovalResponse={send}
-      onReview={vi.fn()}
+      onReview={review}
     />,
   );
 
-  fireEvent.click(screen.getByRole("button", { name: "Approve" }));
-  expect(send).toHaveBeenCalledWith("approval-1", "approve");
-  expect(useHaloStore.getState().approvals["approval-1"]).toBeDefined();
+  for (const name of ["Approve", "Deny", "Review"]) {
+    const action = screen.getByRole("button", { name });
+    expect((action as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(action);
+  }
+  expect(send).not.toHaveBeenCalled();
+  expect(review).not.toHaveBeenCalled();
 });
 
 test("sends a denial through the same guarded action", () => {
@@ -141,7 +146,7 @@ test("opens the full approval review without deciding", () => {
   expect(send).not.toHaveBeenCalled();
 });
 
-test("requires a 700 ms hold before approving a destructive request", () => {
+test("requires a 700 ms hold and retries a rejected destructive send", () => {
   const callbacks = new Map<number, FrameRequestCallback>();
   let frameId = 0;
   vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
@@ -160,7 +165,7 @@ test("requires a 700 ms hold before approving a destructive request", () => {
     callbacks.delete(next![0]);
     act(() => next![1](now));
   };
-  const send = vi.fn(() => true);
+  const send = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
   const destructiveApproval = { ...approval, destructive: true };
   useHaloStore.setState({ approvals: { "approval-1": destructiveApproval } });
 
@@ -187,6 +192,13 @@ test("requires a 700 ms hold before approving a destructive request", () => {
     runFrame(700);
     expect(send).toHaveBeenCalledOnce();
     expect(send).toHaveBeenCalledWith("approval-1", "approve");
+    expect(useHaloStore.getState().approvals["approval-1"]).toBeDefined();
+
+    fireEvent.pointerDown(hold, { button: 0, isPrimary: true, pointerId: 1 });
+    runFrame(0);
+    runFrame(700);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(useHaloStore.getState().approvals["approval-1"]).toBeUndefined();
   } finally {
     if (setPointerCapture) Object.defineProperty(HTMLElement.prototype, "setPointerCapture", setPointerCapture);
     else delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;

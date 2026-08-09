@@ -13,10 +13,13 @@ export interface FloatingApprovalProps {
 
 export function FloatingApproval({ approval, count, connected, sendApprovalResponse, onReview }: FloatingApprovalProps) {
   const resolveApprovalLocally = useHaloStore((s) => s.resolveApprovalLocally);
-  const respond = (decision: ApprovalResponseMsg["decision"]) => {
-    if (sendApprovalResponse(approval.approval_id, decision) && connected) {
+  const respond = (decision: ApprovalResponseMsg["decision"]): boolean => {
+    if (!connected) return false;
+    const sent = sendApprovalResponse(approval.approval_id, decision);
+    if (sent && connected) {
       resolveApprovalLocally(approval.approval_id);
     }
+    return sent;
   };
 
   return (
@@ -30,15 +33,15 @@ export function FloatingApproval({ approval, count, connected, sendApprovalRespo
             label="Hold to approve"
             busyLabel="Approving…"
             busy={false}
-            disabled={false}
+            disabled={!connected}
             hintId="floating-approval-hold-hint"
             onComplete={() => respond("approve")}
           />
         ) : (
-          <Button onClick={() => respond("approve")}>Approve</Button>
+          <Button onClick={() => respond("approve")} disabled={!connected}>Approve</Button>
         )}
-        <Button variant="ghost" onClick={() => respond("deny")}>Deny</Button>
-        <Button variant="ghost" onClick={onReview}>Review</Button>
+        <Button variant="ghost" onClick={() => respond("deny")} disabled={!connected}>Deny</Button>
+        <Button variant="ghost" onClick={onReview} disabled={!connected}>Review</Button>
       </div>
     </section>
   );

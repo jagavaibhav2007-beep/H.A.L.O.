@@ -313,7 +313,7 @@ interface HoldProps {
   /** id of a hidden element describing the press-and-hold gesture, so a screen
    *  reader announces how to operate the control (the hold is otherwise opaque). */
   hintId: string;
-  onComplete: () => void;
+  onComplete: () => boolean;
 }
 
 // Press-and-hold with visible progress; fires onComplete once at HOLD_MS.
@@ -348,7 +348,11 @@ export function HoldButton({ label, busyLabel, busy, disabled, hintId, onComplet
       if (p >= 1) {
         firedRef.current = true;
         rafRef.current = null;
-        onComplete();
+        if (!onComplete()) {
+          firedRef.current = false;
+          pointerIdRef.current = null;
+          setProgress(0);
+        }
         return;
       }
       rafRef.current = requestAnimationFrame(tick);
