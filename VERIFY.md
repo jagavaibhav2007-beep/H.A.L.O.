@@ -46,6 +46,9 @@ not respond to mock demo triggers.
       warnings/errors. Reduced-motion behavior is covered by the explicit CSS
       fallback and component tests; native assistive-technology review remains
       in the human checklist below.
+- [x] User manual acceptance on merged `main` (2026-08-10) confirmed the PDF
+      folder request produces one connected response, working/progress feedback
+      remains visible, and Stop responds and terminates the task correctly.
 
 ## Render matrix
 
