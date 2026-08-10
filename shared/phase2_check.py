@@ -307,49 +307,65 @@ async def check_file_undo_roundtrip(ws) -> None:
 
 
 async def check_doc_digest(port: int, token: str) -> None:
-    """Digest two files through the real gate and durable TaskRuntime."""
-    d1 = FILES_DIR / "digest-a.md"
-    d2 = FILES_DIR / "digest-b.md"
+    """Digest one folder through the real gate and durable TaskRuntime."""
+    folder = FILES_DIR / "digest-folder"
+    folder.mkdir(exist_ok=True)
+    d1 = folder / "digest-a.md"
+    d2 = folder / "digest-b.md"
+    broken = folder / "broken.pdf"
     d1.write_text("# Plan A\n\nShip the ingestion layer. Budget: $500.", encoding="utf-8")
     d2.write_text("# Plan B\n\nDefer to Phase 3. Headcount: 2.", encoding="utf-8")
+    broken.write_bytes(b"not a valid PDF")
     ws = await _connect_ui(port, token)
     task_id = None
     terminal = None
-    done_count = 0
+    progress_steps: set[int] = set()
+    token_text: dict[str, str] = {}
+    completed_content_turns: set[str] = set()
     activity = None
     try:
-        await _call_tool(ws, "p2-digest", "doc_digest", {"paths": [str(d1), str(d2)]})
-        while terminal is None or done_count < 2:
+        await _call_tool(ws, "p2-digest", "doc_digest", {"path": str(folder), "glob": "*"})
+        while terminal is None or not completed_content_turns:
             frame = await _recv(ws, timeout=30)
             if frame["type"] == "task_state":
                 task_id = task_id or frame["task_id"]
                 assert frame["task_id"] == task_id, frame
-                if frame["state"] in ("done", "failed"):
+                if isinstance(frame.get("step"), int) and frame["step"] > 0:
+                    progress_steps.add(frame["step"])
+                if frame["state"] in ("done", "stopped", "failed"):
                     terminal = frame
             elif frame["type"] == "activity" and frame.get("task_id") == task_id:
                 activity = frame
+            elif frame["type"] == "token":
+                turn_id = frame.get("turn_id") or frame["id"]
+                token_text[turn_id] = token_text.get(turn_id, "") + frame["text"]
             elif frame["type"] == "done":
                 assert frame["conversation_id"] == "p2-digest", frame
-                done_count += 1
+                turn_id = frame.get("turn_id")
+                if turn_id and token_text.get(turn_id):
+                    completed_content_turns.add(turn_id)
             else:
-                assert frame["type"] in ("token", "spend_update", "task_log"), frame
+                assert frame["type"] in ("spend_update", "task_log"), frame
     finally:
         await ws.close()
 
     assert terminal and terminal["state"] == "done", terminal
+    assert len(progress_steps) > 1, progress_steps
+    assert len(completed_content_turns) == 1, (completed_content_turns, token_text)
     assert activity and activity["tier"] == 1 and activity["narrate"] is False, activity
     task = store.get_task(task_id)
     assert task and task["state"] == "done" and task["result_json"], task
-    assert "digest-a.md" in task["result_json"] and "digest-b.md" in task["result_json"], task
+    assert all(name in task["result_json"] for name in ("digest-a.md", "digest-b.md", "broken.pdf")), task
+    assert '"status": "failed"' in task["result_json"], task
 
     g = await graph._ensure_graph()
     snap = await g.aget_state({"configurable": {"thread_id": "p2-digest"}})
     results = [
         m["content"] for m in snap.values.get("messages", [])
-        if "Untrusted task result" in (m.get("content") or "")
+        if "Untrusted task outcomes" in (m.get("content") or "")
     ]
     assert results, "no doc_digest tool result in the conversation"
-    assert "digest-a.md" in results[0] and "digest-b.md" in results[0], results[0]
+    assert all(name in results[0] for name in ("digest-a.md", "digest-b.md", "broken.pdf")), results[0]
     tokens_est = len(results[0]) // 4
     assert tokens_est < 2500, f"conversation-visible digest too big: ~{tokens_est} tokens"
     # Under HALO_LLM_STUB the stub reply is prose, so every per-doc digest takes

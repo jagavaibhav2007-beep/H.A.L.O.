@@ -52,7 +52,7 @@ def register(
     name: str, fn, *, tier=3, destructive=False, redact=None, summary=None,
     inverse=None, schema=None, mutating: bool = False, user_intent=None,
     task: bool = False, supports_pause: bool = False, title=None, steps_total=None,
-    validate=None, persist_args=None, approval_fingerprint=None,
+    validate=None, prepare=None, persist_args=None, approval_fingerprint=None,
 ) -> None:
     """schema: the OpenAI function body sans name -- {"description": str,
     "parameters": <JSON Schema>}. Only tools WITH one are advertised to the
@@ -63,7 +63,7 @@ def register(
         "mutating": mutating, "user_intent": user_intent,
         "task": task, "supports_pause": supports_pause,
         "title": title, "steps_total": steps_total,
-        "validate": validate, "persist_args": persist_args,
+        "validate": validate, "prepare": prepare, "persist_args": persist_args,
         "approval_fingerprint": approval_fingerprint,
     }
 
@@ -368,6 +368,22 @@ async def _start_task_tail(
             "pending_tool_result": {"tool": tool, "status": "error: task runtime unavailable"},
             "messages": [{"role": "assistant", "content": f"I couldn't start {tool} because the task runtime is unavailable."}],
         }
+
+    prepare = entry.get("prepare")
+    if prepare is not None:
+        original_args = args
+        try:
+            prepared = prepare(args)
+            args = await prepared if inspect.isawaitable(prepared) else prepared
+            if not isinstance(args, dict):
+                raise ValueError("task preparation must return an object")
+        except Exception as exc:  # invalid batches fail before task work or spend
+            result = f"error: {exc}"
+            await asyncio.to_thread(_record, tool, redact(tool, original_args), tier, result, task_id)
+            return {
+                "pending_tool_result": {"tool": tool, "status": result},
+                "messages": [{"role": "assistant", "content": f"I couldn't start {tool}: {exc}"}],
+            }
 
     def value(meta, default=None):
         return meta(args) if callable(meta) else (meta if meta is not None else default)

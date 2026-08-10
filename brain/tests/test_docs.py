@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import multiprocessing
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -89,6 +91,50 @@ def check_tier() -> None:
     print("[check 1] tier: all-in-roots -> 1; any outside, empty, or malformed paths -> 3: OK")
 
 
+def check_folder_glob_preparation() -> None:
+    folder = ROOT / "reports"
+    nested = folder / "archive"
+    nested.mkdir(parents=True)
+    for path in (folder / "b.pdf", folder / "a.pdf", nested / "c.pdf"):
+        path.write_bytes(b"fixture")
+
+    direct = docs._prepare_args({"path": str(folder), "glob": "*.pdf", "focus": "totals"})
+    assert direct == {
+        "paths": [str(folder / "a.pdf"), str(folder / "b.pdf")],
+        "focus": "totals",
+    }, direct
+    recursive = docs._prepare_args({"path": str(folder), "glob": "**/*.pdf"})
+    assert recursive["paths"] == sorted({
+        str(folder / "a.pdf"), str(folder / "b.pdf"), str(nested / "c.pdf"),
+    }), recursive
+
+    invalid = [
+        ({"paths": [str(A)], "path": str(folder)}, "exactly one"),
+        ({}, "exactly one"),
+        ({"path": str(folder), "glob": str(folder / "*.pdf")}, "relative"),
+        ({"path": str(folder), "glob": "../*.pdf"}, ".."),
+        ({"path": str(folder), "glob": "*.docx"}, "matched no files"),
+    ]
+    before = (len(EXTRACTS), len(LLM_CALLS))
+    for args, message in invalid:
+        try:
+            docs._prepare_args(args)
+            raise AssertionError(f"invalid arguments were accepted: {args}")
+        except ValueError as exc:
+            assert message in str(exc), (args, exc)
+    cap_dir = ROOT / "cap"
+    cap_dir.mkdir()
+    for index in range(65):
+        (cap_dir / f"{index:02d}.pdf").write_bytes(b"fixture")
+    try:
+        docs._prepare_args({"path": str(cap_dir), "glob": "*.pdf"})
+        raise AssertionError("65 matching files were accepted")
+    except ValueError as exc:
+        assert "max 64" in str(exc), exc
+    assert (len(EXTRACTS), len(LLM_CALLS)) == before
+    print("[check 1b] folder/glob preparation is deterministic, confined, and capped before work: OK")
+
+
 async def check_digest_and_cache() -> None:
     LLM_CALLS.clear()
     out = await docs._doc_digest({"paths": [str(A), str(B)]})
@@ -143,21 +189,28 @@ async def check_degraded_digest_is_not_cached() -> None:
 
 
 async def check_cap_and_bad_file() -> None:
-    too_many = [str(A)] * 17
+    cap_dir = ROOT / "explicit-cap"
+    cap_dir.mkdir(exist_ok=True)
+    too_many = []
+    for index in range(65):
+        path = cap_dir / f"{index:02d}.md"
+        path.write_text("fixture", encoding="utf-8")
+        too_many.append(str(path))
     res = await gate._execute_tail(
         "doc_digest", {"paths": too_many}, 1, "docs-test", broadcast
     )
     assert res["pending_tool_result"]["status"].startswith("error"), res
-    assert "16" in res["messages"][0]["content"], res
-    print("[check 4] >16 paths refused with an honest error naming the cap: OK")
+    assert "64" in res["messages"][0]["content"], res
+    print("[check 4] >64 paths refused with an honest error naming the cap: OK")
 
     bad = ROOT / "broken.bin"
     bad.write_bytes(b"\xff\xfe\x00\x01binary junk")
     out = await docs._doc_digest({"paths": [str(bad), str(A)]})
     assert len(out["docs"]) == 2, "bad file killed the batch"
-    broken = out["docs"][0]
+    broken = next(item for item in out["docs"] if item["path"] == str(bad))
+    assert broken["status"] == "failed", broken
     assert broken["confidence"] == 0.0 and "could not extract" in broken["gist"], broken
-    assert out["docs"][1]["path"] == str(A)  # good file still digested (from cache)
+    assert any(item["path"] == str(A) for item in out["docs"])  # good file still digested (from cache)
     print("[check 5] broken/binary file degrades honestly without killing the batch: OK")
 
 
@@ -211,13 +264,57 @@ async def check_stop_raises_taskstopped() -> None:
     print("[check 8] a stop mid-stream cancels the stream and raises TaskStopped: OK")
 
 
+async def check_stalled_pdf_worker_is_reaped_on_stop() -> None:
+    from brain import extract_worker
+    from brain.task_runtime import TaskStopped
+
+    pdf = ROOT / "slow.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n% fixture")
+    os.environ["HALO_EXTRACT_STUB_DELAY"] = "30"
+    ctx = _FakeCtx()
+    running = asyncio.create_task(extract_worker.extract_pdf_isolated(pdf, ctx.cancelled))
+    await asyncio.sleep(0.15)
+    started = time.monotonic()
+    ctx.cancelled.set()
+    try:
+        await running
+        raise AssertionError("stopped extraction returned text")
+    except TaskStopped:
+        pass
+    finally:
+        os.environ.pop("HALO_EXTRACT_STUB_DELAY", None)
+    assert time.monotonic() - started < 2.0
+    assert not any(child.name.startswith("halo-extract-") for child in multiprocessing.active_children())
+    print("[check 9] stalled PDF extraction stops and reaps its child in under two seconds: OK")
+
+
+async def check_stalled_pdf_worker_times_out() -> None:
+    from brain import extract_worker
+
+    pdf = ROOT / "deadline.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n% fixture")
+    os.environ["HALO_EXTRACT_STUB_DELAY"] = "30"
+    try:
+        await extract_worker.extract_pdf_isolated(pdf, asyncio.Event(), timeout=0.1)
+        raise AssertionError("stalled extraction did not time out")
+    except ValueError as exc:
+        assert pdf.name in str(exc) and "0.1" in str(exc), exc
+    finally:
+        os.environ.pop("HALO_EXTRACT_STUB_DELAY", None)
+    assert not any(child.name.startswith("halo-extract-") for child in multiprocessing.active_children())
+    print("[check 10] stalled PDF extraction has a named deadline and leaves no child: OK")
+
+
 async def main() -> None:
     check_tier()
+    check_folder_glob_preparation()
     await check_digest_and_cache()
     await check_cap_and_bad_file()
     await check_gated_run()
     await check_degraded_digest_is_not_cached()
     await check_stop_raises_taskstopped()
+    await check_stalled_pdf_worker_is_reaped_on_stop()
+    await check_stalled_pdf_worker_times_out()
     print("[brain.docs] self-check OK")
 
 

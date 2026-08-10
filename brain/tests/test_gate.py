@@ -214,6 +214,48 @@ async def check_dynamic_mutation_and_validation_hooks() -> None:
     print("[check 1c] dynamic mutation and validation hooks fail closed before execution: OK")
 
 
+async def check_task_prepare_hook_runs_before_submission_metadata() -> None:
+    from brain import task_runtime
+
+    submitted: list[dict] = []
+
+    class FakeRuntime:
+        async def submit(self, **kwargs) -> str:
+            submitted.append(kwargs)
+            return kwargs["task_id"]
+
+    async def prepare(args: dict) -> dict:
+        await asyncio.sleep(0)
+        return {"paths": sorted(args["paths"]), "prepared": True}
+
+    async def broadcast(_kind: str, _payload: dict) -> None:
+        return None
+
+    previous = task_runtime.current()
+    gate.register(
+        "prepared_task", lambda _args, _ctx: None, tier=1, task=True,
+        prepare=prepare,
+        title=lambda args: f"Prepared {len(args['paths'])}",
+        steps_total=lambda args: len(args["paths"]),
+    )
+    task_runtime.install(FakeRuntime())
+    try:
+        result = await gate.gated_execute(
+            "prepared_task", {"paths": ["b", "a"]},
+            conversation_id="prepared", task_id=None, broadcast=broadcast,
+            origin_turn_id="origin-1",
+        )
+    finally:
+        task_runtime.install(previous)
+        gate.TOOLS.pop("prepared_task", None)
+    assert result["pending_tool_result"]["status"] == "started", result
+    assert submitted[0]["args"] == {"paths": ["a", "b"], "prepared": True}, submitted
+    assert submitted[0]["title"] == "Prepared 2", submitted
+    assert submitted[0]["steps_total"] == 2, submitted
+    assert submitted[0]["origin_turn_id"] == "origin-1", submitted
+    print("[check 1d] async task preparation runs before title, steps, and submission: OK")
+
+
 async def check_sync_tool_does_not_block_event_loop() -> None:
     """A heartbeat must be able to release a blocking synchronous tool."""
     release = threading.Event()
@@ -497,6 +539,7 @@ async def main() -> None:
     check_hidden_edit_fields()
     check_result_cap()
     await check_dynamic_mutation_and_validation_hooks()
+    await check_task_prepare_hook_runs_before_submission_metadata()
     await check_sync_tool_does_not_block_event_loop()
     server, token = await start()
     port = server.sockets[0].getsockname()[1]

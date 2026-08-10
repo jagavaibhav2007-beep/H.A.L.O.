@@ -16,11 +16,11 @@ import os
 
 from pathlib import Path
 
-from brain import extract, gate, llm, secrets_store, store
-from brain.tools.files import _PATH, _in_roots, _resolve, _schema, _sha
+from brain import extract, extract_worker, gate, llm, secrets_store, store
+from brain.task_runtime import TaskStopped
+from brain.tools.files import _PATH, _in_roots, _resolve, _sha
 
-_PATHS_CAP = 16  # ponytail: inline hard cap until 12-task-runtime B2 lands and
-                 # doc_digest becomes task-shaped; then raise/detach it there.
+_PATHS_CAP = 64
 _EXTRACT_CAP = 100 * 1024  # chars of extracted text per file (~25k tokens)
 _CHUNK_CHARS = 12 * 1024   # ~3k tokens at chars//4: bigger docs chunk + mini-reduce
 _GIST_CAP = 1000  # honest-degrade path: raw reply trimmed to this as the gist
@@ -68,6 +68,66 @@ def _degraded(path: str, gist: str, confidence: float) -> dict:
     }
 
 
+def _failed(path: str, reason: str) -> dict:
+    return {
+        **_degraded(path, f"could not extract this file: {reason}", 0.0),
+        "status": "failed",
+    }
+
+
+def _prepare_args(args: dict) -> dict:
+    """Normalize either explicit paths or a confined folder/glob batch."""
+    explicit = args.get("paths")
+    folder = args.get("path")
+    if (explicit is None) == (folder is None):
+        raise ValueError("provide exactly one of paths or path")
+    focus = args.get("focus")
+    if focus is not None and not isinstance(focus, str):
+        raise ValueError("focus must be a string")
+
+    if explicit is not None:
+        if not isinstance(explicit, list) or not explicit or not all(
+            isinstance(raw, str) and raw.strip() for raw in explicit
+        ):
+            raise ValueError("paths must be a non-empty list of file paths")
+        paths = sorted({str(_resolve(raw)) for raw in explicit})
+    else:
+        if not isinstance(folder, str) or not folder.strip():
+            raise ValueError("path must name a folder")
+        base = _resolve(folder)
+        if not base.is_dir():
+            raise ValueError(f"folder does not exist or is not a directory: {folder}")
+        pattern = args.get("glob", "*")
+        if not isinstance(pattern, str) or not pattern:
+            raise ValueError("glob must be a non-empty relative pattern")
+        pattern_path = Path(pattern)
+        if pattern_path.is_absolute():
+            raise ValueError("glob must be a relative pattern")
+        if ".." in pattern_path.parts:
+            raise ValueError("glob must not contain .. traversal")
+        try:
+            matches = list(base.glob(pattern))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"invalid glob {pattern!r}: {exc}") from exc
+        normalized: set[str] = set()
+        for match in matches:
+            resolved = match.resolve(strict=False)
+            if not resolved.is_relative_to(base):
+                raise ValueError(f"glob match escapes the folder: {match}")
+            if resolved.is_file():
+                normalized.add(str(resolved))
+        paths = sorted(normalized)
+        if not paths:
+            raise ValueError(f"glob {pattern!r} matched no files in {base}")
+
+    if len(paths) > _PATHS_CAP:
+        raise ValueError(f"too many paths ({len(paths)}; max {_PATHS_CAP} per batch)")
+    prepared = {"paths": paths}
+    if focus is not None:
+        prepared["focus"] = focus
+    return prepared
+
+
 def _parse_digest(reply: str, path: str) -> dict:
     """STRICT JSON in, honest degrade out: a model that answers prose (or the
     offline stub) becomes a low-confidence gist -- never a crashed batch."""
@@ -110,11 +170,8 @@ async def _digest_one(p: Path, text: str, api_key: str, ctx=None) -> dict:
 
 
 async def _doc_digest(args: dict, ctx=None) -> dict:
-    paths = args.get("paths")
-    if not isinstance(paths, list) or not paths:
-        raise ValueError("paths must be a non-empty list of file paths")
-    if len(paths) > _PATHS_CAP:
-        raise ValueError(f"too many paths ({len(paths)}; max {_PATHS_CAP} per call)")
+    args = _prepare_args(args)
+    paths = args["paths"]
     # ponytail: laziest correct key plumbing -- tool fns don't receive turn
     # context, so mirror run_turn's own key fetch (stub shortcut included)
     # instead of threading api_key through gate/graph signatures.
@@ -137,9 +194,14 @@ async def _doc_digest(args: dict, ctx=None) -> dict:
             cached = await asyncio.to_thread(store.get_digest, str(p), sha, DIGEST_VERSION)
             if cached is not None:
                 return cached
-            text = await asyncio.to_thread(extract.extract_text, p)
-        except Exception as exc:  # noqa: BLE001 - one bad file must not kill the batch
-            return _degraded(str(p), f"could not extract this file: {exc}", 0.0)
+            if ctx is not None and p.suffix.lower() == ".pdf":
+                text = await extract_worker.extract_pdf_isolated(p, ctx.cancelled)
+            else:
+                text = await asyncio.to_thread(extract.extract_text, p)
+        except TaskStopped:
+            raise
+        except Exception as exc:
+            return _failed(str(p), str(exc))
         digest = await _digest_one(p, text[:_EXTRACT_CAP], api_key, ctx)
         # A parse failure is a transient fact about one reply, not about the
         # file's content -- caching it would pin the degraded answer forever.
@@ -160,6 +222,12 @@ async def _doc_digest(args: dict, ctx=None) -> dict:
                 f"Digested {Path(raw).name}",
                 checkpoint={"docs": digests},
             )
+        await ctx.progress(
+            len(paths) + 1,
+            len(paths) + 1,
+            "Synthesizing final response",
+            checkpoint={"docs": digests},
+        )
     focus = args.get("focus")
     reduce_ask = (
         "Merge these per-document JSON digests into one concise markdown answer "
@@ -178,35 +246,54 @@ async def _doc_digest(args: dict, ctx=None) -> dict:
 
 def _digest_tier(args: dict) -> int:
     paths = args.get("paths")
-    if not isinstance(paths, list) or not paths:
-        return 3  # fail closed, matching the gate's rule 8
-    return 1 if all(_in_roots(_resolve(p)) for p in paths) else 3
+    folder = args.get("path")
+    if isinstance(paths, list) and paths and folder is None:
+        return 1 if all(_in_roots(_resolve(p)) for p in paths) else 3
+    if isinstance(folder, str) and folder and paths is None:
+        return 1 if _in_roots(_resolve(folder)) else 3
+    return 3  # fail closed, matching the gate's rule 8
 
 
 gate.register(
     "doc_digest", _doc_digest, tier=_digest_tier,
     task=True, supports_pause=True,
+    prepare=_prepare_args,
     title=lambda a: f"Digest {len(a.get('paths') or [])} documents",
     steps_total=lambda a: len(a.get("paths") or []) + 1,
     summary=lambda a: f"I want to digest {len(a.get('paths') or [])} document(s).",
-    schema=_schema(
-        "Read and summarize up to 16 documents in one call: each file is "
-        "extracted, digested by a small model, and merged into one compact "
-        "answer -- the raw contents never flood the conversation. ALWAYS "
-        "prefer this over calling file_read per file when the user asks to "
-        "read/summarize/compare several documents. Results are cached per "
-        "unchanged file, so repeat calls are cheap.",
-        {
-            "paths": {
-                "type": "array",
-                "description": "Files to digest (max 16 per call).",
-                "items": _PATH,
+    schema={
+        "description": (
+            "Read and summarize up to 64 documents in one call: each file is "
+            "extracted, digested by a small model, and merged into one compact "
+            "answer -- the raw contents never flood the conversation. ALWAYS "
+            "prefer this over calling file_read per file when the user asks to "
+            "read/summarize/compare several documents. Results are cached per "
+            "unchanged file, so repeat calls are cheap. Use path plus an optional "
+            "glob for a folder; glob defaults to direct children and recursion "
+            "requires **/."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "description": "Explicit files to digest (max 64).",
+                    "items": _PATH,
+                },
+                "path": {
+                    **_PATH,
+                    "description": "Folder whose matching files should be digested.",
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "Relative file pattern. Defaults to *; use **/ for recursion.",
+                },
+                "focus": {
+                    "type": "string",
+                    "description": "Optional question or angle the merged digest should focus on.",
+                },
             },
-            "focus": {
-                "type": "string",
-                "description": "Optional question or angle the merged digest should focus on.",
-            },
+            "oneOf": [{"required": ["paths"]}, {"required": ["path"]}],
         },
-        ["paths"],
-    ),
+    },
 )
