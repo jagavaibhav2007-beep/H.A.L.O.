@@ -1,6 +1,26 @@
 # Decisions
 _Architectural, structural, and system design choices._
 
+## Detached task replies follow the originating user turn — 2026-08-10
+
+**What:** tasks admitted by one graph turn share `origin_turn_id`, join a sealed
+runtime group, and produce one internal continuation only after every member is
+terminal. Cancellation emits `stopping` immediately and ends as neutral
+`stopped`. `doc_digest` accepts a deterministic direct-child folder glob by
+default, requires explicit recursion, caps the frozen batch at 64 files, and
+isolates PDF extraction in a killable process.
+
+**Why:** worker completion order is an execution detail, not a conversational
+boundary. Users need one coherent answer for one request, truthful progress
+while it runs, and visible proof that Stop was accepted even while cleanup is
+still underway.
+
+**Tradeoff:** the final answer waits for the slowest member of the group. A
+stuck parser is bounded by the extraction deadline and can be killed; healthy
+siblings continue past a per-file failure. There is no automatic recursion or
+unbounded corpus ingestion—the caller must opt into `**` and stay within the
+64-file admission cap.
+
 ## Floating pill is the sole approval notification surface — 2026-08-09
 
 **What:** removed per-approval Windows desktop toasts and the Tauri notification

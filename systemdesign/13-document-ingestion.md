@@ -1,6 +1,6 @@
 # System Design: Document Ingestion & Token-Lean File Reading
 
-Status: **implemented.** All three layers have code — Layer 0 [`extract.py`](../brain/brain/extract.py) plus the `file_read` cap, Layer 1 `_prompt_messages` tool-result stubbing in [`graph.py`](../brain/brain/graph.py), Layer 2 [`tools/docs.py`](../brain/brain/tools/docs.py) (`doc_digest`). Layer 2 runs inline with caps and should declare its tool task-shaped once [12-task-runtime](12-task-runtime.md) (B2) lands.
+Status: **implemented.** All three layers have code — Layer 0 [`extract.py`](../brain/brain/extract.py) plus the `file_read` cap, Layer 1 `_prompt_messages` tool-result stubbing in [`graph.py`](../brain/brain/graph.py), and task-shaped Layer 2 [`tools/docs.py`](../brain/brain/tools/docs.py) (`doc_digest`) running through [12-task-runtime](12-task-runtime.md).
 
 ## Problem (measured)
 
@@ -60,16 +60,33 @@ With Layers 0+1, the 8-file scenario becomes ~8 × 2k sent approximately once ea
 
 New Lane-1 read-only tool `doc_digest(paths | path+glob, focus?)`:
 
-1. **Extract** each file via Layer 0 (per-file extract cap ~100KB).
+- `paths` accepts an explicit file list. `path` plus optional `glob` expands a
+  folder deterministically; the default `*` reads direct children only and
+  recursive traversal must be explicit (`**/*.pdf`). Absolute and parent-path
+  glob patterns are refused. Resolved files are deduplicated and sorted.
+- Admission freezes the exact batch after permission and before persistence or
+  submission. The hard cap is 64 files, enforced before extraction and spend.
+
+1. **Extract** each file via Layer 0 (per-file extract cap ~100KB). PDF parsing
+   runs in a spawned worker process with a 60-second default deadline. Stop or
+   timeout terminates, then kills if needed, and always joins/reaps the worker;
+   a parser blocked in native code therefore cannot make Stop cosmetic.
 2. **Map:** one LIGHT call **per document**, in parallel (`asyncio.gather`, already bounded by `_LLM_SEM`). A doc over ~3k tokens is chunked and mini-reduced within the doc first. Every call is small enough that a flash-class model cannot choke — which removes the escalation trigger, not just the cost.
 3. Each map call returns a **fixed JSON digest**, not prose (schema-shaped digests beat prose — parseable, mergeable, no restating):
    `{path, gist, key_points[], entities[], numbers[], caveats[], confidence}` — ~200–400 tokens per doc.
 4. **Reduce:** one call merges the digests (LIGHT by default; `focus` present and reduce large → HEAVY is acceptable, it sees only ~2–3k tokens).
-5. The tool result the conversation sees is the merged digest (~1–2k tokens). **The raw 64k never enters chat history.**
+5. A failed file produces a structured `status: "failed"` outcome and does not
+   abort healthy siblings. Progress names each completed file and includes a
+   final synthesis step. The tool result the conversation sees is the merged
+   digest (~1–2k tokens). **The raw 64k never enters chat history.**
 
 **Digest cache:** SQLite table keyed by `(path, sha256, digest_version)` — repeated asks over the same files cost ~0. (Schema change → MigrationLog v3.)
 
-**Task-runtime alignment:** `doc_digest` is task-shaped by nature (seconds-to-minutes, parallel, cancellable between map calls). Until 12-task-runtime B2 exists it runs inline with hard caps (≤16 files per call); when B2 lands, declare it task-shaped in the registry and it detaches for free.
+**Task-runtime alignment:** `doc_digest` is task-shaped (seconds-to-minutes),
+detaches from the interactive turn, reports per-file progress, and participates
+in the origin-turn completion barrier. One request therefore yields one final
+assistant conclusion after all selected files are terminal, not one reply per
+file.
 
 **Offline test seam:** map/reduce calls route through `llm.stream_chat`, so `HALO_LLM_STUB` already covers them; phase2_check gets a digest section asserting the conversation-visible result stays under a token ceiling while the answer cites content from every file.
 

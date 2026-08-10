@@ -1,5 +1,19 @@
 # Bugs
 
+## One folder request produced one assistant reply per completed task — 2026-08-10
+**Severity:** High UX (user-reported).
+**Symptom:** after Halo ingested a folder of PDFs, chat emitted a separate completion reply as each detached task finished instead of one connected conclusion for the request.
+**Root cause:** every `TaskRuntime` worker independently enqueued its own conversation continuation. The runtime persisted an `origin_turn_id`, but did not use it as a completion boundary, and the graph also allowed task-start-only prose/empty placeholders into the transcript.
+**Fix:** tasks from one interactive turn now join a sealed origin group. Exactly one continuation is scheduled after every member is terminal, carrying the ordered structured outcomes; task-start prose and empty assistant placeholders are suppressed. Direct tasks without an origin keep their single-task continuation.
+**Never do:** do not equate a worker finishing with a user-visible conversational boundary. Aggregate by the user's originating intent, and test the number of content-bearing assistant completions as well as task terminal states.
+
+## Stop looked inert while PDF parsing could not be interrupted — 2026-08-10
+**Severity:** High UX/reliability (user-reported).
+**Symptom:** clicking Stop on a document task appeared to do nothing, and cancellation could wait behind a blocked PDF parser; completed cancellation was also rendered as a red failure.
+**Root cause:** extraction ran inside a thread-backed call that Python could not terminate, task state jumped directly from active to `failed reason:"stopped"`, and the UI had no authoritative intermediate state to acknowledge the click.
+**Fix:** contract 1.5 adds complete `stopping` and neutral terminal `stopped` snapshots. PDF extraction now runs in a spawned worker process with a deadline and terminate/kill/join cleanup. The UI immediately changes Stop to a focus-preserving, `aria-disabled` `Stopping…` control, keeps progress visible, and removes actions only after the terminal snapshot.
+**Never do:** a cancellation API is not real if its longest blocking operation is unkillable. Pair the backend cancellation primitive with an immediate authoritative state transition and a terminal state distinct from failure.
+
 ## Floating approval panel was clipped behind its badge — 2026-08-09
 **Severity:** High UX (user-reported and reproduced in the native app).
 **Symptom:** an approval reached the floating pill and incremented its badge, but the window stayed 360×52; the user had to open the workspace to approve.

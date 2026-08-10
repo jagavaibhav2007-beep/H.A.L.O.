@@ -32,6 +32,20 @@ not respond to mock demo triggers.
 - [x] Re-run the full repository gate on the integrated tree and record success
       (2026-08-03, `d505231`: local full verification passed; GitHub Actions run
       30801830739 passed the same locked Phase 0–2 gate).
+- [x] Re-ran the full gate for batched task completion/cancellation on
+      2026-08-10: contract sync reported 34 schemas, every Python/Voice suite
+      passed, five UI self-checks passed, Vitest passed 91/91, the production
+      build and 11 Rust tests passed, and all Phase 0/1/2 protocol gates passed.
+- [x] The Phase 2 `doc_digest` gate exercises a folder/glob batch with one good
+      and one broken PDF, observes multiple progress snapshots on one task id,
+      preserves the structured per-file failure, and receives exactly one
+      content-bearing assistant conclusion after the batch becomes terminal.
+- [x] Browser-mode rendered QA (2026-08-10) confirmed animated Running progress,
+      immediate `Stopping…`, focus retained on the inert stopping control,
+      neutral Stopped history, no 640px viewport overflow, and no console
+      warnings/errors. Reduced-motion behavior is covered by the explicit CSS
+      fallback and component tests; native assistive-technology review remains
+      in the human checklist below.
 
 ## Render matrix
 
