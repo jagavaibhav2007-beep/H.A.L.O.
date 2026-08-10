@@ -773,11 +773,9 @@ _SNAPSHOT_TASK_STATES = ["waiting", "running", "paused", "waiting_approval", "fa
 
 
 def _task_frame(row: dict) -> dict:
-    frame = {"task_id": row["task_id"], "state": row["state"], "lane": row["lane"]}
-    for key in ("title", "step", "steps_total", "step_label", "reason"):
-        if row.get(key) is not None:
-            frame[key] = row[key]
-    return frame
+    from brain.task_runtime import task_frame
+
+    return task_frame(row)
 
 
 async def snapshot(send) -> None:

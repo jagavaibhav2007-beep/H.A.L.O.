@@ -23,7 +23,7 @@ export interface HelloMsg extends IpcEnvelope {
 // envelope/field change; a major mismatch across the WS is refused loudly on
 // both sides. Hand-mirrored with brain/brain/ipc/contract.py CONTRACT_VERSION
 // and shared/ipc-contract.json "version" — check_contract_sync.py compares them.
-export const CONTRACT_VERSION = "1.4";
+export const CONTRACT_VERSION = "1.5";
 export const contractMajor = (v: string | undefined): number | null => {
   if (typeof v !== "string") return null;
   const major = Number.parseInt(v.split(".")[0], 10);
@@ -186,7 +186,7 @@ export const operationCorrelationKey = (kind: OperationKind, id: string) => `${k
 export interface TaskStateMsg extends IpcEnvelope {
   type: "task_state";
   task_id: string;
-  state: "waiting" | "running" | "paused" | "waiting_approval" | "done" | "failed";
+  state: "waiting" | "running" | "paused" | "waiting_approval" | "stopping" | "stopped" | "done" | "failed";
   lane: 1 | 2 | 3;
   title?: string;
   step?: number;
@@ -391,7 +391,9 @@ export const CONTRACT_SPEC = {
       operation_id: field(S),
     }),
     task_state: message(OUT, ["task_id", "state", "lane"], {
-      task_id: field(S), state: field(S, ["waiting", "running", "paused", "waiting_approval", "done", "failed"]),
+      task_id: field(S), state: field(S, [
+        "waiting", "running", "paused", "waiting_approval", "stopping", "stopped", "done", "failed",
+      ]),
       lane: field(I, LANES), title: field(S), step: field(I), steps_total: field(I),
       step_label: field(S), reason: field(S),
     }),

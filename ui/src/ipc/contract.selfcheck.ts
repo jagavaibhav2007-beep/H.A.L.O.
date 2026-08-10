@@ -171,6 +171,16 @@ function expectAccepted(raw: unknown, why: string) {
 }
 
 expectAccepted(historyFrame, "well-formed conversation history");
+for (const state of ["stopping", "stopped"]) {
+  expectAccepted(
+    { type: "task_state", id: `task-${state}`, ts: "x", task_id: "task", state, lane: 1 },
+    `task_state accepts ${state}`,
+  );
+}
+expectRejected(
+  { type: "task_state", id: "task-bad", ts: "x", task_id: "task", state: "cancelling", lane: 1 },
+  "task_state rejects unknown cancellation state",
+);
 expectRejected(
   { type: "project_roots_state", id: "roots", ts: "x", roots: ["C:/ok", 42] },
   "project roots must contain only strings",

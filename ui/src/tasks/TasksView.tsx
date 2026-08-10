@@ -10,7 +10,7 @@
 // no double-render). Embedding the full ApprovalCard inside the task card is a
 // later refinement — the overlay already renders over this view.
 
-import { AlertTriangle, Check, CircleDot, Pause, Play, ShieldAlert, Square } from "lucide-react";
+import { AlertTriangle, Check, CircleDot, LoaderCircle, Pause, Play, ShieldAlert, Square } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
@@ -32,10 +32,12 @@ import "./TasksView.css";
 const STATE_RANK: Record<TaskStateMsg["state"], number> = {
   waiting: 0,
   running: 1,
-  waiting_approval: 2,
-  paused: 3,
-  failed: 4,
-  done: 5,
+  stopping: 2,
+  waiting_approval: 3,
+  paused: 4,
+  stopped: 5,
+  failed: 6,
+  done: 7,
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -57,7 +59,7 @@ export function TasksView({ sendTaskOp, sendLanePin }: TasksViewProps) {
     const confirms = (value: TaskStateMsg | undefined) => {
       if (kind === "pause") return value?.state === "paused";
       if (kind === "resume") return value?.state === "running";
-      return value == null || value.state === "done" || value.state === "failed";
+      return value == null || value.state === "stopped" || value.state === "done" || value.state === "failed";
     };
     if (begin(task.task_id, label, confirms, "task_op")) sendTaskOp(kind, task.task_id);
   };
@@ -119,14 +121,15 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
   const busy = pending !== undefined;
   const hasProgress = step != null && steps_total != null;
   const collapsed = state === "done";
-  const terminal = state === "done" || state === "failed";
+  const terminal = state === "done" || state === "stopped" || state === "failed";
+  const controlsLocked = terminal || state === "stopping";
 
   return (
     <div className="halo-card task-card" data-state={state}>
       <div className="task-head">
         <span className="task-title">{title ?? "Working"}</span>
         <TaskStateChip state={state} />
-        <LanePin task={task} disabled={busy || !controlsAvailable || terminal} onPin={pin} />
+        <LanePin task={task} disabled={busy || !controlsAvailable || controlsLocked} onPin={pin} />
       </div>
 
       {!collapsed && (
@@ -154,6 +157,11 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
             </p>
           )}
           {state === "failed" && <p className="task-reason">{reason ?? "This task failed."}</p>}
+          {state === "stopped" && (
+            <p className="task-reason">
+              {hasProgress ? `Stopped after ${step} of ${steps_total}.` : "Stopped before completion."}
+            </p>
+          )}
 
           {lane === 3 && (
             <div className="task-stream" aria-label="Sandbox stream">
@@ -171,7 +179,7 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
             </pre>
           )}
 
-          {!terminal && (
+          {!controlsLocked && (
             <div className="task-actions">
               {(state === "running" || state === "waiting_approval") && (
                 <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={() => op(task, "pause", "pausing")}>
@@ -203,8 +211,10 @@ const TASK_STATE_CHIP: Record<
 > = {
   waiting: { label: "Queued", tone: "muted", icon: CircleDot },
   running: { label: "Running", tone: "primary", icon: CircleDot },
+  stopping: { label: "Stopping", tone: "muted", icon: LoaderCircle },
   waiting_approval: { label: "Waiting for you", tone: "tier3", icon: ShieldAlert },
   paused: { label: "Paused", tone: "muted", icon: Pause },
+  stopped: { label: "Stopped", tone: "muted", icon: Square },
   done: { label: "Done", tone: "success", icon: Check },
   failed: { label: "Failed", tone: "destructive", icon: AlertTriangle },
 };

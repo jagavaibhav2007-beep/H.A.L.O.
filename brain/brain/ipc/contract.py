@@ -18,7 +18,7 @@ from typing import Literal
 # envelope/field change; a major mismatch across the WS is refused loudly on
 # both sides. Hand-mirrored with ui/src/ipc/contract.ts CONTRACT_VERSION and
 # shared/ipc-contract.json "version" -- check_contract_sync.py compares them.
-CONTRACT_VERSION = "1.4"
+CONTRACT_VERSION = "1.5"
 
 
 def contract_major(version: object) -> int | None:
@@ -113,7 +113,10 @@ CONTRACT_SPEC: dict = {
         }),
         "task_state": _message(OUT, ["task_id", "state", "lane"], {
             "task_id": _field(S),
-            "state": _field(S, ["waiting", "running", "paused", "waiting_approval", "done", "failed"]),
+            "state": _field(S, [
+                "waiting", "running", "paused", "waiting_approval",
+                "stopping", "stopped", "done", "failed",
+            ]),
             "lane": _field(I, LANES), "title": _field(S), "step": _field(I), "steps_total": _field(I),
             "step_label": _field(S), "reason": _field(S),
         }),

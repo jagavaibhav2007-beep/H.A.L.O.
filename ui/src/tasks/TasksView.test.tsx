@@ -56,3 +56,38 @@ test("running tasks retain their available controls", () => {
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
   expect((screen.getByRole("combobox", { name: "Lane" }) as HTMLSelectElement).disabled).toBe(false);
 });
+
+test("stopping keeps progress visible without actionable controls", () => {
+  useHaloStore.setState({
+    tasks: {
+      [task.task_id]: { ...task, state: "stopping", step: 3, steps_total: 9 },
+    },
+  });
+
+  render(<TasksView sendTaskOp={vi.fn()} sendLanePin={vi.fn()} />);
+
+  expect(screen.getByText("Stopping")).toBeTruthy();
+  expect(screen.getByText(/step 3\/9/i)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  expect((screen.getByRole("combobox", { name: "Lane" }) as HTMLSelectElement).disabled).toBe(true);
+});
+
+test("stopped is neutral terminal history", () => {
+  useHaloStore.setState({
+    tasks: {
+      [task.task_id]: {
+        ...task,
+        state: "stopped",
+        step: 3,
+        steps_total: 9,
+        reason: "stopped",
+      },
+    },
+  });
+
+  render(<TasksView sendTaskOp={vi.fn()} sendLanePin={vi.fn()} />);
+
+  expect(screen.getByText("Stopped")).toBeTruthy();
+  expect(screen.getByText("Stopped after 3 of 9.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+});

@@ -102,11 +102,54 @@ async def check_pause_resume_and_stop_within_two_seconds() -> None:
     await wait_until(lambda: store.get_task("controlled")["state"] == "running")
     started = time.monotonic()
     await runtime.handle_op({"id": "stop", "op": "stop", "task_id": "controlled"}, broadcast)
-    await wait_until(lambda: store.get_task("controlled")["state"] == "failed")
+    await wait_until(lambda: store.get_task("controlled")["state"] == "stopped")
     assert time.monotonic() - started < 2.0
     assert store.get_task("controlled")["reason"] == "stopped"
     await runtime.close()
     print("[check 2] pause/resume is honest and cooperative stop lands under two seconds: OK")
+
+
+async def check_stop_lifecycle_uses_complete_snapshots() -> None:
+    """Catches a stop transition that loses title/progress or masquerades as failure."""
+    frames: list[tuple[str, dict]] = []
+
+    async def broadcast(kind: str, payload: dict) -> None:
+        frames.append((kind, payload))
+
+    async def waits(_args: dict, ctx) -> dict:
+        await ctx.progress(3, 9, "invoice.pdf", checkpoint={"docs": ["a", "b", "c"]})
+        await ctx.cancelled.wait()
+        await ctx.checkpoint()
+        raise AssertionError("checkpoint must raise TaskStopped")
+
+    runtime = TaskRuntime(broadcast, concurrency=1)
+    await runtime.submit(
+        task_id="stateful-stop", conversation_id="tasks", tool="doc_digest",
+        args={}, args_redacted={}, tier=1, lane=1, title="Digest 9 documents",
+        steps_total=9, supports_pause=True, fn=waits,
+    )
+    await wait_until(lambda: store.get_task("stateful-stop")["step"] == 3)
+    await runtime.handle_op(
+        {"id": "stop", "op": "stop", "task_id": "stateful-stop"}, broadcast,
+    )
+    await wait_until(lambda: any(
+        kind == "task_state"
+        and payload["task_id"] == "stateful-stop"
+        and payload["state"] == "stopped"
+        for kind, payload in frames
+    ))
+    states = [
+        payload for kind, payload in frames
+        if kind == "task_state" and payload["task_id"] == "stateful-stop"
+    ]
+    assert [payload["state"] for payload in states][-2:] == ["stopping", "stopped"], states
+    assert all(payload.get("title") == "Digest 9 documents" for payload in states[-2:]), states
+    assert all(
+        payload.get("step") == 3 and payload.get("steps_total") == 9
+        for payload in states[-2:]
+    ), states
+    await runtime.close()
+    print("[check 2b] stop emits complete stopping -> stopped snapshots: OK")
 
 
 async def check_restart_reconciliation_preserves_partial_undo() -> None:
@@ -233,7 +276,7 @@ async def check_safe_persistence_and_structured_terminal_results() -> None:
         args={}, args_redacted={}, tier=3, lane=1, title="Command",
         steps_total=None, supports_pause=False, fn=stop,
     )
-    await wait_until(lambda: store.get_task("safe-stop")["state"] == "failed")
+    await wait_until(lambda: store.get_task("safe-stop")["state"] == "stopped")
     stopped = store.get_task("safe-stop")
     assert stopped["reason"] == "stopped"
     assert json.loads(stopped["result_json"])["artifacts"][0]["status"] == "partial"
@@ -306,7 +349,7 @@ async def check_server_detaches_task_from_same_conversation_and_real_stop() -> N
         await ws.send(json.dumps(frame("task_op", task_id=task_id, op="stop")))
         while True:
             event = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            if event["type"] == "task_state" and event["task_id"] == task_id and event["state"] == "failed":
+            if event["type"] == "task_state" and event["task_id"] == task_id and event["state"] == "stopped":
                 assert event["reason"] == "stopped"
                 break
         assert time.monotonic() - started < 2.0
@@ -322,6 +365,7 @@ async def check_server_detaches_task_from_same_conversation_and_real_stop() -> N
 async def main() -> None:
     await check_pool_is_bounded_and_progress_is_durable()
     await check_pause_resume_and_stop_within_two_seconds()
+    await check_stop_lifecycle_uses_complete_snapshots()
     await check_restart_reconciliation_preserves_partial_undo()
     await check_organize_emits_one_durable_receipt_per_move()
     await check_safe_persistence_and_structured_terminal_results()

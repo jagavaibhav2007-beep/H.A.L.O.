@@ -352,14 +352,21 @@ async def check_task_op_round_trip(port: int, token: str) -> None:
         await _authenticate(ws, token)
         await _drain_snapshot(ws)
         task_id = "task-seed-1"  # seeded running task; handle_task_op's own default
-        for op, state in (("pause", "paused"), ("resume", "running"), ("stop", "done")):
+        for op, state in (("pause", "paused"), ("resume", "running")):
             await ws.send(json.dumps(_frame("task_op", task_id=task_id, op=op)))
             frame = await _recv(ws)
             assert frame["type"] == "task_state" and frame["state"] == state, (op, frame)
             assert frame["task_id"] == task_id, frame
+        await ws.send(json.dumps(_frame("task_op", task_id=task_id, op="stop")))
+        stopping = await _recv(ws)
+        stopped = await _recv(ws)
+        assert stopping["type"] == "task_state" and stopping["state"] == "stopping", stopping
+        assert stopped["type"] == "task_state" and stopped["state"] == "stopped", stopped
+        assert stopping["title"] == stopped["title"] == "Syncing calendar"
+        assert stopping["step"] == stopped["step"] == 2
     finally:
         await ws.close()
-    print("[check 11] task_op pause->paused, resume->running, stop->done: OK")
+    print("[check 11] task_op pause->paused, resume->running, stop->stopping->stopped: OK")
 
 
 async def check_lane_pin_round_trip(port: int, token: str) -> None:

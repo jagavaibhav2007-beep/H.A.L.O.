@@ -379,14 +379,17 @@ async def handle_task_op(msg: dict, broadcast: BroadcastFn) -> None:
     Brain owns the lifecycle.
     ponytail: an omitted task_id ('Pause all') is treated as the running seed."""
     op = msg.get("op")
-    new_state = {"stop": "done", "pause": "paused", "resume": "running"}.get(op)
+    new_state = {"pause": "paused", "resume": "running"}.get(op)
+    if op == "stop":
+        task_id = msg.get("task_id") or "task-seed-1"
+        await _emit_task(broadcast, {"task_id": task_id, "state": "stopping"})
+        await _emit_task(broadcast, {"task_id": task_id, "state": "stopped", "reason": "stopped"})
+        return
     if new_state is None:
         return
     task_id = msg.get("task_id") or "task-seed-1"
     patch = {"task_id": task_id, "state": new_state}
-    if op == "stop":
-        patch["reason"] = "you stopped it"
-    elif op == "pause":
+    if op == "pause":
         patch["reason"] = "you paused it"
     else:  # resume clears any prior pause/stop reason
         patch["reason"] = None

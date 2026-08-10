@@ -26,6 +26,24 @@ Broadcast = Callable[[str, dict], Awaitable[None]]
 Continuation = Callable[[str, str, str], Awaitable[None]]
 _LOG_CHUNK_BYTES = 4 * 1024
 _LOG_FLUSH_SECONDS = 0.25
+_TASK_FRAME_FIELDS = ("title", "step", "steps_total", "step_label", "reason")
+
+
+def task_frame(row: dict) -> dict:
+    """Serialize one complete authoritative task row for IPC."""
+    payload = {
+        "task_id": row["task_id"],
+        "state": row["state"],
+        "lane": row["lane"],
+    }
+    payload.update({key: row[key] for key in _TASK_FRAME_FIELDS if row.get(key) is not None})
+    return payload
+
+
+async def _publish_task(broadcast: Broadcast, task_id: str) -> None:
+    row = await asyncio.to_thread(store.get_task, task_id)
+    if row is not None:
+        await broadcast("task_state", task_frame(row))
 
 
 class TaskStopped(Exception):
@@ -79,7 +97,7 @@ class TaskContext:
 
     async def _state(self, state: str, **fields) -> None:
         await asyncio.to_thread(store.upsert_task, self.task_id, state=state, **fields)
-        await self.broadcast("task_state", {"task_id": self.task_id, "state": state, "lane": self.lane, **fields})
+        await _publish_task(self.broadcast, self.task_id)
 
     async def progress(
         self,
@@ -100,14 +118,7 @@ class TaskContext:
         if checkpoint is not None:
             fields["checkpoint_json"] = json.dumps(checkpoint, ensure_ascii=False, default=str)
         await asyncio.to_thread(store.upsert_task, self.task_id, state="running", **fields)
-        await self.broadcast("task_state", {
-            "task_id": self.task_id,
-            "state": "running",
-            "lane": self.lane,
-            "step": step,
-            "steps_total": steps_total,
-            "step_label": step_label,
-        })
+        await _publish_task(self.broadcast, self.task_id)
 
     async def log(self, text: str) -> None:
         if not text:
@@ -213,14 +224,7 @@ class TaskRuntime:
         if steps_total is not None:
             fields["steps_total"] = steps_total
         await asyncio.to_thread(store.upsert_task, task_id, **fields)
-        await self._broadcast("task_state", {
-            "task_id": task_id,
-            "state": "waiting",
-            "lane": lane,
-            "title": title,
-            "step": 0,
-            **({"steps_total": steps_total} if steps_total is not None else {}),
-        })
+        await _publish_task(self._broadcast, task_id)
         context = TaskContext(task_id, lane, tier, supports_pause, self._broadcast, admission_fingerprint)
         runner = asyncio.create_task(self._run(
             context=context,
@@ -307,13 +311,7 @@ class TaskRuntime:
             result_json=result_json,
             reason=None,
         )
-        await self._broadcast("task_state", {
-            "task_id": ctx.task_id,
-            "state": "done",
-            "lane": ctx.lane,
-            "title": job["title"],
-            **({"steps_total": job["steps_total"], "step": job["steps_total"]} if job["steps_total"] is not None else {}),
-        })
+        await _publish_task(self._broadcast, ctx.task_id)
         await self._broadcast(
             "activity",
             gate._activity_frame(
@@ -328,13 +326,11 @@ class TaskRuntime:
         ctx: TaskContext = job["context"]
         output = ctx._checkpoint if output is None else output
         undo_token = await self._record_result(output, "stopped", **job) if output else None
-        fields = {"state": "failed", "reason": "stopped"}
+        fields = {"state": "stopped", "reason": "stopped"}
         if output is not None:
             fields["result_json"] = json.dumps(output, ensure_ascii=False, default=str)
         await asyncio.to_thread(store.upsert_task, ctx.task_id, **fields)
-        await self._broadcast("task_state", {
-            "task_id": ctx.task_id, "state": "failed", "lane": ctx.lane, "reason": "stopped",
-        })
+        await _publish_task(self._broadcast, ctx.task_id)
         if undo_token:
             from brain import gate
             await self._broadcast(
@@ -359,9 +355,7 @@ class TaskRuntime:
         if output is not None:
             fields["result_json"] = json.dumps(output, ensure_ascii=False, default=str)
         await asyncio.to_thread(store.upsert_task, ctx.task_id, **fields)
-        await self._broadcast("task_state", {
-            "task_id": ctx.task_id, "state": "failed", "lane": ctx.lane, "reason": reason,
-        })
+        await _publish_task(self._broadcast, ctx.task_id)
         if undo_token:
             from brain import gate
             await self._broadcast(
@@ -422,13 +416,14 @@ class TaskRuntime:
                     continue
                 ctx.pause_requested.clear()
             else:
+                await ctx._state("stopping")
                 ctx.cancelled.set()
 
     async def reconcile(self) -> int:
         """Mark torn tasks failed and preserve an undo for checkpointed work."""
         from brain import gate
 
-        rows = await asyncio.to_thread(store.list_tasks, ["waiting", "running", "paused"])
+        rows = await asyncio.to_thread(store.list_tasks, ["waiting", "running", "paused", "stopping"])
         for row in rows:
             checkpoint = None
             if row.get("checkpoint_json"):
@@ -455,8 +450,7 @@ class TaskRuntime:
                 except Exception:  # noqa: BLE001 - reconciliation still fails honestly
                     logger.exception("could not build recovery action for task %s", row["task_id"])
             await asyncio.to_thread(store.upsert_task, row["task_id"], state="failed", reason=reason)
-            payload = {"task_id": row["task_id"], "state": "failed", "lane": row.get("lane") or 1, "reason": reason}
-            await self._broadcast("task_state", payload)
+            await _publish_task(self._broadcast, row["task_id"])
             if undo_token:
                 await self._broadcast("activity", {
                     "text": f"Recovered partial {row.get('tool') or 'task'} work after restart.",
