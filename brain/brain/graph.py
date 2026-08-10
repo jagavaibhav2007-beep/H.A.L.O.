@@ -26,7 +26,7 @@ from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
-from brain import gate, llm, memory, secrets_store, store
+from brain import gate, llm, memory, secrets_store, store, task_runtime
 import brain.tools.files  # noqa: F401 -- import registers the Lane-1 file tools into gate.TOOLS
 import brain.tools.docs  # noqa: F401 -- import registers doc_digest (Layer 2, systemdesign/13)
 import brain.tools.commands  # noqa: F401 -- registers managed command/script tasks
@@ -117,6 +117,7 @@ class State(TypedDict, total=False):
     pending_tool_result: dict | None
     task_id: str | None
     turn_id: str | None
+    detached_task_started: bool
     # Step 10 tool-calling loop. `pending_tool_calls` is a QUEUE: the gate node
     # pops exactly one per visit, so a Tier-3 suspension partway through a
     # multi-call round re-runs only the call it suspended on (an interrupting
@@ -155,6 +156,8 @@ def _after_gate(state: State) -> str:
         return END
     if state.get("pending_tool_calls"):
         return "gate"  # more calls in this round; drain them one at a time
+    if state.get("detached_task_started"):
+        return END
     return "respond" if state.get("tool_rounds") else END
 
 
@@ -224,6 +227,7 @@ async def _gate_node(state: State, config) -> dict:
             task_id=state.get("task_id"),
             broadcast=ctx["broadcast"],
             user_text=ctx.get("user_text"),
+            origin_turn_id=state.get("turn_id"),
         )
         content = (update.get("messages") or [{}])[0].get("content") or ""
         # Only suppress a repeat whose result is still VERBATIM above. A result
@@ -299,8 +303,11 @@ def _prompt_messages(state: State) -> list[dict]:
             else m
             for i, m in enumerate(live)
         ]
-    # turn_id is local IPC correlation metadata, not model-visible content.
-    live = [{key: value for key, value in message.items() if key != "turn_id"} for message in live]
+    # Local IPC/history metadata is not provider-visible content.
+    live = [
+        {key: value for key, value in message.items() if key not in {"turn_id", "internal"}}
+        for message in live
+    ]
     summary = state.get("summary")
     if not summary:
         return live
@@ -522,6 +529,7 @@ async def push_conversation_history(msg: dict, send) -> None:
         }
         for item in snap.values.get("messages", [])
         if item.get("role") in {"user", "assistant"}
+        and not item.get("internal")
         and isinstance(item.get("content"), str)
         and item["content"]
     ]
@@ -769,7 +777,7 @@ async def rehydrate_pending() -> None:
             gate.register_pending(payload, cid, approval_fingerprint)
 
 
-_SNAPSHOT_TASK_STATES = ["waiting", "running", "paused", "waiting_approval", "failed"]
+_SNAPSHOT_TASK_STATES = ["waiting", "running", "paused", "waiting_approval", "stopping", "stopped", "failed"]
 
 
 def _task_frame(row: dict) -> dict:
@@ -907,6 +915,7 @@ async def run_turn(msg: dict, broadcast) -> None:
                     "messages": [{
                         "role": "user", "content": content,
                         **({"turn_id": turn_id} if turn_id else {}),
+                        **({"internal": True} if msg.get("_internal") else {}),
                     }],
                     "error": None,
                     "redirected": False,
@@ -914,6 +923,7 @@ async def run_turn(msg: dict, broadcast) -> None:
                     "pending_tool_calls": None,
                     "task_id": msg.get("task_id"),
                     "turn_id": turn_id,
+                    "detached_task_started": False,
                     "tool_rounds": 0,  # per-turn: the cap is not cumulative
                 },
                 config,
@@ -923,6 +933,9 @@ async def run_turn(msg: dict, broadcast) -> None:
 
         if await _finish_turn(result, cid, broadcast):
             return  # suspended on a Tier-3 approval: no done, lock releases
+        runtime = task_runtime.current()
+        if runtime is not None and turn_id:
+            await runtime.seal_group(cid, turn_id)
         await _bill_and_extract(cid, result, ctx, api_key, broadcast)
     except Exception as exc:  # noqa: BLE001 - rule 2: never a silent drop
         logger.exception("turn failed for conversation_id=%s", cid)
@@ -974,6 +987,10 @@ async def resume_turn(approval_id: str, decision: str, edited_args: dict | None,
         if await _finish_turn(result, cid, broadcast):
             return True  # re-suspended (an edit raised the tier, or a later
             # round hit another Tier 3): nothing to bill or extract yet.
+        turn_id = result.get("turn_id") or ctx.get("turn_id")
+        runtime = task_runtime.current()
+        if runtime is not None and turn_id:
+            await runtime.seal_group(cid, turn_id)
         await _bill_and_extract(cid, result, ctx, api_key, broadcast)
     except Exception as exc:  # noqa: BLE001 - rule 2: never a silent drop
         logger.exception("resume failed for approval_id=%s", approval_id)

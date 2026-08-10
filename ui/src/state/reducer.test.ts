@@ -145,6 +145,17 @@ test("an older unanswered placeholder cannot absorb a correlated later turn", ()
   expect(turns[3]).toMatchObject({ role: "assistant", text: "answer", status: "done" });
 });
 
+test("done removes an empty completed assistant placeholder", () => {
+  let state = beginUserRequest(initialState, "chat", "digest this folder", "batch-turn");
+  state = applyFrame(state, {
+    type: "done", ...envelope(), conversation_id: "chat", turn_id: "batch-turn",
+  });
+
+  expect(state.conversations.chat.turns).toEqual([
+    expect.objectContaining({ role: "user", text: "digest this folder", turnId: "batch-turn" }),
+  ]);
+});
+
 function task(task_id: string, state: TaskStateMsg["state"] = "running"): TaskStateMsg {
   return { type: "task_state", ...envelope(), task_id, state, lane: 1 };
 }
@@ -308,7 +319,7 @@ test("terminal done clears only the approval owned by that conversation", () => 
 
   expect(state.approvals["approval-chat"]).toBeUndefined();
   expect(state.approvals["approval-other"]).toBeDefined();
-  expect(state.conversations.chat.turns[1]).toMatchObject({ role: "assistant", status: "done" });
+  expect(state.conversations.chat.turns).toHaveLength(1);
 });
 
 test("terminal error clears the conversation approval when no activity can arrive", () => {

@@ -819,13 +819,13 @@ async def start(
         # no approval-free mutation authority (`_internal`).
         from brain import graph, task_runtime
 
-        async def continue_task(conversation_id: str, text: str, task_id: str) -> None:
+        async def continue_task(conversation_id: str, text: str, origin_turn_id: str) -> None:
             async with locks.hold(conversation_id), turn_slots:
                 await graph.run_turn({
                     "text": text,
                     "conversation_id": conversation_id,
                     "source": "ui",
-                    "task_id": task_id,
+                    "turn_id": f"task-group-{origin_turn_id}",
                     "_internal": True,
                 }, _broadcast_all)
 

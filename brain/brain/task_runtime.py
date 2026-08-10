@@ -158,6 +158,16 @@ class _ActiveTask:
     tool: str
 
 
+@dataclass
+class _TaskGroup:
+    conversation_id: str
+    origin_turn_id: str
+    task_ids: set[str] = field(default_factory=set)
+    outcomes: dict[str, dict] = field(default_factory=dict)
+    sealed: bool = False
+    dispatched: bool = False
+
+
 class TaskRuntime:
     def __init__(
         self,
@@ -171,6 +181,9 @@ class TaskRuntime:
         self._broadcast = broadcast
         self._continuation = continuation
         self._active: dict[str, _ActiveTask] = {}
+        self._groups: dict[tuple[str, str], _TaskGroup] = {}
+        self._groups_lock = asyncio.Lock()
+        self._continuation_tasks: set[asyncio.Task] = set()
         self._closing = False
 
     @property
@@ -194,6 +207,7 @@ class TaskRuntime:
         inverse_builder=None,
         persisted_args: dict | None = None,
         admission_fingerprint: str | None = None,
+        origin_turn_id: str | None = None,
     ) -> str:
         if self._closing:
             raise RuntimeError("task runtime is shutting down")
@@ -225,6 +239,13 @@ class TaskRuntime:
             fields["steps_total"] = steps_total
         await asyncio.to_thread(store.upsert_task, task_id, **fields)
         await _publish_task(self._broadcast, task_id)
+        if origin_turn_id is not None:
+            key = (conversation_id, origin_turn_id)
+            async with self._groups_lock:
+                group = self._groups.setdefault(
+                    key, _TaskGroup(conversation_id, origin_turn_id),
+                )
+                group.task_ids.add(task_id)
         context = TaskContext(task_id, lane, tier, supports_pause, self._broadcast, admission_fingerprint)
         runner = asyncio.create_task(self._run(
             context=context,
@@ -237,6 +258,7 @@ class TaskRuntime:
             steps_total=steps_total,
             fn=fn,
             inverse_builder=inverse_builder,
+            origin_turn_id=origin_turn_id,
         ))
         self._active[task_id] = _ActiveTask(context, runner, tool)
         runner.add_done_callback(lambda _done: self._active.pop(task_id, None))
@@ -320,7 +342,10 @@ class TaskRuntime:
             ),
         )
         payload, _ = gate._cap_result(output)
-        await self._continue(job["conversation_id"], ctx.task_id, f"Task {ctx.task_id} completed. Untrusted task result: {payload}")
+        await self._complete_task(
+            job, "done", output, None,
+            f"Task {ctx.task_id} completed. Untrusted task result: {payload}",
+        )
 
     async def _finish_stopped(self, output=None, **job) -> None:
         ctx: TaskContext = job["context"]
@@ -342,8 +367,8 @@ class TaskRuntime:
             from brain import gate
             payload, _ = gate._cap_result(output)
             detail = f" Untrusted partial result: {payload}"
-        await self._continue(
-            job["conversation_id"], ctx.task_id,
+        await self._complete_task(
+            job, "stopped", output, "stopped",
             f"Task {ctx.task_id} stopped before completion.{detail}",
         )
 
@@ -367,10 +392,110 @@ class TaskRuntime:
             from brain import gate
             payload, _ = gate._cap_result(output)
             detail = f" Untrusted partial result: {payload}"
-        await self._continue(
-            job["conversation_id"], ctx.task_id,
+        await self._complete_task(
+            job, "failed", output, reason,
             f"Task {ctx.task_id} failed: {reason}.{detail}",
         )
+
+    async def _complete_task(
+        self,
+        job: dict,
+        status: str,
+        output,
+        reason: str | None,
+        direct_text: str,
+    ) -> None:
+        """Record one terminal outcome and release its origin-turn barrier."""
+        origin_turn_id = job.get("origin_turn_id")
+        if origin_turn_id is None:
+            await self._continue(
+                job["conversation_id"], job["context"].task_id, direct_text,
+            )
+            return
+
+        from brain import gate
+
+        outcome = {
+            "task_id": job["context"].task_id,
+            "tool": job["tool"],
+            "status": status,
+        }
+        if reason is not None:
+            outcome["reason"] = reason
+        if output is not None:
+            capped, omitted = gate._cap_result(output)
+            try:
+                outcome["result"] = json.loads(capped)
+            except json.JSONDecodeError:
+                outcome["result"] = capped
+            if omitted:
+                outcome["omitted_items"] = omitted
+
+        dispatch = None
+        key = (job["conversation_id"], origin_turn_id)
+        async with self._groups_lock:
+            group = self._groups.get(key)
+            if group is None:
+                logger.warning("task group missing for terminal task %s", job["context"].task_id)
+                return
+            group.outcomes[job["context"].task_id] = outcome
+            dispatch = self._take_ready_group(key, group)
+        if dispatch is not None:
+            self._schedule_continuation(*dispatch)
+
+    def _take_ready_group(
+        self,
+        key: tuple[str, str],
+        group: _TaskGroup,
+    ) -> tuple[str, str, str] | None:
+        if (
+            group.dispatched
+            or not group.sealed
+            or not group.task_ids
+            or group.outcomes.keys() != group.task_ids
+        ):
+            return None
+        from brain import gate
+
+        group.dispatched = True
+        ordered = [group.outcomes[task_id] for task_id in sorted(group.task_ids)]
+        payload, omitted = gate._cap_result(ordered)
+        suffix = f" ({omitted} outcome items omitted.)" if omitted else ""
+        text = f"All background tasks for this request finished. Untrusted task outcomes: {payload}{suffix}"
+        self._groups.pop(key, None)
+        return group.conversation_id, text, group.origin_turn_id
+
+    async def seal_group(self, conversation_id: str, origin_turn_id: str) -> None:
+        """Seal an origin after graph submission; continuation is never awaited here."""
+        dispatch = None
+        key = (conversation_id, origin_turn_id)
+        async with self._groups_lock:
+            group = self._groups.get(key)
+            if group is None:
+                return
+            group.sealed = True
+            dispatch = self._take_ready_group(key, group)
+        if dispatch is not None:
+            self._schedule_continuation(*dispatch)
+
+    def _schedule_continuation(self, conversation_id: str, text: str, origin_turn_id: str) -> None:
+        if self._continuation is None or self._closing:
+            return
+        task = asyncio.create_task(self._continuation(conversation_id, text, origin_turn_id))
+        self._continuation_tasks.add(task)
+
+        def finished(done: asyncio.Task) -> None:
+            self._continuation_tasks.discard(done)
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.error(
+                    "task-group continuation failed for %s", origin_turn_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(finished)
 
     async def _continue(self, conversation_id: str, task_id: str, text: str) -> None:
         if self._continuation is not None and not self._closing:
@@ -474,6 +599,11 @@ class TaskRuntime:
                 task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+        continuations = list(self._continuation_tasks)
+        for task in continuations:
+            task.cancel()
+        if continuations:
+            await asyncio.gather(*continuations, return_exceptions=True)
 
     def cancel(self) -> None:
         self._closing = True

@@ -152,6 +152,82 @@ async def check_stop_lifecycle_uses_complete_snapshots() -> None:
     print("[check 2b] stop emits complete stopping -> stopped snapshots: OK")
 
 
+async def check_origin_group_continues_once_after_every_task() -> None:
+    continuations: list[tuple[str, str, str]] = []
+
+    async def noop_broadcast(_kind: str, _payload: dict) -> None:
+        return None
+
+    async def continuation(cid: str, text: str, origin: str) -> None:
+        continuations.append((cid, text, origin))
+
+    async def success(args: dict, _ctx) -> dict:
+        await asyncio.sleep(args["delay"])
+        return {"file": args["file"], "status": "ok"}
+
+    async def failure(_args: dict, _ctx) -> dict:
+        raise TaskFailed("unreadable", {"file": "bad.pdf", "status": "failed"})
+
+    runtime = TaskRuntime(noop_broadcast, continuation, concurrency=2)
+    await runtime.submit(
+        task_id="group-good", conversation_id="c", origin_turn_id="turn-1",
+        tool="doc_digest", args={"delay": 0.05, "file": "good.pdf"},
+        args_redacted={}, tier=1, lane=1, title="Good", steps_total=1,
+        supports_pause=True, fn=success,
+    )
+    await runtime.submit(
+        task_id="group-bad", conversation_id="c", origin_turn_id="turn-1",
+        tool="doc_digest", args={}, args_redacted={}, tier=1, lane=1,
+        title="Bad", steps_total=1, supports_pause=True, fn=failure,
+    )
+    await runtime.seal_group("c", "turn-1")
+    await asyncio.sleep(0.02)
+    assert continuations == []
+    await wait_until(lambda: len(continuations) == 1)
+    assert continuations[0][0] == "c"
+    assert continuations[0][2] == "turn-1"
+    assert '"status": "done"' in continuations[0][1]
+    assert '"status": "failed"' in continuations[0][1]
+    await asyncio.sleep(0.05)
+    assert len(continuations) == 1
+    await runtime.close()
+    print("[check 2c] one origin group continues once after every task is terminal: OK")
+
+
+async def check_origin_group_can_finish_before_sealing() -> None:
+    continuations: list[tuple[str, str, str]] = []
+
+    async def noop_broadcast(_kind: str, _payload: dict) -> None:
+        return None
+
+    async def continuation(cid: str, text: str, origin: str) -> None:
+        continuations.append((cid, text, origin))
+
+    async def immediate(args: dict, _ctx) -> dict:
+        return {"file": args["file"]}
+
+    runtime = TaskRuntime(noop_broadcast, continuation, concurrency=2)
+    for task_id in ("preseal-a", "preseal-b"):
+        await runtime.submit(
+            task_id=task_id, conversation_id="preseal", origin_turn_id="turn-preseal",
+            tool="doc_digest", args={"file": f"{task_id}.pdf"}, args_redacted={},
+            tier=1, lane=1, title=task_id, steps_total=1,
+            supports_pause=True, fn=immediate,
+        )
+    await wait_until(lambda: all(
+        store.get_task(task_id)["state"] == "done"
+        for task_id in ("preseal-a", "preseal-b")
+    ))
+    assert continuations == []
+    await runtime.seal_group("preseal", "turn-preseal")
+    await wait_until(lambda: len(continuations) == 1)
+    await runtime.seal_group("preseal", "turn-preseal")
+    await asyncio.sleep(0.02)
+    assert len(continuations) == 1
+    await runtime.close()
+    print("[check 2d] a completed group dispatches once when later sealed: OK")
+
+
 async def check_restart_reconciliation_preserves_partial_undo() -> None:
     src = ROOT / "before.txt"
     dst = ROOT / "sorted" / "before.txt"
@@ -366,6 +442,8 @@ async def main() -> None:
     await check_pool_is_bounded_and_progress_is_durable()
     await check_pause_resume_and_stop_within_two_seconds()
     await check_stop_lifecycle_uses_complete_snapshots()
+    await check_origin_group_continues_once_after_every_task()
+    await check_origin_group_can_finish_before_sealing()
     await check_restart_reconciliation_preserves_partial_undo()
     await check_organize_emits_one_durable_receipt_per_move()
     await check_safe_persistence_and_structured_terminal_results()

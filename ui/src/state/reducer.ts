@@ -460,10 +460,10 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
     case "done": {
       const conv = getConversation(state, frame.conversation_id);
       const open = correlatedOpenTurn(conv, frame.turn_id);
-      const next = open
-        ? replaceConversation(state, {
-            ...conv,
-            turns: patchOpenTurn(
+      const turns = open && !frame.interrupted && open.text.length === 0
+        ? conv.turns.filter((turn) => turn !== open)
+        : open
+          ? patchOpenTurn(
               conv.turns,
               open,
               frame.interrupted
@@ -473,7 +473,12 @@ export function applyFrame(state: HaloState, frame: IpcMessage): HaloState {
                     note: "stopped · what should I do differently?",
                   }
                 : { status: "done", taskId: frame.task_id, model: frame.model },
-            ),
+            )
+          : conv.turns;
+      const next = open
+        ? replaceConversation(state, {
+            ...conv,
+            turns,
           })
         : state;
       return resolveApprovalsForConversation(next, frame.conversation_id);

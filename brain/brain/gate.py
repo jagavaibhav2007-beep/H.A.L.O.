@@ -262,6 +262,7 @@ async def gated_execute(
     task_id: str | None,
     broadcast,
     user_text: str | None = None,
+    origin_turn_id: str | None = None,
 ) -> dict:
     """The ONE path every tool call takes. Returns the graph-state update.
 
@@ -340,6 +341,7 @@ async def gated_execute(
     if entry and entry.get("task"):
         return await _start_task_tail(
             tool, args, tier, frame_task, conversation_id, broadcast, fingerprint,
+            origin_turn_id,
         )
     return await _execute_tail(tool, args, tier, frame_task, broadcast)
 
@@ -355,6 +357,7 @@ async def _start_task_tail(
     conversation_id: str,
     broadcast,
     admission_fingerprint: str | None,
+    origin_turn_id: str | None,
 ) -> dict:
     from brain import task_runtime
 
@@ -386,10 +389,12 @@ async def _start_task_tail(
         inverse_builder=entry.get("inverse"),
         persisted_args=(entry["persist_args"](args) if entry.get("persist_args") else None),
         admission_fingerprint=admission_fingerprint,
+        origin_turn_id=origin_turn_id,
     )
     return {
         "pending_tool_result": {"tool": tool, "status": "started", "task_id": task_id},
-        "messages": [{"role": "assistant", "content": f"Started task {task_id} for {tool}."}],
+        "detached_task_started": True,
+        "messages": [{"role": "assistant", "content": f"Started background task {task_id}."}],
     }
 
 

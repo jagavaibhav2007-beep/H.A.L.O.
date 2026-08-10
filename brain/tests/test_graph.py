@@ -187,6 +187,7 @@ async def check_conversation_history(port: int, token: str) -> None:
                 {"role": "assistant", "content": "", "tool_calls": [{"id": "call"}]},
                 {"role": "tool", "content": "private tool output", "tool_call_id": "call"},
                 {"role": "assistant", "content": "visible answer"},
+                {"role": "user", "content": "synthetic task result", "internal": True},
             ]},
         )
         filtered = await _query_history(ws, "g-filter")
@@ -363,6 +364,13 @@ def check_generated_context_never_has_system_authority() -> None:
     memory = graph._untrusted_context_message("memory", poisoned)
     assert memory["role"] != "system", memory
     assert "untrusted" in memory["content"].casefold(), memory
+    projected_internal = graph._prompt_messages({
+        "messages": [{
+            "role": "user", "content": "task outcome", "turn_id": "group-turn",
+            "internal": True,
+        }],
+    })
+    assert projected_internal == [{"role": "user", "content": "task outcome"}], projected_internal
     print("[check 4e] generated summaries/memories are clearly marked untrusted and never receive system authority: OK")
 
 
