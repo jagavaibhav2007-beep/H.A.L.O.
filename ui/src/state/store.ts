@@ -185,5 +185,12 @@ export const selectActiveConversationId = (s: HaloStore) => s.chats.activeId;
 export const selectBrainStatus = (s: HaloStore) => s.connection.brainStatus;
 export const selectVoiceStatus = (s: HaloStore) => s.connection.voiceStatus;
 export const selectPendingApprovalCount = (s: HaloStore) => Object.keys(s.approvals).length;
-export const selectRunningTask = (s: HaloStore) =>
-  Object.values(s.tasks).find((t) => t.state === "running");
+const ACTIVE_TASK_PRIORITY = ["stopping", "running", "waiting"] as const;
+export const selectActiveTask = (s: HaloStore) => {
+  const tasks = Object.values(s.tasks);
+  for (const state of ACTIVE_TASK_PRIORITY) {
+    const task = tasks.find((candidate) => candidate.state === state);
+    if (task) return task;
+  }
+  return undefined;
+};

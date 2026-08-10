@@ -66,9 +66,27 @@
   height: 6px;
 }
 .task-progress-bar > span {
+  position: relative;
+  overflow: hidden;
   border-radius: 999px;
   background: var(--primary);
   transition: width var(--motion-base) var(--ease-out);
+}
+
+@keyframes task-progress-sheen {
+  to {
+    transform: translateX(300%);
+  }
+}
+
+.task-card[data-state="running"] .task-progress-bar > span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 45%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--on-primary) 55%, transparent), transparent);
+  transform: translateX(-200%);
+  animation: task-progress-sheen 1.4s linear infinite;
 }
 .task-progress-text {
   font-size: var(--text-xs);
@@ -125,4 +143,10 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-card[data-state="running"] .task-progress-bar > span::after {
+    animation: none;
+  }
 }

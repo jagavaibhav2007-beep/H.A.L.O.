@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { TaskStateMsg } from "../ipc/contract";
 import { useHaloStore } from "../state/store";
@@ -90,4 +90,33 @@ test("stopped is neutral terminal history", () => {
   expect(screen.getByText("Stopped")).toBeTruthy();
   expect(screen.getByText("Stopped after 3 of 9.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+});
+
+test("Stop sends once, locks immediately, and follows authoritative states", () => {
+  const sendTaskOp = vi.fn();
+  useHaloStore.setState({ tasks: { [task.task_id]: task } });
+  render(<TasksView sendTaskOp={sendTaskOp} sendLanePin={vi.fn()} />);
+
+  const stop = screen.getByRole("button", { name: "Stop" });
+  fireEvent.click(stop);
+  fireEvent.click(stop);
+  expect(sendTaskOp).toHaveBeenCalledTimes(1);
+  expect(sendTaskOp).toHaveBeenCalledWith("stop", task.task_id);
+  expect((screen.getByRole("button", { name: "Stopping…" }) as HTMLButtonElement).disabled).toBe(true);
+
+  act(() => {
+    useHaloStore.setState({
+      tasks: { [task.task_id]: { ...task, state: "stopping", step: 2, steps_total: 4 } },
+    });
+  });
+  expect(screen.getByText("Stopping")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Stop/ })).toBeNull();
+
+  act(() => {
+    useHaloStore.setState({
+      tasks: { [task.task_id]: { ...task, state: "stopped", step: 2, steps_total: 4 } },
+    });
+  });
+  expect(screen.getByText("Stopped")).toBeTruthy();
+  expect(screen.getByText("Stopped after 2 of 4.")).toBeTruthy();
 });

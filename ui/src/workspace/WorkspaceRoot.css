@@ -162,12 +162,40 @@ html[data-transparency="off"] #root {
   max-width: 360px;
 }
 
+.status-task-group,
 .status-task-chip {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
   min-width: 0;
+}
+
+.status-task-group {
+  margin-left: auto;
+}
+
+.status-task-spinner {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--primary);
+}
+
+.status-task-state {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+@keyframes status-task-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.status-task-chip[data-state="running"] .status-task-spinner,
+.status-task-chip[data-state="stopping"] .status-task-spinner {
+  animation: status-task-spin 1.1s linear infinite;
 }
 
 /* max-width caps it; min-width:0 is what lets it actually ellipsize. Without
@@ -325,13 +353,24 @@ html[data-transparency="off"] #root {
     flex-wrap: wrap;
   }
 
-  .status-task-chip {
+  .status-task-group {
     flex: 1 1 100%;
     margin-left: 0;
+  }
+
+  .status-task-chip {
+    flex: 1;
   }
 
   .status-task-title {
     flex: 1;
     max-width: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-task-chip[data-state="running"] .status-task-spinner,
+  .status-task-chip[data-state="stopping"] .status-task-spinner {
+    animation: none;
   }
 }

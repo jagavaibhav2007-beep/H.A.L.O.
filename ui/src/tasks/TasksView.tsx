@@ -119,7 +119,10 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
   const stream = useHaloStore(selectStream(task.task_id));
   const logs = useHaloStore(selectTaskLogs(task.task_id));
   const busy = pending !== undefined;
-  const hasProgress = step != null && steps_total != null;
+  const hasProgress = step != null && steps_total != null && steps_total > 0;
+  const progressPercent = hasProgress
+    ? Math.min(100, Math.max(0, (step / steps_total) * 100))
+    : 0;
   const collapsed = state === "done";
   const terminal = state === "done" || state === "stopped" || state === "failed";
   const controlsLocked = terminal || state === "stopping";
@@ -138,7 +141,7 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
           {hasProgress && (
             <div className="task-progress">
               <div className="halo-meter task-progress-bar">
-                <span style={{ width: `${(step! / steps_total!) * 100}%` }} />
+                <span style={{ width: `${progressPercent}%` }} />
               </div>
               <span className="task-progress-text">{formatTaskProgress(task)}</span>
             </div>

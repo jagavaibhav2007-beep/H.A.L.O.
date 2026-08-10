@@ -6,13 +6,13 @@
 
 import { useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { Mic, MicOff } from "lucide-react";
+import { LoaderCircle, Mic, MicOff } from "lucide-react";
 import { Icon } from "../components/Icon";
 import { Chip } from "../components/Chip";
 import { Button } from "../components/Button";
 import {
   useHaloStore,
-  selectRunningTask,
+  selectActiveTask,
   selectVoice,
   selectCapabilities,
   selectTasks,
@@ -20,6 +20,7 @@ import {
 } from "../state/store";
 import { LANE_LABEL, LANE_ICON, formatTaskProgress } from "../lib/lanes";
 import { usePendingConfirm } from "../lib/usePendingConfirm";
+import type { TaskStateMsg } from "../ipc/contract";
 
 const MIC_LABEL: Record<string, string> = {
   idle: "Mic idle",
@@ -28,6 +29,17 @@ const MIC_LABEL: Record<string, string> = {
   thinking: "Thinking",
   speaking: "Speaking",
   muted: "Muted",
+};
+
+const TASK_STATE_LABEL: Record<TaskStateMsg["state"], string> = {
+  waiting: "Queued",
+  running: "Running",
+  stopping: "Stopping",
+  paused: "Paused",
+  waiting_approval: "Waiting for you",
+  stopped: "Stopped",
+  done: "Done",
+  failed: "Failed",
 };
 
 interface StatusStripProps {
@@ -40,7 +52,7 @@ interface HotkeyStatus {
 }
 
 export function StatusStrip({ sendTaskOp }: StatusStripProps) {
-  const runningTask = useHaloStore(selectRunningTask);
+  const activeTask = useHaloStore(selectActiveTask);
   const voice = useHaloStore(selectVoice);
   const capabilities = useHaloStore(selectCapabilities);
   const wsStatus = useHaloStore((state) => state.connection.wsStatus);
@@ -51,6 +63,8 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
   // Brain confirms via task_state (the task leaves "running" or vanishes) —
   // never optimistically.
   const [hotkeyNotice, setHotkeyNotice] = useState<string | null>(null);
+  const progress = activeTask ? formatTaskProgress(activeTask) : "";
+  const pendingStop = activeTask ? pending[activeTask.task_id] === "stopping" : false;
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -61,11 +75,11 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
 
   return (
     <div className="status-strip">
-      {runningTask && (
+      {activeTask && (
         <Chip
-          icon={LANE_ICON[runningTask.lane]}
-          label={LANE_LABEL[runningTask.lane]}
-          tone={runningTask.lane === 1 ? "primary" : "default"}
+          icon={LANE_ICON[activeTask.lane]}
+          label={LANE_LABEL[activeTask.lane]}
+          tone={activeTask.lane === 1 ? "primary" : "default"}
         />
       )}
       <span className="status-mic">
@@ -79,34 +93,54 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
         </span>
       </span>
       {hotkeyNotice && <span className="status-hotkey-note" role="status">{hotkeyNotice}</span>}
-      {runningTask && (
-        <div className="status-task-chip">
-          <span className="status-task-title">
-            {runningTask.title ?? "Working"}
-            {formatTaskProgress(runningTask) && ` · ${formatTaskProgress(runningTask)}`}
-          </span>
-          <Button
-            variant="destructive"
-            disabled={capabilities.taskControls !== true || pending[runningTask.task_id] !== undefined}
-            onClick={() => {
-              if (
-                begin(
-                  runningTask.task_id,
-                  "stopping",
-                  (value) => value == null || value.state === "done" || value.state === "failed",
-                  "task_op",
-                )
-              ) {
-                sendTaskOp("stop", runningTask.task_id);
-              }
-            }}
-            title={capabilities.taskControls === false ? "Task controls are not available in this build" : undefined}
+      {activeTask && (
+        <div className="status-task-group">
+          <div
+            className="status-task-chip"
+            data-state={pendingStop ? "stopping" : activeTask.state}
+            role="status"
+            aria-label="Task progress"
+            aria-live="polite"
+            aria-atomic="true"
           >
-            {pending[runningTask.task_id] === "stopping" ? "Stopping…" : "Stop"}
-          </Button>
-          {failures[runningTask.task_id] && (
+            <span className="status-task-spinner" aria-hidden="true">
+              <Icon icon={LoaderCircle} size={16} />
+            </span>
+            <span className="status-task-state">
+              {pendingStop ? "Stopping" : TASK_STATE_LABEL[activeTask.state]}
+            </span>
+            <span className="status-task-title">
+              {activeTask.title ?? "Working"}
+              {progress && ` · ${progress}`}
+            </span>
+          </div>
+          {activeTask.state !== "stopping" && (
+            <Button
+              variant="destructive"
+              disabled={capabilities.taskControls !== true || pending[activeTask.task_id] !== undefined}
+              onClick={() => {
+                if (
+                  begin(
+                    activeTask.task_id,
+                    "stopping",
+                    (value) => value == null
+                      || value.state === "stopped"
+                      || value.state === "done"
+                      || value.state === "failed",
+                    "task_op",
+                  )
+                ) {
+                  sendTaskOp("stop", activeTask.task_id);
+                }
+              }}
+              title={capabilities.taskControls === false ? "Task controls are not available in this build" : undefined}
+            >
+              {pendingStop ? "Stopping…" : "Stop"}
+            </Button>
+          )}
+          {failures[activeTask.task_id] && (
             <span className="status-task-error" role="alert">
-              {failures[runningTask.task_id]}
+              {failures[activeTask.task_id]}
             </span>
           )}
         </div>
