@@ -1,6 +1,6 @@
 # Batched Task Completion, Cancellation, and Work Feedback
 
-**Status:** Design approved on 2026-08-10; awaiting written-spec review.
+**Status:** Design and written specification approved on 2026-08-10.
 
 ## Objective
 
