@@ -44,6 +44,9 @@ test("detached work stays visible through cancellation", () => {
   const stopping = screen.getByRole("status", { name: "Task progress" });
   expect(stopping.textContent).toMatch(/Stopping.*Digest 9 documents.*step 3\/9/i);
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  const stoppingButton = screen.getByRole("button", { name: "Stopping…" }) as HTMLButtonElement;
+  expect(stoppingButton.disabled).toBe(false);
+  expect(stoppingButton.getAttribute("aria-disabled")).toBe("true");
 });
 
 test("active task priority keeps cancellation ahead of running and queued work", () => {

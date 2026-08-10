@@ -30,9 +30,14 @@
   transform: scale(var(--press-scale));
 }
 /* Disabled styling is part of the primitive, not per-consumer. */
-.halo-btn:disabled {
+.halo-btn:disabled,
+.halo-btn[aria-disabled="true"] {
   opacity: var(--disabled-opacity);
   cursor: default;
+}
+
+.halo-btn[aria-disabled="true"]:active {
+  transform: none;
 }
 
 .halo-btn-primary {

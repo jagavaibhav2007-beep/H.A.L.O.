@@ -69,6 +69,9 @@ test("stopping keeps progress visible without actionable controls", () => {
   expect(screen.getByText("Stopping")).toBeTruthy();
   expect(screen.getByText(/step 3\/9/i)).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  const stoppingButton = screen.getByRole("button", { name: "Stopping…" }) as HTMLButtonElement;
+  expect(stoppingButton.disabled).toBe(false);
+  expect(stoppingButton.getAttribute("aria-disabled")).toBe("true");
   expect((screen.getByRole("combobox", { name: "Lane" }) as HTMLSelectElement).disabled).toBe(true);
 });
 
@@ -102,7 +105,9 @@ test("Stop sends once, locks immediately, and follows authoritative states", () 
   fireEvent.click(stop);
   expect(sendTaskOp).toHaveBeenCalledTimes(1);
   expect(sendTaskOp).toHaveBeenCalledWith("stop", task.task_id);
-  expect((screen.getByRole("button", { name: "Stopping…" }) as HTMLButtonElement).disabled).toBe(true);
+  const stoppingButton = screen.getByRole("button", { name: "Stopping…" }) as HTMLButtonElement;
+  expect(stoppingButton.disabled).toBe(false);
+  expect(stoppingButton.getAttribute("aria-disabled")).toBe("true");
 
   act(() => {
     useHaloStore.setState({
@@ -110,7 +115,9 @@ test("Stop sends once, locks immediately, and follows authoritative states", () 
     });
   });
   expect(screen.getByText("Stopping")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /Stop/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  expect((screen.getByRole("button", { name: "Stopping…" }) as HTMLButtonElement).disabled).toBe(false);
+  expect(screen.getByRole("button", { name: "Stopping…" }).getAttribute("aria-disabled")).toBe("true");
 
   act(() => {
     useHaloStore.setState({

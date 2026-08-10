@@ -114,30 +114,30 @@ export function StatusStrip({ sendTaskOp }: StatusStripProps) {
               {progress && ` · ${progress}`}
             </span>
           </div>
-          {activeTask.state !== "stopping" && (
-            <Button
-              variant="destructive"
-              disabled={capabilities.taskControls !== true || pending[activeTask.task_id] !== undefined}
-              onClick={() => {
-                if (
-                  begin(
-                    activeTask.task_id,
-                    "stopping",
-                    (value) => value == null
-                      || value.state === "stopped"
-                      || value.state === "done"
-                      || value.state === "failed",
-                    "task_op",
-                  )
-                ) {
-                  sendTaskOp("stop", activeTask.task_id);
-                }
-              }}
-              title={capabilities.taskControls === false ? "Task controls are not available in this build" : undefined}
-            >
-              {pendingStop ? "Stopping…" : "Stop"}
-            </Button>
-          )}
+          <Button
+            variant="destructive"
+            disabled={capabilities.taskControls !== true}
+            aria-disabled={activeTask.state === "stopping" || pending[activeTask.task_id] !== undefined}
+            onClick={() => {
+              if (activeTask.state === "stopping" || pending[activeTask.task_id] !== undefined) return;
+              if (
+                begin(
+                  activeTask.task_id,
+                  "stopping",
+                  (value) => value == null
+                    || value.state === "stopped"
+                    || value.state === "done"
+                    || value.state === "failed",
+                  "task_op",
+                )
+              ) {
+                sendTaskOp("stop", activeTask.task_id);
+              }
+            }}
+            title={capabilities.taskControls === false ? "Task controls are not available in this build" : undefined}
+          >
+            {pendingStop || activeTask.state === "stopping" ? "Stopping…" : "Stop"}
+          </Button>
           {failures[activeTask.task_id] && (
             <span className="status-task-error" role="alert">
               {failures[activeTask.task_id]}

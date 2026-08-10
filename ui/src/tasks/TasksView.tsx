@@ -182,7 +182,7 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
             </pre>
           )}
 
-          {!controlsLocked && (
+          {!terminal && (
             <div className="task-actions">
               {(state === "running" || state === "waiting_approval") && (
                 <Button variant="ghost" disabled={busy || !controlsAvailable} onClick={() => op(task, "pause", "pausing")}>
@@ -196,9 +196,16 @@ function TaskCard({ task, pending, failure, controlsAvailable, op, pin }: CardPr
                   {pending === "resuming" ? "Resuming…" : "Resume"}
                 </Button>
               )}
-              <Button variant="destructive" disabled={busy || !controlsAvailable} onClick={() => op(task, "stop", "stopping")}>
+              <Button
+                variant="destructive"
+                disabled={!controlsAvailable}
+                aria-disabled={busy || state === "stopping"}
+                onClick={() => {
+                  if (!busy && state !== "stopping") op(task, "stop", "stopping");
+                }}
+              >
                 <Icon icon={Square} size={16} />
-                {pending === "stopping" ? "Stopping…" : "Stop"}
+                {pending === "stopping" || state === "stopping" ? "Stopping…" : "Stop"}
               </Button>
             </div>
           )}
